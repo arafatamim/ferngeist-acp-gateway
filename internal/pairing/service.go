@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/tamimarafat/ferngeist/desktop-helper/internal/storage"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/storage"
 )
 
 const (
@@ -31,18 +31,18 @@ var (
 	ErrCodeMismatch       = errors.New("pairing code mismatch")
 	ErrInvalidDeviceName  = errors.New("device name is required")
 	ErrDeviceNotFound     = errors.New("paired device not found")
-	ErrCredentialMissing  = errors.New("helper credential missing")
-	ErrCredentialInvalid  = errors.New("helper credential invalid")
-	ErrCredentialExpired  = errors.New("helper credential expired")
-	ErrCredentialScope    = errors.New("helper credential does not allow this operation")
+	ErrCredentialMissing  = errors.New("gateway credential missing")
+	ErrCredentialInvalid  = errors.New("gateway credential invalid")
+	ErrCredentialExpired  = errors.New("gateway credential expired")
+	ErrCredentialScope    = errors.New("gateway credential does not allow this operation")
 	ErrPairingNotArmed    = errors.New("pairing requires local approval")
 )
 
 const (
-	ScopeRead              = "helper.read"
-	ScopeControl           = "helper.control"
-	ScopeDiagnosticsExport = "helper.diagnostics.export"
-	ScopeRuntimeRestartEnv = "helper.runtime.restart_env"
+	ScopeRead              = "gateway.read"
+	ScopeControl           = "gateway.control"
+	ScopeDiagnosticsExport = "gateway.diagnostics.export"
+	ScopeRuntimeRestartEnv = "gateway.runtime.restart_env"
 )
 
 type ChallengeState string
@@ -91,9 +91,9 @@ type challengeRecord struct {
 	stateChangedAt  time.Time
 }
 
-// Service manages helper-local trust bootstrap. Pairing challenges are
+// Service manages gateway-local trust bootstrap. Pairing challenges are
 // short-lived and in-memory; issued device credentials can be reloaded from
-// SQLite so the helper survives restarts.
+// SQLite so the gateway survives restarts.
 type Service struct {
 	logger      *slog.Logger
 	mu          sync.Mutex
@@ -234,7 +234,7 @@ func (s *Service) CancelChallenge(challengeID string) (ChallengeStatus, error) {
 
 // CompletePairing exchanges a valid short-lived challenge for a longer-lived
 // device credential. Clients may provide either a challenge ID plus code, or a
-// code alone when the helper has displayed a short code separately from the QR
+// code alone when the gateway has displayed a short code separately from the QR
 // payload. Code-only completion succeeds only when that code resolves to a
 // single active challenge.
 func (s *Service) CompletePairing(challengeID, code, deviceName string) (Credential, error) {
@@ -338,7 +338,7 @@ func (s *Service) ActiveDeviceCount() int {
 	return len(s.credentials)
 }
 
-// ValidateCredential is a simple token lookup because helper-issued device
+// ValidateCredential is a simple token lookup because gateway-issued device
 // credentials are already random opaque tokens scoped to this daemon.
 func (s *Service) ValidateCredential(token string) (Credential, error) {
 	if token == "" {
@@ -526,7 +526,7 @@ func (r challengeRecord) toStatus() ChallengeStatus {
 	}
 }
 
-// loadPersistedCredentials restores still-valid helper credentials so paired
+// loadPersistedCredentials restores still-valid gateway credentials so paired
 // devices are not forced to re-pair after every daemon restart.
 func (s *Service) loadPersistedCredentials() {
 	if s.store == nil {

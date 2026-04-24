@@ -1,4 +1,4 @@
-module github.com/tamimarafat/ferngeist/desktop-helper
+module github.com/arafatamim/ferngeist-acp-gateway
 
 go 1.26.0
 

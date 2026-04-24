@@ -14,11 +14,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/tamimarafat/ferngeist/desktop-helper/internal/catalog"
-	"github.com/tamimarafat/ferngeist/desktop-helper/internal/storage"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/catalog"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/storage"
 )
 
-// Installer acquires trusted registry-backed binaries into a helper-managed
+// Installer acquires trusted registry-backed binaries into a gateway-managed
 // install root so launch stays uniform after the first install.
 type Installer struct {
 	logger     *slog.Logger
@@ -72,7 +72,7 @@ func (i *Installer) Ensure(ctx context.Context, agent catalog.Agent) (catalog.Ag
 		return agent, false, err
 	}
 
-	tmpFile, err := os.CreateTemp("", "ferngeist-helper-download-*")
+	tmpFile, err := os.CreateTemp("", "ferngeist-gateway-download-*")
 	if err != nil {
 		return agent, false, err
 	}

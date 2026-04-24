@@ -21,7 +21,7 @@ const (
 	defaultInstallPort = 5788
 )
 
-const linuxUnitName = "ferngeist-daemon.service"
+const linuxUnitName = "ferngeist-gateway.service"
 
 type Status struct {
 	Installed     bool

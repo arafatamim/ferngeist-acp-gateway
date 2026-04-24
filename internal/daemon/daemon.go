@@ -9,20 +9,20 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/tamimarafat/ferngeist/desktop-helper/internal/acquire"
-	"github.com/tamimarafat/ferngeist/desktop-helper/internal/api"
-	"github.com/tamimarafat/ferngeist/desktop-helper/internal/catalog"
-	"github.com/tamimarafat/ferngeist/desktop-helper/internal/config"
-	"github.com/tamimarafat/ferngeist/desktop-helper/internal/discovery"
-	"github.com/tamimarafat/ferngeist/desktop-helper/internal/gateway"
-	"github.com/tamimarafat/ferngeist/desktop-helper/internal/logging"
-	"github.com/tamimarafat/ferngeist/desktop-helper/internal/pairing"
-	acpregistry "github.com/tamimarafat/ferngeist/desktop-helper/internal/registry"
-	helperruntime "github.com/tamimarafat/ferngeist/desktop-helper/internal/runtime"
-	"github.com/tamimarafat/ferngeist/desktop-helper/internal/storage"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/acquire"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/api"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/catalog"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/config"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/discovery"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/gateway"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/logging"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/pairing"
+	acpregistry "github.com/arafatamim/ferngeist-acp-gateway/internal/registry"
+	gatewayruntime "github.com/arafatamim/ferngeist-acp-gateway/internal/runtime"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/storage"
 )
 
-// Run boots the full helper daemon and blocks until the context is cancelled or
+// Run boots the full gateway daemon and blocks until the context is cancelled or
 // one of the HTTP surfaces exits unexpectedly.
 func Run(ctx context.Context, build api.BuildInfo) error {
 	cfg := config.Load()
@@ -46,7 +46,7 @@ func Run(ctx context.Context, build api.BuildInfo) error {
 	registryClient := acpregistry.New(cfg.RegistryURL, 6*time.Hour)
 	catalogSvc := catalog.NewWithBaseDirAndRegistry(".", registryClient)
 	installer := acquire.New(logger, cfg.ManagedBinDir, store)
-	runtimeSvc := helperruntime.NewSupervisorWithBaseDirAndInstaller(logger, ".", store, installer)
+	runtimeSvc := gatewayruntime.NewSupervisorWithBaseDirAndInstaller(logger, ".", store, installer)
 	pairingSvc := pairing.NewServiceWithOptions(logger, store, pairing.Options{
 		ArmTTL:                 cfg.PairingArmTTL,
 		CredentialTTL:          cfg.CredentialTTL,
@@ -59,7 +59,7 @@ func Run(ctx context.Context, build api.BuildInfo) error {
 	if cfg.EnableLAN {
 		if _, portText, err := net.SplitHostPort(cfg.ListenAddr); err == nil {
 			if port, parseErr := net.LookupPort("tcp", portText); parseErr == nil {
-				if err := discoverySvc.Start(cfg.HelperName, port, DiscoveryTXTRecords(cfg, pairingSvc.ActiveDeviceCount())); err != nil {
+				if err := discoverySvc.Start(cfg.GatewayName, port, DiscoveryTXTRecords(cfg, pairingSvc.ActiveDeviceCount())); err != nil {
 					logger.Warn("mdns discovery unavailable", slog.String("error", err.Error()))
 				}
 			}
@@ -80,7 +80,7 @@ func Run(ctx context.Context, build api.BuildInfo) error {
 		registryClient,
 	)
 
-	logger.Info("starting helper daemon",
+	logger.Info("starting gateway daemon",
 		slog.String("listen_addr", cfg.ListenAddr),
 		slog.String("admin_listen_addr", cfg.AdminListenAddr),
 		slog.Bool("lan_enabled", cfg.EnableLAN),
@@ -110,7 +110,7 @@ func Run(ctx context.Context, build api.BuildInfo) error {
 		return fmt.Errorf("runtime shutdown failed: %w", err)
 	}
 
-	logger.Info("helper daemon stopped")
+	logger.Info("gateway daemon stopped")
 	return nil
 }
 
@@ -118,8 +118,8 @@ func Run(ctx context.Context, build api.BuildInfo) error {
 // Android can make fast pairing decisions without another round-trip.
 func DiscoveryTXTRecords(cfg config.Config, pairedDeviceCount int) []string {
 	return []string{
-		"helper_name=" + cfg.HelperName,
-		"helper_version=dev",
+		"gateway_name=" + cfg.GatewayName,
+		"gateway_version=dev",
 		"protocol_version=v1alpha1",
 		fmt.Sprintf("pairing_required=%t", pairedDeviceCount == 0),
 	}
@@ -129,27 +129,27 @@ func DiscoveryTXTRecords(cfg config.Config, pairedDeviceCount int) []string {
 // still letting process-level environment variables win for local debugging and
 // packaged deployments.
 func ApplyPersistedSettings(logger *slog.Logger, store *storage.SQLiteStore, cfg config.Config) config.Config {
-	record, err := store.GetHelperSettings(context.Background())
+	record, err := store.GetGatewaySettings(context.Background())
 	if err == nil {
 		enableLAN := record.EnableLAN
 		return cfg.ApplyPersistedSettings(config.PersistedSettings{
 			RegistryURL:   record.RegistryURL,
 			PublicBaseURL: record.PublicBaseURL,
 			EnableLAN:     &enableLAN,
-			HelperName:    record.HelperName,
+			GatewayName:   record.GatewayName,
 		})
 	}
 	if !errors.Is(err, storage.ErrNotFound) {
-		logger.Warn("failed to load helper settings", slog.String("error", err.Error()))
+		logger.Warn("failed to load gateway settings", slog.String("error", err.Error()))
 	}
 
-	if err := store.SaveHelperSettings(context.Background(), storage.HelperSettingsRecord{
+	if err := store.SaveGatewaySettings(context.Background(), storage.GatewaySettingsRecord{
 		RegistryURL:   cfg.RegistryURL,
 		PublicBaseURL: cfg.PublicBaseURL,
 		EnableLAN:     cfg.EnableLAN,
-		HelperName:    cfg.HelperName,
+		GatewayName:   cfg.GatewayName,
 	}); err != nil {
-		logger.Warn("failed to seed helper settings", slog.String("error", err.Error()))
+		logger.Warn("failed to seed gateway settings", slog.String("error", err.Error()))
 	}
 	return cfg
 }

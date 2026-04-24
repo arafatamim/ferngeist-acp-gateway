@@ -15,7 +15,7 @@ import (
 	"strings"
 	"unicode"
 
-	acpregistry "github.com/tamimarafat/ferngeist/desktop-helper/internal/registry"
+	acpregistry "github.com/arafatamim/ferngeist-acp-gateway/internal/registry"
 )
 
 var ErrAgentNotFound = errors.New("agent not found")
@@ -25,8 +25,8 @@ const mockAgentExecutablePlaceholder = "__MOCK_AGENT_EXECUTABLE__"
 //go:embed manifests/*.json
 var embeddedManifestFS embed.FS
 
-// Agent is one helper-visible ACP runtime entry. Entries may come from bundled
-// helper-owned manifests (such as the mock runtime) or be synthesized directly
+// Agent is one gateway-visible ACP runtime entry. Entries may come from bundled
+// gateway-owned manifests (such as the mock runtime) or be synthesized directly
 // from the ACP registry when the registry provides a supported launch method.
 type Agent struct {
 	ID              string            `json:"id"`
@@ -101,7 +101,7 @@ type RegistryInfo struct {
 }
 
 // registryLaunchPlan is the catalog's single source of truth for how an ACP
-// registry entry should run on the current host. The helper synthesizes this
+// registry entry should run on the current host. The gateway synthesizes this
 // once from the raw registry record and then carries the chosen launch through
 // the rest of the catalog pipeline via Agent.
 type registryLaunchPlan struct {
@@ -120,7 +120,7 @@ type Service struct {
 	registry RegistrySource
 }
 
-// New returns the default helper catalog rooted at the current working
+// New returns the default gateway catalog rooted at the current working
 // directory.
 func New() *Service {
 	return NewWithBaseDirAndRegistry(".", nil)
@@ -206,7 +206,7 @@ func (s *Service) Get(id string) (Agent, error) {
 }
 
 // Refresh revalidates built-in manifests, merges ACP registry metadata, and
-// then reruns host detection. The helper does this eagerly because the catalog
+// then reruns host detection. The gateway does this eagerly because the catalog
 // is small and the API should reflect current host state.
 func (s *Service) Refresh() {
 	registrySnapshot, registryErr, registryEnabled := s.loadRegistry()
@@ -306,7 +306,7 @@ func detectUvxPackage(pkg string) bool {
 }
 
 // validateAgent enforces the "curated launch only" boundary. This is where the
-// helper rejects manifests that would drift into arbitrary command execution or
+// gateway rejects manifests that would drift into arbitrary command execution or
 // unsupported transport combinations.
 func validateAgent(agent Agent) error {
 	if strings.TrimSpace(agent.ID) == "" {
@@ -370,7 +370,7 @@ func validateDetection(detection DetectionConfig) error {
 	return nil
 }
 
-// validateLaunch keeps launch templates intentionally narrow. The helper should
+// validateLaunch keeps launch templates intentionally narrow. The gateway should
 // not accept shell fragments or transport-specific fields that do not match the
 // declared launch mode.
 func validateLaunch(launch LaunchConfig) error {
@@ -603,7 +603,7 @@ func registryEntryToAgent(entry acpregistry.AgentEntry) Agent {
 		agent.Security.AllowsRemoteStart = true
 	}
 	if agent.Security.AllowsRemoteStart {
-		agent.Hint = "Detected from the ACP registry and launchable with the helper's generic ACP runtime policy."
+		agent.Hint = "Detected from the ACP registry and launchable with the gateway's generic ACP runtime policy."
 	} else {
 		agent.Hint = "Detected from the ACP registry, but no supported launch distribution is available yet."
 	}
@@ -634,7 +634,7 @@ func registryInfoFromEntry(entry acpregistry.AgentEntry) RegistryInfo {
 }
 
 // applyRegistryInfo enriches an agent with ACP registry metadata. When a local
-// helper-owned manifest exists, the registry augments it. Otherwise, registry
+// gateway-owned manifest exists, the registry augments it. Otherwise, registry
 // entries stand on their own as long as they provide a supported launch method.
 func applyRegistryInfo(agent Agent, base RegistryInfo, snapshot acpregistry.Snapshot, registryErr error, registryEnabled bool, agentID string) (Agent, RegistryInfo) {
 	if !base.Required {
@@ -696,7 +696,7 @@ func synthesizeRegistryLaunch(agent Agent, plan registryLaunchPlan) Agent {
 	return agent
 }
 
-// buildRegistryLaunchPlan picks the helper launch strategy for a registry entry
+// buildRegistryLaunchPlan picks the gateway launch strategy for a registry entry
 // in host-aware order: npx, uvx, PATH binary, then downloadable binary.
 func buildRegistryLaunchPlan(entry acpregistry.AgentEntry) registryLaunchPlan {
 	if detectNpxPackage(entry.NpxPackage) {

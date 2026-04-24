@@ -48,11 +48,11 @@ type RuntimeFailureRecord struct {
 	LogPreview string
 }
 
-type HelperSettingsRecord struct {
+type GatewaySettingsRecord struct {
 	RegistryURL   string
 	PublicBaseURL string
 	EnableLAN     bool
-	HelperName    string
+	GatewayName   string
 }
 
 type AcquiredBinaryRecord struct {
@@ -63,15 +63,15 @@ type AcquiredBinaryRecord struct {
 	InstalledAt time.Time
 }
 
-// SQLiteStore is the helper's only durable state store. It is intentionally
-// limited to pairings, helper settings, runtime metadata, runtime tokens, and
+// SQLiteStore is the gateway's only durable state store. It is intentionally
+// limited to pairings, gateway settings, runtime metadata, runtime tokens, and
 // recent failures.
 type SQLiteStore struct {
 	db *sql.DB
 }
 
 // Open initializes the SQLite database and applies idempotent schema
-// migrations before the helper starts serving requests.
+// migrations before the gateway starts serving requests.
 func Open(path string) (*SQLiteStore, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -355,20 +355,20 @@ func (s *SQLiteStore) SaveRuntimeFailure(ctx context.Context, record RuntimeFail
 	return err
 }
 
-func (s *SQLiteStore) SaveHelperSettings(ctx context.Context, record HelperSettingsRecord) error {
+func (s *SQLiteStore) SaveGatewaySettings(ctx context.Context, record GatewaySettingsRecord) error {
 	_, err := s.db.ExecContext(
 		ctx,
-		`INSERT INTO helper_settings(settings_key, registry_url, public_base_url, enable_lan, helper_name)
+		`INSERT INTO gateway_settings(settings_key, registry_url, public_base_url, enable_lan, gateway_name)
 		 VALUES ('default', ?, ?, ?, ?)
 		 ON CONFLICT(settings_key) DO UPDATE SET
 		   registry_url = excluded.registry_url,
 		   public_base_url = excluded.public_base_url,
 		   enable_lan = excluded.enable_lan,
-		   helper_name = excluded.helper_name`,
+		   gateway_name = excluded.gateway_name`,
 		record.RegistryURL,
 		record.PublicBaseURL,
 		boolToSQLiteInt(record.EnableLAN),
-		record.HelperName,
+		record.GatewayName,
 	)
 	return err
 }
@@ -419,23 +419,23 @@ func (s *SQLiteStore) GetAcquiredBinary(ctx context.Context, agentID string) (Ac
 	return record, nil
 }
 
-func (s *SQLiteStore) GetHelperSettings(ctx context.Context) (HelperSettingsRecord, error) {
+func (s *SQLiteStore) GetGatewaySettings(ctx context.Context) (GatewaySettingsRecord, error) {
 	row := s.db.QueryRowContext(
 		ctx,
-		`SELECT registry_url, public_base_url, enable_lan, helper_name
-		 FROM helper_settings
+		`SELECT registry_url, public_base_url, enable_lan, gateway_name
+		 FROM gateway_settings
 		 WHERE settings_key = 'default'`,
 	)
 
 	var (
-		record    HelperSettingsRecord
+		record    GatewaySettingsRecord
 		enableLAN int
 	)
-	if err := row.Scan(&record.RegistryURL, &record.PublicBaseURL, &enableLAN, &record.HelperName); err != nil {
+	if err := row.Scan(&record.RegistryURL, &record.PublicBaseURL, &enableLAN, &record.GatewayName); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return HelperSettingsRecord{}, ErrNotFound
+			return GatewaySettingsRecord{}, ErrNotFound
 		}
-		return HelperSettingsRecord{}, err
+		return GatewaySettingsRecord{}, err
 	}
 	record.EnableLAN = enableLAN != 0
 	return record, nil
@@ -492,7 +492,7 @@ func (s *SQLiteStore) ListRecentRuntimeFailures(ctx context.Context, limit int) 
 	return records, rows.Err()
 }
 
-// migrate is intentionally append-only and idempotent because the helper is a
+// migrate is intentionally append-only and idempotent because the gateway is a
 // local daemon, not a service with a heavyweight migration framework.
 func (s *SQLiteStore) migrate(ctx context.Context) error {
 	statements := []string{
@@ -535,12 +535,12 @@ func (s *SQLiteStore) migrate(ctx context.Context) error {
 			failed_at TEXT NOT NULL,
 			log_preview TEXT NOT NULL DEFAULT ''
 		)`,
-		`CREATE TABLE IF NOT EXISTS helper_settings (
+		`CREATE TABLE IF NOT EXISTS gateway_settings (
 			settings_key TEXT PRIMARY KEY,
 			registry_url TEXT NOT NULL DEFAULT '',
 			public_base_url TEXT NOT NULL DEFAULT '',
 			enable_lan INTEGER NOT NULL DEFAULT 0,
-			helper_name TEXT NOT NULL DEFAULT ''
+			gateway_name TEXT NOT NULL DEFAULT ''
 		)`,
 		`CREATE TABLE IF NOT EXISTS acquired_binaries (
 			agent_id TEXT PRIMARY KEY,
@@ -556,6 +556,7 @@ func (s *SQLiteStore) migrate(ctx context.Context) error {
 			return err
 		}
 	}
+
 	return nil
 }
 

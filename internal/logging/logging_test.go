@@ -7,7 +7,7 @@ import (
 )
 
 func TestServiceTailLinesReadsAcrossRotations(t *testing.T) {
-	service, err := NewService(t.TempDir(), "helper.log", 120, 2)
+	service, err := NewService(t.TempDir(), "gateway.log", 120, 2)
 	if err != nil {
 		t.Fatalf("NewService() error = %v", err)
 	}

@@ -13,11 +13,11 @@ import (
 	"time"
 
 	qrterminal "github.com/mdp/qrterminal/v3"
-	"github.com/tamimarafat/ferngeist/desktop-helper/internal/adminclient"
-	"github.com/tamimarafat/ferngeist/desktop-helper/internal/api"
-	"github.com/tamimarafat/ferngeist/desktop-helper/internal/config"
-	"github.com/tamimarafat/ferngeist/desktop-helper/internal/daemon"
-	"github.com/tamimarafat/ferngeist/desktop-helper/internal/service"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/adminclient"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/api"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/config"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/daemon"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/service"
 	"github.com/urfave/cli/v3"
 )
 
@@ -29,8 +29,8 @@ var (
 
 func main() {
 	command := &cli.Command{
-		Name:  "ferngeist",
-		Usage: "manage the Ferngeist desktop helper",
+		Name:  "ferngeist-gateway",
+		Usage: "manage the Ferngeist gateway daemon",
 		Flags: []cli.Flag{
 			&cli.BoolFlag{
 				Name:    "version",
@@ -49,7 +49,7 @@ func main() {
 		Commands: []*cli.Command{
 			{
 				Name:  "daemon",
-				Usage: "run the helper daemon",
+				Usage: "run the gateway daemon",
 				Action: func(_ context.Context, cmd *cli.Command) error {
 					cli.ShowSubcommandHelp(cmd)
 					return nil
@@ -57,19 +57,19 @@ func main() {
 				Commands: []*cli.Command{
 					{
 						Name:  "run",
-						Usage: "run the helper daemon in the foreground",
+						Usage: "run the gateway daemon in the foreground",
 						Flags: []cli.Flag{
 							&cli.BoolFlag{
 								Name:  "lan",
-								Usage: "expose the helper on the local network",
+								Usage: "expose the gateway on the local network",
 							},
 							&cli.StringFlag{
 								Name:  "listen-addr",
-								Usage: "override the helper public API listen address",
+								Usage: "override the gateway public API listen address",
 							},
 							&cli.StringFlag{
 								Name:  "public-base-url",
-								Usage: "advertise a public helper URL for pairing",
+								Usage: "advertise a public gateway URL for pairing",
 							},
 						},
 						Action: func(_ context.Context, cmd *cli.Command) error {
@@ -173,7 +173,7 @@ func main() {
 						ArgsUsage: "<device-id>",
 						Action: func(_ context.Context, cmd *cli.Command) error {
 							if cmd.Args().Len() != 1 {
-								return fmt.Errorf("usage: ferngeist devices revoke <device-id>")
+								return fmt.Errorf("usage: ferngeist-gateway devices revoke <device-id>")
 							}
 							return runDevicesRevoke(cmd.Args().First())
 						},
@@ -205,18 +205,18 @@ func runDaemon(enableLAN bool, listenAddr string, publicBaseURL string) error {
 
 func applyDaemonRunOverrides(enableLAN bool, listenAddr string, publicBaseURL string) {
 	if enableLAN {
-		_ = os.Setenv("FERNGEIST_HELPER_ENABLE_LAN", "1")
+		_ = os.Setenv("FERNGEIST_GATEWAY_ENABLE_LAN", "1")
 		if strings.TrimSpace(listenAddr) == "" {
-			if _, hasListenAddr := os.LookupEnv("FERNGEIST_HELPER_LISTEN_ADDR"); !hasListenAddr {
+			if _, hasListenAddr := os.LookupEnv("FERNGEIST_GATEWAY_LISTEN_ADDR"); !hasListenAddr {
 				listenAddr = "0.0.0.0:5788"
 			}
 		}
 	}
 	if strings.TrimSpace(listenAddr) != "" {
-		_ = os.Setenv("FERNGEIST_HELPER_LISTEN_ADDR", strings.TrimSpace(listenAddr))
+		_ = os.Setenv("FERNGEIST_GATEWAY_LISTEN_ADDR", strings.TrimSpace(listenAddr))
 	}
 	if strings.TrimSpace(publicBaseURL) != "" {
-		_ = os.Setenv("FERNGEIST_HELPER_PUBLIC_BASE_URL", strings.TrimSpace(publicBaseURL))
+		_ = os.Setenv("FERNGEIST_GATEWAY_PUBLIC_BASE_URL", strings.TrimSpace(publicBaseURL))
 	}
 }
 

@@ -21,7 +21,7 @@ func TestSQLiteStorePersistsPairingsAndRuntimes(t *testing.T) {
 		DeviceName:     "Pixel 9",
 		Token:          "token-1",
 		ExpiresAt:      expiresAt,
-		Scopes:         []string{"helper.read", "helper.control"},
+		Scopes:         []string{"gateway.read", "gateway.control"},
 		ProofPublicKey: "proof-key-1",
 	}); err != nil {
 		t.Fatalf("SavePairing() error = %v", err)
@@ -76,7 +76,7 @@ func TestSQLiteStorePersistsPairingsAndRuntimes(t *testing.T) {
 		DeviceName:     "Pixel 9",
 		Token:          "token-1",
 		ExpiresAt:      expiresAt,
-		Scopes:         []string{"helper.read"},
+		Scopes:         []string{"gateway.read"},
 		ProofPublicKey: "proof-key-2",
 	}); err != nil {
 		t.Fatalf("SavePairing() after delete error = %v", err)
@@ -148,18 +148,18 @@ func TestSQLiteStorePersistsPairingsAndRuntimes(t *testing.T) {
 		t.Fatalf("failures[0].LastError = %q", failures[0].LastError)
 	}
 
-	if err := store.SaveHelperSettings(ctx, HelperSettingsRecord{
+	if err := store.SaveGatewaySettings(ctx, GatewaySettingsRecord{
 		RegistryURL:   "https://stored.example/registry.json",
 		PublicBaseURL: "https://helper.example.com",
 		EnableLAN:     true,
-		HelperName:    "workstation",
+		GatewayName:    "workstation",
 	}); err != nil {
-		t.Fatalf("SaveHelperSettings() error = %v", err)
+		t.Fatalf("SaveGatewaySettings() error = %v", err)
 	}
 
-	settings, err := store.GetHelperSettings(ctx)
+	settings, err := store.GetGatewaySettings(ctx)
 	if err != nil {
-		t.Fatalf("GetHelperSettings() error = %v", err)
+		t.Fatalf("GetGatewaySettings() error = %v", err)
 	}
 	if settings.RegistryURL != "https://stored.example/registry.json" {
 		t.Fatalf("settings.RegistryURL = %q", settings.RegistryURL)
@@ -170,14 +170,14 @@ func TestSQLiteStorePersistsPairingsAndRuntimes(t *testing.T) {
 	if !settings.EnableLAN {
 		t.Fatal("settings.EnableLAN should be true")
 	}
-	if settings.HelperName != "workstation" {
-		t.Fatalf("settings.HelperName = %q", settings.HelperName)
+	if settings.GatewayName != "workstation" {
+		t.Fatalf("settings.GatewayName = %q", settings.GatewayName)
 	}
 
 	if err := store.SaveAcquiredBinary(ctx, AcquiredBinaryRecord{
 		AgentID:     "codex-acp",
 		Version:     "0.10.0",
-		Path:        "C:/Users/test/AppData/Local/FerngeistHelper/bin/codex-acp.exe",
+		Path:        "C:/Users/test/AppData/Local/FerngeistGateway/bin/codex-acp.exe",
 		ArchiveURL:  "https://example.com/codex.zip",
 		InstalledAt: time.Date(2026, 3, 25, 10, 7, 0, 0, time.UTC),
 	}); err != nil {
@@ -188,7 +188,7 @@ func TestSQLiteStorePersistsPairingsAndRuntimes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetAcquiredBinary() error = %v", err)
 	}
-	if acquired.Path != "C:/Users/test/AppData/Local/FerngeistHelper/bin/codex-acp.exe" {
+	if acquired.Path != "C:/Users/test/AppData/Local/FerngeistGateway/bin/codex-acp.exe" {
 		t.Fatalf("acquired.Path = %q", acquired.Path)
 	}
 }

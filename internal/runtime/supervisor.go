@@ -21,9 +21,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/tamimarafat/ferngeist/desktop-helper/internal/acquire"
-	"github.com/tamimarafat/ferngeist/desktop-helper/internal/catalog"
-	"github.com/tamimarafat/ferngeist/desktop-helper/internal/storage"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/acquire"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/catalog"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/storage"
 )
 
 // connectTokenTTL defines how long a generated bearer token remains valid
@@ -44,8 +44,8 @@ var (
 	ErrAgentNotDetected = errors.New("agent is not detected on this host")
 
 	// ErrRemoteStartNotAllowed is returned when the agent's security policy
-	// explicitly forbids the helper from launching it remotely.
-	ErrRemoteStartNotAllowed = errors.New("agent does not allow helper-managed remote start")
+	// explicitly forbids the gateway from launching it remotely.
+	ErrRemoteStartNotAllowed = errors.New("agent does not allow gateway-managed remote start")
 
 	// ErrUnsupportedLaunch is returned when the launch mode (e.g., container, VM)
 	// is not yet implemented by the supervisor.
@@ -89,7 +89,7 @@ const (
 	StatusFailed = "failed"
 )
 
-// Runtime is the helper-owned view of a launched agent process plus the
+// Runtime is the gateway-owned view of a launched agent process plus the
 // transport metadata needed to hand an ACP session back to Ferngeist.
 type Runtime struct {
 	ID              string    `json:"id"`
@@ -113,12 +113,12 @@ type Runtime struct {
 }
 
 // LogEntry represents a single line of output from a runtime process,
-// tagged with a timestamp and stream type (stdout, stderr, or helper).
+// tagged with a timestamp and stream type (stdout, stderr, or gateway).
 type LogEntry struct {
 	// Timestamp is when this log entry was captured in UTC.
 	Timestamp time.Time `json:"timestamp"`
 
-	// Stream identifies the source of the log line (e.g., "stdout", "stderr", "helper").
+	// Stream identifies the source of the log line (e.g., "stdout", "stderr", "gateway").
 	Stream string `json:"stream"`
 
 	// Message is the actual log line content.
@@ -197,7 +197,7 @@ type ConnectDescriptor struct {
 	TokenExpiresAt time.Time `json:"tokenExpiresAt"`
 }
 
-// Supervisor owns the full runtime lifecycle for helper-managed agents. It is
+// Supervisor owns the full runtime lifecycle for gateway-managed agents. It is
 // intentionally the single place that knows how manifests turn into processes,
 // readiness checks, restart behavior, and diagnostic state.
 //
@@ -563,7 +563,7 @@ func (s *Supervisor) Restart(runtimeID string, envVars map[string]string) (Runti
 	// Log the successful restart for diagnostics
 	s.appendLog(restarted.ID, LogEntry{
 		Timestamp: s.now().UTC(),
-		Stream:    "helper",
+		Stream:    "gateway",
 		Message:   fmt.Sprintf("runtime restarted from %s with updated environment", runtimeID),
 	})
 	return restarted, nil
@@ -734,7 +734,7 @@ func (s *Supervisor) Connect(runtimeID string) (ConnectDescriptor, error) {
 }
 
 // AttachStdio hands out exclusive access to a stdio runtime because ACP over
-// stdio is a single-client stream in this helper. The returned release func
+// stdio is a single-client stream in this gateway. The returned release func
 // must be called when the bridge is torn down.
 func (s *Supervisor) AttachStdio(runtimeID string) (io.WriteCloser, io.ReadCloser, func(), error) {
 	s.mu.Lock()
@@ -794,7 +794,7 @@ func (s *Supervisor) Logs(runtimeID string) ([]LogEntry, error) {
 	return out, nil
 }
 
-// AppendLog records helper-observed ACP traffic or lifecycle messages using the
+// AppendLog records gateway-observed ACP traffic or lifecycle messages using the
 // same bounded in-memory buffer returned by the runtime log endpoints.
 func (s *Supervisor) AppendLog(runtimeID, stream, message string) {
 	if strings.TrimSpace(runtimeID) == "" {
@@ -1008,7 +1008,7 @@ func (s *Supervisor) handleProcessExit(runtimeID, agentID string, handle *proces
 		s.persistRuntime(runtime)
 		s.appendLog(runtimeID, LogEntry{
 			Timestamp: s.now().UTC(),
-			Stream:    "helper",
+			Stream:    "gateway",
 			Message:   fmt.Sprintf("restart scheduled after failure: %s", handle.waitErr.Error()),
 		})
 		// Restart in background with backoff delay
@@ -1034,7 +1034,7 @@ func (s *Supervisor) handleProcessExit(runtimeID, agentID string, handle *proces
 		if runtime.CircuitOpen {
 			s.appendLog(runtimeID, LogEntry{
 				Timestamp: s.now().UTC(),
-				Stream:    "helper",
+				Stream:    "gateway",
 				Message:   "restart limit reached; circuit opened",
 			})
 		}
@@ -1080,7 +1080,7 @@ func (s *Supervisor) restartAfterBackoff(runtimeInfo Runtime, agent catalog.Agen
 	if err == nil {
 		s.appendLog(restarted.ID, LogEntry{
 			Timestamp: s.now().UTC(),
-			Stream:    "helper",
+			Stream:    "gateway",
 			Message:   fmt.Sprintf("runtime restarted successfully (attempt %d)", restarted.RestartAttempts),
 		})
 		return
@@ -1275,7 +1275,7 @@ func failureSummaryFromRecord(record storage.RuntimeFailureRecord) FailureSummar
 			// Provide a sentinel error if deserialization fails
 			logLines = []LogEntry{{
 				Timestamp: record.FailedAt,
-				Stream:    "helper",
+				Stream:    "gateway",
 				Message:   "failed to decode persisted log preview",
 			}}
 		}
@@ -1293,7 +1293,7 @@ func failureSummaryFromRecord(record storage.RuntimeFailureRecord) FailureSummar
 }
 
 // persistFailure stores a small failure summary instead of raw transcript or
-// full logs. That keeps the helper useful for debugging without turning SQLite
+// full logs. That keeps the gateway useful for debugging without turning SQLite
 // into a session store.
 func (s *Supervisor) persistFailure(runtimeID string, runtime Runtime, logLines []LogEntry, failedAt time.Time) {
 	if s.store == nil {

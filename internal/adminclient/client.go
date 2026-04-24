@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/tamimarafat/ferngeist/desktop-helper/internal/config"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/config"
 )
 
 type Client struct {

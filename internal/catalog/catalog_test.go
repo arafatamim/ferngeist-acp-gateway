@@ -8,7 +8,7 @@ import (
 	goruntime "runtime"
 	"testing"
 
-	acpregistry "github.com/tamimarafat/ferngeist/desktop-helper/internal/registry"
+	acpregistry "github.com/arafatamim/ferngeist-acp-gateway/internal/registry"
 )
 
 func TestLoadEmbeddedAgents(t *testing.T) {

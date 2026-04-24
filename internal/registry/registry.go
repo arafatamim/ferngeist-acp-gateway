@@ -15,7 +15,7 @@ import (
 
 const DefaultURL = "https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json"
 
-// AgentEntry is the normalized subset of the ACP registry the helper cares
+// AgentEntry is the normalized subset of the ACP registry the gateway cares
 // about: identity, distribution kinds, and the current platform's binary data.
 type AgentEntry struct {
 	ID                string
@@ -147,7 +147,7 @@ func (c *Client) Status() Status {
 }
 
 // refresh performs the actual registry fetch and normalization. The rest of the
-// helper only consumes the smaller Snapshot shape produced here.
+// gateway only consumes the smaller Snapshot shape produced here.
 func (c *Client) refresh(ctx context.Context) (Snapshot, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.url, nil)
 	if err != nil {
@@ -224,7 +224,7 @@ func (c *Client) recordError(err error) {
 }
 
 // parseBinaryTargets tolerates partial or unknown registry content by returning
-// only the helper-relevant binary launch metadata.
+// only the gateway-relevant binary launch metadata.
 func parseBinaryTargets(raw json.RawMessage) map[string]BinaryTarget {
 	if len(raw) == 0 {
 		return nil

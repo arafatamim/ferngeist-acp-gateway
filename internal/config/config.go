@@ -39,7 +39,7 @@ type Config struct {
 	PublicBaseURL                string
 	EnableLAN                    bool
 	StateDBPath                  string
-	HelperName                   string
+	GatewayName                  string
 	ManagedBinDir                string
 	PairingArmTTL                time.Duration
 	PairingMaxAttempts           int
@@ -59,36 +59,36 @@ type PersistedSettings struct {
 	RegistryURL   string
 	PublicBaseURL string
 	EnableLAN     *bool
-	HelperName    string
+	GatewayName   string
 }
 
 // Load reads environment-driven configuration only. Persisted settings are
 // applied later so explicit env vars always remain the strongest override.
 func Load() Config {
-	helperName := envOrDefault("FERNGEIST_HELPER_NAME", hostnameOrDefault("ferngeist-helper"))
+	gatewayName := envOrDefault("FERNGEIST_GATEWAY_NAME", hostnameOrDefault("ferngeist-gateway"))
 	cfg := Config{
-		ListenAddr:             envOrDefault("FERNGEIST_HELPER_LISTEN_ADDR", defaultListenAddr),
-		AdminListenAddr:        envOrDefault("FERNGEIST_HELPER_ADMIN_ADDR", defaultAdminAddr),
-		LogLevel:               envOrDefault("FERNGEIST_HELPER_LOG_LEVEL", defaultLogLevel),
-		LogDir:                 envOrDefault("FERNGEIST_HELPER_LOG_DIR", defaultLogDir),
-		LogMaxSize:             envInt64OrDefault("FERNGEIST_HELPER_LOG_MAX_BYTES", defaultLogMaxSize),
-		LogMaxBackups:          envIntOrDefault("FERNGEIST_HELPER_LOG_MAX_BACKUPS", defaultLogBackups),
-		RegistryURL:            envOrDefault("FERNGEIST_HELPER_REGISTRY_URL", "https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json"),
-		PublicBaseURL:          strings.TrimSpace(os.Getenv("FERNGEIST_HELPER_PUBLIC_BASE_URL")),
-		EnableLAN:              os.Getenv("FERNGEIST_HELPER_ENABLE_LAN") == "1",
-		StateDBPath:            envOrDefault("FERNGEIST_HELPER_STATE_DB", "ferngeist-helper.db"),
-		HelperName:             helperName,
-		ManagedBinDir:          envOrDefault("FERNGEIST_HELPER_MANAGED_BIN_DIR", defaultManagedBinDir()),
-		PairingArmTTL:          envDurationSecondsOrDefault("FERNGEIST_HELPER_PAIRING_ARM_TTL_SECONDS", defaultPairingArmTTL),
-		PairingMaxAttempts:     envIntOrDefault("FERNGEIST_HELPER_PAIRING_MAX_ATTEMPTS", defaultPairingMaxAttempts),
-		PairingLockoutWindow:   envDurationSecondsOrDefault("FERNGEIST_HELPER_PAIRING_LOCKOUT_SECONDS", defaultPairingLockoutWindow),
-		PairingStartRefill:     envDurationSecondsOrDefault("FERNGEIST_HELPER_PAIRING_START_REFILL_SECONDS", defaultPairingStartRefill),
-		PairingCompleteRefill:  envDurationSecondsOrDefault("FERNGEIST_HELPER_PAIRING_COMPLETE_REFILL_SECONDS", defaultPairingCompleteRefill),
-		PairingBurstPerIP:      envIntOrDefault("FERNGEIST_HELPER_PAIRING_BURST_PER_IP", defaultPairingBurstPerIP),
-		PairingBurstGlobal:     envIntOrDefault("FERNGEIST_HELPER_PAIRING_BURST_GLOBAL", defaultPairingBurstGlobal),
-		CredentialTTL:          envDurationSecondsOrDefault("FERNGEIST_HELPER_CREDENTIAL_TTL_SECONDS", defaultCredentialTTL),
-		AllowDiagnosticsExport: envBool("FERNGEIST_HELPER_ALLOW_REMOTE_DIAGNOSTICS_EXPORT"),
-		AllowRuntimeRestartEnv: envBool("FERNGEIST_HELPER_ALLOW_REMOTE_RUNTIME_RESTART_ENV"),
+		ListenAddr:             envOrDefault("FERNGEIST_GATEWAY_LISTEN_ADDR", defaultListenAddr),
+		AdminListenAddr:        envOrDefault("FERNGEIST_GATEWAY_ADMIN_ADDR", defaultAdminAddr),
+		LogLevel:               envOrDefault("FERNGEIST_GATEWAY_LOG_LEVEL", defaultLogLevel),
+		LogDir:                 envOrDefault("FERNGEIST_GATEWAY_LOG_DIR", defaultLogDir),
+		LogMaxSize:             envInt64OrDefault("FERNGEIST_GATEWAY_LOG_MAX_BYTES", defaultLogMaxSize),
+		LogMaxBackups:          envIntOrDefault("FERNGEIST_GATEWAY_LOG_MAX_BACKUPS", defaultLogBackups),
+		RegistryURL:            envOrDefault("FERNGEIST_GATEWAY_REGISTRY_URL", "https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json"),
+		PublicBaseURL:          strings.TrimSpace(os.Getenv("FERNGEIST_GATEWAY_PUBLIC_BASE_URL")),
+		EnableLAN:              os.Getenv("FERNGEIST_GATEWAY_ENABLE_LAN") == "1",
+		StateDBPath:            envOrDefault("FERNGEIST_GATEWAY_STATE_DB", "ferngeist-gateway.db"),
+		GatewayName:            gatewayName,
+		ManagedBinDir:          envOrDefault("FERNGEIST_GATEWAY_MANAGED_BIN_DIR", defaultManagedBinDir()),
+		PairingArmTTL:          envDurationSecondsOrDefault("FERNGEIST_GATEWAY_PAIRING_ARM_TTL_SECONDS", defaultPairingArmTTL),
+		PairingMaxAttempts:     envIntOrDefault("FERNGEIST_GATEWAY_PAIRING_MAX_ATTEMPTS", defaultPairingMaxAttempts),
+		PairingLockoutWindow:   envDurationSecondsOrDefault("FERNGEIST_GATEWAY_PAIRING_LOCKOUT_SECONDS", defaultPairingLockoutWindow),
+		PairingStartRefill:     envDurationSecondsOrDefault("FERNGEIST_GATEWAY_PAIRING_START_REFILL_SECONDS", defaultPairingStartRefill),
+		PairingCompleteRefill:  envDurationSecondsOrDefault("FERNGEIST_GATEWAY_PAIRING_COMPLETE_REFILL_SECONDS", defaultPairingCompleteRefill),
+		PairingBurstPerIP:      envIntOrDefault("FERNGEIST_GATEWAY_PAIRING_BURST_PER_IP", defaultPairingBurstPerIP),
+		PairingBurstGlobal:     envIntOrDefault("FERNGEIST_GATEWAY_PAIRING_BURST_GLOBAL", defaultPairingBurstGlobal),
+		CredentialTTL:          envDurationSecondsOrDefault("FERNGEIST_GATEWAY_CREDENTIAL_TTL_SECONDS", defaultCredentialTTL),
+		AllowDiagnosticsExport: envBool("FERNGEIST_GATEWAY_ALLOW_REMOTE_DIAGNOSTICS_EXPORT"),
+		AllowRuntimeRestartEnv: envBool("FERNGEIST_GATEWAY_ALLOW_REMOTE_RUNTIME_RESTART_ENV"),
 	}
 	return cfg.applySecurityDefaults()
 }
@@ -96,32 +96,32 @@ func Load() Config {
 // ApplyPersistedSettings fills only fields that were not set explicitly in the
 // process environment.
 func (c Config) ApplyPersistedSettings(settings PersistedSettings) Config {
-	if !hasEnv("FERNGEIST_HELPER_REGISTRY_URL") && strings.TrimSpace(settings.RegistryURL) != "" {
+	if !hasEnv("FERNGEIST_GATEWAY_REGISTRY_URL") && strings.TrimSpace(settings.RegistryURL) != "" {
 		c.RegistryURL = strings.TrimSpace(settings.RegistryURL)
 	}
-	if !hasEnv("FERNGEIST_HELPER_PUBLIC_BASE_URL") && strings.TrimSpace(settings.PublicBaseURL) != "" {
+	if !hasEnv("FERNGEIST_GATEWAY_PUBLIC_BASE_URL") && strings.TrimSpace(settings.PublicBaseURL) != "" {
 		c.PublicBaseURL = strings.TrimSpace(settings.PublicBaseURL)
 	}
-	if !hasEnv("FERNGEIST_HELPER_ENABLE_LAN") && settings.EnableLAN != nil {
+	if !hasEnv("FERNGEIST_GATEWAY_ENABLE_LAN") && settings.EnableLAN != nil {
 		c.EnableLAN = *settings.EnableLAN
 	}
-	if !hasEnv("FERNGEIST_HELPER_NAME") && strings.TrimSpace(settings.HelperName) != "" {
-		c.HelperName = strings.TrimSpace(settings.HelperName)
+	if !hasEnv("FERNGEIST_GATEWAY_NAME") && strings.TrimSpace(settings.GatewayName) != "" {
+		c.GatewayName = strings.TrimSpace(settings.GatewayName)
 	}
 	return c.applySecurityDefaults()
 }
 
 func (c Config) applySecurityDefaults() Config {
 	publicMode := strings.TrimSpace(c.PublicBaseURL) != ""
-	if !hasEnv("FERNGEIST_HELPER_REQUIRE_PROOF_OF_POSSESSION") {
+	if !hasEnv("FERNGEIST_GATEWAY_REQUIRE_PROOF_OF_POSSESSION") {
 		c.RequireProofOfPossession = publicMode
 	} else {
-		c.RequireProofOfPossession = envBool("FERNGEIST_HELPER_REQUIRE_PROOF_OF_POSSESSION")
+		c.RequireProofOfPossession = envBool("FERNGEIST_GATEWAY_REQUIRE_PROOF_OF_POSSESSION")
 	}
-	if !hasEnv("FERNGEIST_HELPER_ALLOW_LEGACY_BEARER_CREDENTIALS") {
+	if !hasEnv("FERNGEIST_GATEWAY_ALLOW_LEGACY_BEARER_CREDENTIALS") {
 		c.AllowLegacyBearerCredentials = !publicMode
 	} else {
-		c.AllowLegacyBearerCredentials = envBool("FERNGEIST_HELPER_ALLOW_LEGACY_BEARER_CREDENTIALS")
+		c.AllowLegacyBearerCredentials = envBool("FERNGEIST_GATEWAY_ALLOW_LEGACY_BEARER_CREDENTIALS")
 	}
 	return c
 }
@@ -199,12 +199,12 @@ func defaultManagedBinDir() string {
 	switch goruntime.GOOS {
 	case "windows":
 		if localAppData := strings.TrimSpace(os.Getenv("LocalAppData")); localAppData != "" {
-			return filepath.Join(localAppData, "FerngeistHelper", "bin")
+			return filepath.Join(localAppData, "FerngeistGateway", "bin")
 		}
-		return filepath.Join(home, "AppData", "Local", "FerngeistHelper", "bin")
+		return filepath.Join(home, "AppData", "Local", "FerngeistGateway", "bin")
 	case "darwin":
-		return filepath.Join(home, "Library", "Application Support", "Ferngeist Helper", "bin")
+		return filepath.Join(home, "Library", "Application Support", "Ferngeist Gateway", "bin")
 	default:
-		return filepath.Join(home, ".local", "share", "ferngeist-helper", "bin")
+		return filepath.Join(home, ".local", "share", "ferngeist-gateway", "bin")
 	}
 }

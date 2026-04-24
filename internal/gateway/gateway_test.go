@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tamimarafat/ferngeist/desktop-helper/internal/runtime"
-	"github.com/tamimarafat/ferngeist/desktop-helper/internal/storage"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/runtime"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/storage"
 )
 
 func TestValidateRegisteredRuntimeToken(t *testing.T) {

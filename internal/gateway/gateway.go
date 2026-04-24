@@ -7,8 +7,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/tamimarafat/ferngeist/desktop-helper/internal/runtime"
-	"github.com/tamimarafat/ferngeist/desktop-helper/internal/storage"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/runtime"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/storage"
 )
 
 var (
@@ -32,7 +32,7 @@ type Service struct {
 }
 
 // New returns the runtime-token gatekeeper used by the ACP WebSocket endpoint.
-// These tokens are narrower than helper credentials: they authorize one ACP
+// These tokens are narrower than gateway credentials: they authorize one ACP
 // attach to one runtime for a short window.
 func New(logger *slog.Logger, store *storage.SQLiteStore) *Service {
 	return &Service{
@@ -63,7 +63,7 @@ func (s *Service) Register(descriptor runtime.ConnectDescriptor) {
 	}
 }
 
-// Validate prefers persisted tokens so helper restarts do not invalidate a
+// Validate prefers persisted tokens so gateway restarts do not invalidate a
 // connect descriptor immediately. The in-memory map is only a fast path.
 func (s *Service) Validate(runtimeID, token string) error {
 	if token == "" {

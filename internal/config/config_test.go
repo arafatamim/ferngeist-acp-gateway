@@ -8,7 +8,7 @@ import (
 func TestApplyPersistedSettingsUsesStoredValuesWhenEnvMissing(t *testing.T) {
 	cfg := Config{
 		RegistryURL: "https://default.example/registry.json",
-		HelperName:  "default-helper",
+		GatewayName: "default-gateway",
 	}
 	enableLAN := true
 
@@ -16,7 +16,7 @@ func TestApplyPersistedSettingsUsesStoredValuesWhenEnvMissing(t *testing.T) {
 		RegistryURL:   "https://stored.example/registry.json",
 		PublicBaseURL: "https://helper.example.com",
 		EnableLAN:     &enableLAN,
-		HelperName:    "stored-helper",
+		GatewayName:    "stored-gateway",
 	})
 
 	if updated.RegistryURL != "https://stored.example/registry.json" {
@@ -28,22 +28,22 @@ func TestApplyPersistedSettingsUsesStoredValuesWhenEnvMissing(t *testing.T) {
 	if !updated.EnableLAN {
 		t.Fatal("EnableLAN should be true from persisted settings")
 	}
-	if updated.HelperName != "stored-helper" {
-		t.Fatalf("HelperName = %q", updated.HelperName)
+	if updated.GatewayName != "stored-gateway" {
+		t.Fatalf("GatewayName = %q", updated.GatewayName)
 	}
 }
 
 func TestApplyPersistedSettingsKeepsExplicitEnvOverrides(t *testing.T) {
-	t.Setenv("FERNGEIST_HELPER_REGISTRY_URL", "https://env.example/registry.json")
-	t.Setenv("FERNGEIST_HELPER_PUBLIC_BASE_URL", "https://env.example.com")
-	t.Setenv("FERNGEIST_HELPER_ENABLE_LAN", "1")
-	t.Setenv("FERNGEIST_HELPER_NAME", "env-helper")
+	t.Setenv("FERNGEIST_GATEWAY_REGISTRY_URL", "https://env.example/registry.json")
+	t.Setenv("FERNGEIST_GATEWAY_PUBLIC_BASE_URL", "https://env.example.com")
+	t.Setenv("FERNGEIST_GATEWAY_ENABLE_LAN", "1")
+	t.Setenv("FERNGEIST_GATEWAY_NAME", "env-gateway")
 
 	cfg := Config{
 		RegistryURL:   "https://env.example/registry.json",
 		PublicBaseURL: "https://env.example.com",
 		EnableLAN:     true,
-		HelperName:    "env-helper",
+		GatewayName:    "env-gateway",
 	}
 	enableLAN := false
 
@@ -51,7 +51,7 @@ func TestApplyPersistedSettingsKeepsExplicitEnvOverrides(t *testing.T) {
 		RegistryURL:   "https://stored.example/registry.json",
 		PublicBaseURL: "https://stored.example.com",
 		EnableLAN:     &enableLAN,
-		HelperName:    "stored-helper",
+		GatewayName:    "stored-gateway",
 	})
 
 	if updated.RegistryURL != cfg.RegistryURL {
@@ -63,8 +63,8 @@ func TestApplyPersistedSettingsKeepsExplicitEnvOverrides(t *testing.T) {
 	if updated.EnableLAN != cfg.EnableLAN {
 		t.Fatalf("EnableLAN = %t, want env value %t", updated.EnableLAN, cfg.EnableLAN)
 	}
-	if updated.HelperName != cfg.HelperName {
-		t.Fatalf("HelperName = %q, want env value %q", updated.HelperName, cfg.HelperName)
+	if updated.GatewayName != cfg.GatewayName {
+		t.Fatalf("GatewayName = %q, want env value %q", updated.GatewayName, cfg.GatewayName)
 	}
 }
 
@@ -104,18 +104,18 @@ func TestLoadIncludesPairingSecurityDefaults(t *testing.T) {
 }
 
 func TestLoadAppliesPairingSecurityEnvOverrides(t *testing.T) {
-	t.Setenv("FERNGEIST_HELPER_PAIRING_ARM_TTL_SECONDS", "45")
-	t.Setenv("FERNGEIST_HELPER_PAIRING_MAX_ATTEMPTS", "9")
-	t.Setenv("FERNGEIST_HELPER_PAIRING_LOCKOUT_SECONDS", "75")
-	t.Setenv("FERNGEIST_HELPER_PAIRING_START_REFILL_SECONDS", "7")
-	t.Setenv("FERNGEIST_HELPER_PAIRING_COMPLETE_REFILL_SECONDS", "3")
-	t.Setenv("FERNGEIST_HELPER_PAIRING_BURST_PER_IP", "11")
-	t.Setenv("FERNGEIST_HELPER_PAIRING_BURST_GLOBAL", "42")
-	t.Setenv("FERNGEIST_HELPER_CREDENTIAL_TTL_SECONDS", "86400")
-	t.Setenv("FERNGEIST_HELPER_ALLOW_REMOTE_DIAGNOSTICS_EXPORT", "1")
-	t.Setenv("FERNGEIST_HELPER_ALLOW_REMOTE_RUNTIME_RESTART_ENV", "true")
-	t.Setenv("FERNGEIST_HELPER_REQUIRE_PROOF_OF_POSSESSION", "true")
-	t.Setenv("FERNGEIST_HELPER_ALLOW_LEGACY_BEARER_CREDENTIALS", "false")
+	t.Setenv("FERNGEIST_GATEWAY_PAIRING_ARM_TTL_SECONDS", "45")
+	t.Setenv("FERNGEIST_GATEWAY_PAIRING_MAX_ATTEMPTS", "9")
+	t.Setenv("FERNGEIST_GATEWAY_PAIRING_LOCKOUT_SECONDS", "75")
+	t.Setenv("FERNGEIST_GATEWAY_PAIRING_START_REFILL_SECONDS", "7")
+	t.Setenv("FERNGEIST_GATEWAY_PAIRING_COMPLETE_REFILL_SECONDS", "3")
+	t.Setenv("FERNGEIST_GATEWAY_PAIRING_BURST_PER_IP", "11")
+	t.Setenv("FERNGEIST_GATEWAY_PAIRING_BURST_GLOBAL", "42")
+	t.Setenv("FERNGEIST_GATEWAY_CREDENTIAL_TTL_SECONDS", "86400")
+	t.Setenv("FERNGEIST_GATEWAY_ALLOW_REMOTE_DIAGNOSTICS_EXPORT", "1")
+	t.Setenv("FERNGEIST_GATEWAY_ALLOW_REMOTE_RUNTIME_RESTART_ENV", "true")
+	t.Setenv("FERNGEIST_GATEWAY_REQUIRE_PROOF_OF_POSSESSION", "true")
+	t.Setenv("FERNGEIST_GATEWAY_ALLOW_LEGACY_BEARER_CREDENTIALS", "false")
 
 	cfg := Load()
 

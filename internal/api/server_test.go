@@ -22,16 +22,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/catalog"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/config"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/discovery"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/gateway"
+	gatewaylogging "github.com/arafatamim/ferngeist-acp-gateway/internal/logging"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/pairing"
+	acpregistry "github.com/arafatamim/ferngeist-acp-gateway/internal/registry"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/runtime"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/storage"
 	"github.com/coder/websocket"
-	"github.com/tamimarafat/ferngeist/desktop-helper/internal/catalog"
-	"github.com/tamimarafat/ferngeist/desktop-helper/internal/config"
-	"github.com/tamimarafat/ferngeist/desktop-helper/internal/discovery"
-	"github.com/tamimarafat/ferngeist/desktop-helper/internal/gateway"
-	helperlogging "github.com/tamimarafat/ferngeist/desktop-helper/internal/logging"
-	"github.com/tamimarafat/ferngeist/desktop-helper/internal/pairing"
-	acpregistry "github.com/tamimarafat/ferngeist/desktop-helper/internal/registry"
-	"github.com/tamimarafat/ferngeist/desktop-helper/internal/runtime"
-	"github.com/tamimarafat/ferngeist/desktop-helper/internal/storage"
 )
 
 func TestStatusIncludesProtocolVersion(t *testing.T) {
@@ -65,8 +65,8 @@ func TestStatusIncludesProtocolVersion(t *testing.T) {
 	if response.Build.Version != "dev" {
 		t.Fatalf("Build.Version = %q, want %q", response.Build.Version, "dev")
 	}
-	if response.Discovery.ServiceType != "_ferngeist-helper._tcp" {
-		t.Fatalf("Discovery.ServiceType = %q, want %q", response.Discovery.ServiceType, "_ferngeist-helper._tcp")
+	if response.Discovery.ServiceType != "_ferngeist-gateway._tcp" {
+		t.Fatalf("Discovery.ServiceType = %q, want %q", response.Discovery.ServiceType, "_ferngeist-gateway._tcp")
 	}
 	if response.RuntimeCounts.Total != 0 {
 		t.Fatalf("RuntimeCounts.Total = %d, want 0", response.RuntimeCounts.Total)
@@ -108,10 +108,10 @@ func TestStatusRejectsNonGetMethods(t *testing.T) {
 	}
 }
 
-func TestStatusUsesConfiguredHelperName(t *testing.T) {
+func TestStatusUsesConfiguredGatewayName(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	server := NewServer(
-		config.Config{ListenAddr: "127.0.0.1:0", HelperName: "desk-alpha"},
+		config.Config{ListenAddr: "127.0.0.1:0", GatewayName: "desk-alpha"},
 		BuildInfo{},
 		logger,
 		catalog.NewWithBaseDir("."),
@@ -331,8 +331,8 @@ func TestAdminPairingStartIncludesPayload(t *testing.T) {
 	if response.Scheme != "https" {
 		t.Fatalf("Scheme = %q, want %q", response.Scheme, "https")
 	}
-	if !strings.Contains(response.Payload, "ferngeist-helper://pair?") {
-		t.Fatalf("Payload = %q, want ferngeist-helper URI", response.Payload)
+	if !strings.Contains(response.Payload, "ferngeist-gateway://pair?") {
+		t.Fatalf("Payload = %q, want ferngeist-gateway URI", response.Payload)
 	}
 }
 
@@ -1191,11 +1191,11 @@ func TestDiagnosticsSummaryIncludesPersistedFailures(t *testing.T) {
 	}
 }
 
-func TestDiagnosticsExportIncludesHelperLogsAndRuntimeLogs(t *testing.T) {
+func TestDiagnosticsExportIncludesGatewayLogsAndRuntimeLogs(t *testing.T) {
 	baseDir := t.TempDir()
 	buildMockAgent(t, baseDir)
 
-	logSvc, err := helperlogging.NewService(filepath.Join(baseDir, "logs"), "helper.log", 1024*1024, 2)
+	logSvc, err := gatewaylogging.NewService(filepath.Join(baseDir, "logs"), "gateway.log", 1024*1024, 2)
 	if err != nil {
 		t.Fatalf("NewService() error = %v", err)
 	}
@@ -1206,7 +1206,7 @@ func TestDiagnosticsExportIncludesHelperLogsAndRuntimeLogs(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(io.MultiWriter(io.Discard, logSvc), nil))
 	logger.Info("diagnostic export ready", slog.String("component", "test"))
 
-	cfg := config.Config{ListenAddr: "127.0.0.1:0", LogDir: filepath.Join(baseDir, "logs"), StateDBPath: filepath.Join(baseDir, "state.db"), HelperName: "test-helper", AllowDiagnosticsExport: true}
+	cfg := config.Config{ListenAddr: "127.0.0.1:0", LogDir: filepath.Join(baseDir, "logs"), StateDBPath: filepath.Join(baseDir, "state.db"), GatewayName: "test-gateway", AllowDiagnosticsExport: true}
 	server := NewServer(
 		cfg,
 		BuildInfo{Version: "1.2.3", Commit: "abc123", BuiltAt: "2026-03-25T10:00:00Z", GoVersion: "go1.test"},
@@ -1248,26 +1248,26 @@ func TestDiagnosticsExportIncludesHelperLogsAndRuntimeLogs(t *testing.T) {
 	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 		t.Fatalf("Unmarshal() error = %v", err)
 	}
-	if len(response.HelperLogs) == 0 {
-		t.Fatal("HelperLogs should not be empty")
+	if len(response.GatewayLogs) == 0 {
+		t.Fatal("GatewayLogs should not be empty")
 	}
-	if !strings.Contains(strings.Join(response.HelperLogs, "\n"), "diagnostic export ready") {
-		t.Fatalf("HelperLogs do not contain diagnostic line: %v", response.HelperLogs)
+	if !strings.Contains(strings.Join(response.GatewayLogs, "\n"), "diagnostic export ready") {
+		t.Fatalf("GatewayLogs do not contain diagnostic line: %v", response.GatewayLogs)
 	}
 	if len(response.Runtimes) != 1 {
 		t.Fatalf("len(Runtimes) = %d, want 1", len(response.Runtimes))
 	}
-	if response.Helper.Build.Version != "1.2.3" {
-		t.Fatalf("Helper.Build.Version = %q, want %q", response.Helper.Build.Version, "1.2.3")
+	if response.Gateway.Build.Version != "1.2.3" {
+		t.Fatalf("Gateway.Build.Version = %q, want %q", response.Gateway.Build.Version, "1.2.3")
 	}
-	if response.Helper.Remote.PublicURL != "" {
-		t.Fatalf("Helper.Remote.PublicURL = %q, want empty by default", response.Helper.Remote.PublicURL)
+	if response.Gateway.Remote.PublicURL != "" {
+		t.Fatalf("Gateway.Remote.PublicURL = %q, want empty by default", response.Gateway.Remote.PublicURL)
 	}
-	if response.Helper.Remote.Mode != "local_only" {
-		t.Fatalf("Helper.Remote.Mode = %q, want %q", response.Helper.Remote.Mode, "local_only")
+	if response.Gateway.Remote.Mode != "local_only" {
+		t.Fatalf("Gateway.Remote.Mode = %q, want %q", response.Gateway.Remote.Mode, "local_only")
 	}
-	if response.Helper.Remote.Scope != "local" {
-		t.Fatalf("Helper.Remote.Scope = %q, want %q", response.Helper.Remote.Scope, "local")
+	if response.Gateway.Remote.Scope != "local" {
+		t.Fatalf("Gateway.Remote.Scope = %q, want %q", response.Gateway.Remote.Scope, "local")
 	}
 	foundRuntimeLogs := false
 	for range 30 {
@@ -1450,7 +1450,7 @@ func TestRuntimeLifecycleEndpoints(t *testing.T) {
 		t.Fatalf("agentInfo.name = %q, want %q", initializeResp.Result.AgentInfo.Name, "mock-acp")
 	}
 
-	// Keep the websocket idle briefly before the first ACP request. The helper
+	// Keep the websocket idle briefly before the first ACP request. The gateway
 	// should leave quiet sessions alone instead of timing them out eagerly.
 	time.Sleep(200 * time.Millisecond)
 

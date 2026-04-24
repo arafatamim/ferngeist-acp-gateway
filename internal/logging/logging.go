@@ -11,9 +11,9 @@ import (
 	"sync"
 )
 
-const defaultLogFileName = "helper.log"
+const defaultLogFileName = "gateway.log"
 
-// Service is a tiny rolling log writer used by the helper for local diagnostics
+// Service is a tiny rolling log writer used by the gateway for local diagnostics
 // export. It intentionally avoids introducing a heavier logging dependency.
 type Service struct {
 	mu         sync.Mutex
@@ -25,7 +25,7 @@ type Service struct {
 	size       int64
 }
 
-// New returns both the structured helper logger and the underlying file
+// New returns both the structured gateway logger and the underlying file
 // service so diagnostics export can tail recent log lines.
 func New(level, dir string, maxSize int64, maxBackups int) (*slog.Logger, *Service, error) {
 	service, err := NewService(dir, defaultLogFileName, maxSize, maxBackups)

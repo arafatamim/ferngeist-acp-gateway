@@ -8,16 +8,16 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/tamimarafat/ferngeist/desktop-helper/internal/adminclient"
-	"github.com/tamimarafat/ferngeist/desktop-helper/internal/config"
-	"github.com/tamimarafat/ferngeist/desktop-helper/internal/service"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/adminclient"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/config"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/service"
 )
 
 func runDaemonInstall(options service.InstallOptions) error {
 	manager := service.NewManager()
 	if err := manager.Install(options); err != nil {
 		if errors.Is(err, service.ErrServicePermissionDenied) {
-			return fmt.Errorf("install daemon service: %w\nHint: rerun with elevated privileges, for example: sudo ferngeist daemon install", err)
+			return fmt.Errorf("install daemon service: %w\nHint: rerun with elevated privileges, for example: sudo ferngeist-gateway daemon install", err)
 		}
 		if errors.Is(err, service.ErrInvalidInstallOptions) {
 			return fmt.Errorf("install daemon service: %w\nHint: use --host, --port, and optional --public-url", err)

@@ -8,9 +8,9 @@ import (
 	"github.com/grandcat/zeroconf"
 )
 
-const serviceType = "_ferngeist-helper._tcp"
+const serviceType = "_ferngeist-gateway._tcp"
 
-// Snapshot is the helper's last known LAN advertisement state. It is surfaced
+// Snapshot is the gateway's last known LAN advertisement state. It is surfaced
 // directly in status and diagnostics so discovery problems are debuggable.
 type Snapshot struct {
 	Active      bool     `json:"active"`
@@ -37,7 +37,7 @@ func New(logger *slog.Logger) *Service {
 	}
 }
 
-// Start publishes the helper via mDNS. If the helper is already advertising,
+// Start publishes the gateway via mDNS. If the gateway is already advertising,
 // this is treated as idempotent to simplify startup wiring.
 func (s *Service) Start(name string, port int, txt []string) error {
 	s.mu.Lock()

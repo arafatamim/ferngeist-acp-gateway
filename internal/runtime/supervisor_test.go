@@ -16,9 +16,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tamimarafat/ferngeist/desktop-helper/internal/acquire"
-	"github.com/tamimarafat/ferngeist/desktop-helper/internal/catalog"
-	"github.com/tamimarafat/ferngeist/desktop-helper/internal/storage"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/acquire"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/catalog"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/storage"
 )
 
 func TestStartIsIdempotentPerAgent(t *testing.T) {
@@ -298,7 +298,7 @@ func TestStoppedRuntimeIsPrunedAfterRetentionWindow(t *testing.T) {
 		StoppedAt: now.Add(-stoppedRuntimeRetention).Add(-time.Second),
 	}
 	supervisor.runtimes[runtimeInfo.ID] = runtimeInfo
-	supervisor.logs[runtimeInfo.ID] = []LogEntry{{Timestamp: now, Stream: "helper", Message: "stopped"}}
+	supervisor.logs[runtimeInfo.ID] = []LogEntry{{Timestamp: now, Stream: "gateway", Message: "stopped"}}
 
 	if got := len(supervisor.List()); got != 0 {
 		t.Fatalf("len(List()) = %d, want 0 after retention pruning", got)

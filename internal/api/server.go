@@ -1,5 +1,5 @@
 // Package api provides the HTTP control plane and ACP bridge for the Ferngeist
-// desktop helper daemon. It exposes two servers:
+// gateway daemon. It exposes two servers:
 //
 //   - A public API for paired devices (pairing, agent control, ACP WebSocket)
 //   - An admin API bound to localhost for local management and diagnostics
@@ -30,18 +30,18 @@ import (
 	"sync"
 	"time"
 
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/catalog"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/config"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/discovery"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/gateway"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/logging"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/pairing"
+	acpregistry "github.com/arafatamim/ferngeist-acp-gateway/internal/registry"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/runtime"
 	"github.com/coder/websocket"
-	"github.com/tamimarafat/ferngeist/desktop-helper/internal/catalog"
-	"github.com/tamimarafat/ferngeist/desktop-helper/internal/config"
-	"github.com/tamimarafat/ferngeist/desktop-helper/internal/discovery"
-	"github.com/tamimarafat/ferngeist/desktop-helper/internal/gateway"
-	"github.com/tamimarafat/ferngeist/desktop-helper/internal/logging"
-	"github.com/tamimarafat/ferngeist/desktop-helper/internal/pairing"
-	acpregistry "github.com/tamimarafat/ferngeist/desktop-helper/internal/registry"
-	"github.com/tamimarafat/ferngeist/desktop-helper/internal/runtime"
 )
 
-// Server is the main HTTP server that wires together all helper subsystems into
+// Server is the main HTTP server that wires together all gateway subsystems into
 // a unified control plane. It manages two HTTP servers:
 //   - httpServer: the public-facing API for paired mobile/desktop clients
 //   - adminServer: a localhost-bound admin interface for local management
@@ -69,7 +69,7 @@ type Server struct {
 	proofNonces *proofNonceTracker     // prevents replay of credential proofs
 }
 
-// protocolVersion identifies the current helper-to-client protocol version.
+// protocolVersion identifies the current gateway-to-client protocol version.
 // Clients use this to detect compatibility mismatches.
 const protocolVersion = "v1alpha1"
 
@@ -97,7 +97,7 @@ const (
 )
 
 // BuildInfo is injected from the build so status and diagnostics can describe
-// the exact helper binary that produced a failure report.
+// the exact gateway binary that produced a failure report.
 type BuildInfo struct {
 	Version   string `json:"version"`
 	Commit    string `json:"commit,omitempty"`
@@ -111,7 +111,7 @@ type errorResponse struct {
 }
 
 // statusResponse is returned by the public /v1/status endpoint with a summary
-// of helper health, configuration, and runtime state.
+// of gateway health, configuration, and runtime state.
 type statusResponse struct {
 	Name              string             `json:"name"`
 	Version           string             `json:"version"`
@@ -128,7 +128,7 @@ type statusResponse struct {
 	RuntimeCounts     runtimeCounts      `json:"runtimeCounts"`
 }
 
-// remoteStatus describes the helper's remote access configuration as detected
+// remoteStatus describes the gateway's remote access configuration as detected
 // from the PublicBaseURL setting (tailscale, cloudflare tunnel, manual proxy, etc).
 type remoteStatus struct {
 	Configured bool   `json:"configured"`
@@ -196,7 +196,7 @@ type adminPairingResponse struct {
 	State           string    `json:"state"`
 	Scheme          string    `json:"scheme,omitempty"`
 	Host            string    `json:"host,omitempty"`
-	Payload         string    `json:"payload,omitempty"` // ferngeist-helper://pair?... deep link
+	Payload         string    `json:"payload,omitempty"` // ferngeist-gateway://pair?... deep link
 	CompletedDevice string    `json:"completedDevice,omitempty"`
 	CompletedID     string    `json:"completedDeviceId,omitempty"`
 	CompletedExpiry time.Time `json:"completedDeviceExpiresAt,omitempty"`
@@ -228,7 +228,7 @@ type adminStatusResponse struct {
 	ActivePairing     *adminPairingResponse  `json:"activePairing,omitempty"`
 }
 
-// adminPairingTargetInfo describes how a mobile client can reach this helper
+// adminPairingTargetInfo describes how a mobile client can reach this gateway
 // for pairing (scheme + host), or why pairing is unavailable.
 type adminPairingTargetInfo struct {
 	Reachable bool   `json:"reachable"`
@@ -308,19 +308,19 @@ type diagnosticsSummaryResponse struct {
 }
 
 // diagnosticsExportResponse is the full diagnostic bundle exported for bug reports.
-// It includes helper metadata, runtime state, and bounded logs from all sources.
+// It includes gateway metadata, runtime state, and bounded logs from all sources.
 type diagnosticsExportResponse struct {
 	GeneratedAt time.Time                     `json:"generatedAt"`
-	Helper      diagnosticsHelperSnapshot     `json:"helper"`
+	Gateway     diagnosticsGatewaySnapshot     `json:"gateway"`
 	Runtime     runtime.Summary               `json:"runtime"`
 	Runtimes    []runtime.Runtime             `json:"runtimes"`
 	RuntimeLogs map[string][]runtime.LogEntry `json:"runtimeLogs"`
-	HelperLogs  []string                      `json:"helperLogs"`
+	GatewayLogs []string                      `json:"gatewayLogs"`
 }
 
-// diagnosticsHelperSnapshot captures the helper daemon's own configuration and
+// diagnosticsGatewaySnapshot captures the gateway daemon's own configuration and
 // state at the moment of diagnostic export.
-type diagnosticsHelperSnapshot struct {
+type diagnosticsGatewaySnapshot struct {
 	Name            string             `json:"name"`
 	Version         string             `json:"version"`
 	Build           BuildInfo          `json:"build"`
@@ -329,7 +329,7 @@ type diagnosticsHelperSnapshot struct {
 	UptimeSeconds   int64              `json:"uptimeSeconds"`
 	ListenAddr      string             `json:"listenAddr"`
 	LANEnabled      bool               `json:"lanEnabled"`
-	HelperName      string             `json:"helperName"`
+	GatewayName     string             `json:"gatewayName"`
 	LogDir          string             `json:"logDir"`
 	StateDBPath     string             `json:"stateDbPath"`
 	Discovery       discovery.Snapshot `json:"discovery"`
@@ -341,7 +341,7 @@ type registryStatusProvider interface {
 	Status() acpregistry.Status
 }
 
-// NewServer wires the helper's control plane and ACP bridge into one HTTP
+// NewServer wires the gateway's control plane and ACP bridge into one HTTP
 // server. The API stays intentionally small: a handful of control endpoints and
 // a single ACP WebSocket path.
 func NewServer(
@@ -482,8 +482,8 @@ func (s *Server) AdminHandler() http.Handler {
 }
 
 // withRequestLogging records one structured log entry per HTTP request so the
-// helper can diagnose pairing, launch, and ACP handoff traffic from stdout or
-// the rolling helper log file.
+// gateway can diagnose pairing, launch, and ACP handoff traffic from stdout or
+// the rolling gateway log file.
 func (s *Server) withRequestLogging(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		startedAt := time.Now()
@@ -585,13 +585,13 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleAgents merges static catalog data with live runtime state so clients do
-// not need to reconstruct helper policy from multiple endpoints.
+// not need to reconstruct gateway policy from multiple endpoints.
 func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	if _, ok := s.requireHelperScope(w, r, pairing.ScopeRead); !ok {
+	if _, ok := s.requireGatewayScope(w, r, pairing.ScopeRead); !ok {
 		return
 	}
 
@@ -617,7 +617,7 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDiagnosticsSummary(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireHelperScope(w, r, pairing.ScopeRead); !ok {
+	if _, ok := s.requireGatewayScope(w, r, pairing.ScopeRead); !ok {
 		return
 	}
 
@@ -627,10 +627,10 @@ func (s *Server) handleDiagnosticsSummary(w http.ResponseWriter, r *http.Request
 }
 
 // handleDiagnosticsExport produces a compact bug-report bundle. It includes
-// helper metadata, active runtime state, and bounded logs, but intentionally
+// gateway metadata, active runtime state, and bounded logs, but intentionally
 // does not try to become a transcript export format.
 func (s *Server) handleDiagnosticsExport(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireHelperScope(w, r, pairing.ScopeDiagnosticsExport); !ok {
+	if _, ok := s.requireGatewayScope(w, r, pairing.ScopeDiagnosticsExport); !ok {
 		return
 	}
 
@@ -644,16 +644,16 @@ func (s *Server) handleDiagnosticsExport(w http.ResponseWriter, r *http.Request)
 		runtimeLogs[runtimeInfo.ID] = logs
 	}
 
-	helperLogs, err := s.tailHelperLogs(200)
+	gatewayLogs, err := s.tailGatewayLogs(200)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to read helper logs")
+		writeError(w, http.StatusInternalServerError, "failed to read gateway logs")
 		return
 	}
 
 	writeJSON(w, http.StatusOK, diagnosticsExportResponse{
 		GeneratedAt: s.now(),
-		Helper: diagnosticsHelperSnapshot{
-			Name:            s.helperDisplayName(),
+		Gateway: diagnosticsGatewaySnapshot{
+			Name:            s.gatewayDisplayName(),
 			Version:         s.build.Version,
 			Build:           s.build,
 			ProtocolVersion: protocolVersion,
@@ -661,7 +661,7 @@ func (s *Server) handleDiagnosticsExport(w http.ResponseWriter, r *http.Request)
 			UptimeSeconds:   uptimeSeconds(s.startedAt, s.now()),
 			ListenAddr:      s.cfg.ListenAddr,
 			LANEnabled:      s.cfg.EnableLAN,
-			HelperName:      s.cfg.HelperName,
+			GatewayName:     s.cfg.GatewayName,
 			LogDir:          s.cfg.LogDir,
 			StateDBPath:     s.cfg.StateDBPath,
 			Discovery:       s.discovery.Snapshot(),
@@ -671,12 +671,12 @@ func (s *Server) handleDiagnosticsExport(w http.ResponseWriter, r *http.Request)
 		Runtime:     s.runtime.Summary(),
 		Runtimes:    runtimes,
 		RuntimeLogs: runtimeLogs,
-		HelperLogs:  helperLogs,
+		GatewayLogs: gatewayLogs,
 	})
 }
 
 func (s *Server) handleAuthRefresh(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireHelperCredential(w, r); !ok {
+	if _, ok := s.requireGatewayCredential(w, r); !ok {
 		return
 	}
 	refreshed, err := s.pairing.RefreshCredential(bearerToken(r))
@@ -685,7 +685,7 @@ func (s *Server) handleAuthRefresh(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, pairing.ErrCredentialMissing), errors.Is(err, pairing.ErrCredentialInvalid), errors.Is(err, pairing.ErrCredentialExpired):
 			writeError(w, http.StatusUnauthorized, err.Error())
 		default:
-			writeError(w, http.StatusInternalServerError, "failed to refresh helper credential")
+			writeError(w, http.StatusInternalServerError, "failed to refresh gateway credential")
 		}
 		return
 	}
@@ -703,7 +703,7 @@ func (s *Server) handleRuntimes(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	if _, ok := s.requireHelperScope(w, r, pairing.ScopeRead); !ok {
+	if _, ok := s.requireGatewayScope(w, r, pairing.ScopeRead); !ok {
 		return
 	}
 
@@ -711,7 +711,7 @@ func (s *Server) handleRuntimes(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRuntimeLogs(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireHelperScope(w, r, pairing.ScopeRead); !ok {
+	if _, ok := s.requireGatewayScope(w, r, pairing.ScopeRead); !ok {
 		return
 	}
 
@@ -932,7 +932,7 @@ func (s *Server) handleAdminDeviceRevoke(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) handleAgentStart(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireHelperScope(w, r, pairing.ScopeControl); !ok {
+	if _, ok := s.requireGatewayScope(w, r, pairing.ScopeControl); !ok {
 		return
 	}
 
@@ -959,7 +959,7 @@ func (s *Server) handleAgentStart(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAgentStop(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireHelperScope(w, r, pairing.ScopeControl); !ok {
+	if _, ok := s.requireGatewayScope(w, r, pairing.ScopeControl); !ok {
 		return
 	}
 
@@ -978,7 +978,7 @@ func (s *Server) handleAgentStop(w http.ResponseWriter, r *http.Request) {
 // connection descriptor. The gateway token is registered here so the WebSocket
 // endpoint can stay stateless apart from token validation.
 func (s *Server) handleRuntimeConnect(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireHelperScope(w, r, pairing.ScopeControl); !ok {
+	if _, ok := s.requireGatewayScope(w, r, pairing.ScopeControl); !ok {
 		return
 	}
 
@@ -998,7 +998,7 @@ func (s *Server) handleRuntimeConnect(w http.ResponseWriter, r *http.Request) {
 // The env scope check ensures only credentials with runtimeRestartEnv scope
 // can pass custom environment variables.
 func (s *Server) handleRuntimeRestart(w http.ResponseWriter, r *http.Request) {
-	credential, ok := s.requireHelperScope(w, r, pairing.ScopeControl)
+	credential, ok := s.requireGatewayScope(w, r, pairing.ScopeControl)
 	if !ok {
 		return
 	}
@@ -1022,7 +1022,7 @@ func (s *Server) handleRuntimeRestart(w http.ResponseWriter, r *http.Request) {
 	restarted, err := s.runtime.Restart(runtimeID, request.Env)
 	if err != nil {
 		s.gateway.Revoke(runtimeID)
-		s.runtime.AppendLog(runtimeID, "helper", "runtime restart failed: "+err.Error())
+		s.runtime.AppendLog(runtimeID, "gateway", "runtime restart failed: "+err.Error())
 		switch {
 		case errors.Is(err, runtime.ErrRuntimeNotFound):
 			writeError(w, http.StatusNotFound, err.Error())
@@ -1097,9 +1097,9 @@ func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, errorResponse{Error: message})
 }
 
-// requireHelperCredential is the common auth gate for the control API. Pairing
+// requireGatewayCredential is the common auth gate for the control API. Pairing
 // bootstrap and public status stay outside this path by design.
-func (s *Server) requireHelperCredential(w http.ResponseWriter, r *http.Request) (pairing.Credential, bool) {
+func (s *Server) requireGatewayCredential(w http.ResponseWriter, r *http.Request) (pairing.Credential, bool) {
 	if r == nil {
 		writeError(w, http.StatusUnauthorized, pairing.ErrCredentialMissing.Error())
 		return pairing.Credential{}, false
@@ -1122,8 +1122,8 @@ func (s *Server) requireHelperCredential(w http.ResponseWriter, r *http.Request)
 	return credential, true
 }
 
-func (s *Server) requireHelperScope(w http.ResponseWriter, r *http.Request, scope string) (pairing.Credential, bool) {
-	credential, ok := s.requireHelperCredential(w, r)
+func (s *Server) requireGatewayScope(w http.ResponseWriter, r *http.Request, scope string) (pairing.Credential, bool) {
+	credential, ok := s.requireGatewayCredential(w, r)
 	if !ok {
 		return pairing.Credential{}, false
 	}
@@ -1165,7 +1165,7 @@ func websocketScheme(r *http.Request) string {
 	return "ws"
 }
 
-// websocketHost returns the host that clients should use to reach this helper.
+// websocketHost returns the host that clients should use to reach this gateway.
 // It respects X-Forwarded-Host for reverse proxy configurations.
 func websocketHost(r *http.Request) string {
 	if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-Host")); forwarded != "" {
@@ -1202,7 +1202,7 @@ func (s *Server) statusSnapshot(includePublicURL bool) statusResponse {
 	summary := s.runtime.Summary()
 	now := s.now()
 	return statusResponse{
-		Name:              s.helperDisplayName(),
+		Name:              s.gatewayDisplayName(),
 		Version:           s.build.Version,
 		Build:             s.build,
 		ProtocolVersion:   protocolVersion,
@@ -1252,10 +1252,10 @@ func buildPairingPayload(target pairingTarget, challengeID, code string) string 
 	values.Set("host", target.Host)
 	values.Set("challengeId", challengeID)
 	values.Set("code", code)
-	return "ferngeist-helper://pair?" + values.Encode()
+	return "ferngeist-gateway://pair?" + values.Encode()
 }
 
-// pairingTarget determines how a mobile client can reach this helper for pairing.
+// pairingTarget determines how a mobile client can reach this gateway for pairing.
 // The resolution order is:
 //  1. PublicBaseURL if configured (for remote/reverse proxy setups)
 //  2. Listen address host if it's routable (non-loopback, non-unspecified)
@@ -1274,17 +1274,17 @@ func (s *Server) pairingTarget() (pairingTarget, error) {
 
 	listenHost, port, err := net.SplitHostPort(s.cfg.ListenAddr)
 	if err != nil || strings.TrimSpace(port) == "" {
-		return pairingTarget{}, fmt.Errorf("helper listen address is invalid")
+		return pairingTarget{}, fmt.Errorf("gateway listen address is invalid")
 	}
 	host := strings.Trim(strings.TrimSpace(listenHost), "[]")
 	if isRoutableHost(host) {
 		return pairingTarget{Scheme: "http", Host: net.JoinHostPort(host, port)}, nil
 	}
 	if !s.cfg.EnableLAN {
-		return pairingTarget{}, fmt.Errorf("helper is running in local-only mode; pairing requires a phone-reachable address. Set FERNGEIST_HELPER_PUBLIC_BASE_URL or run `ferngeist daemon run --lan`")
+		return pairingTarget{}, fmt.Errorf("gateway is running in local-only mode; pairing requires a phone-reachable address. Set FERNGEIST_GATEWAY_PUBLIC_BASE_URL or run `ferngeist-gateway daemon run --lan`")
 	}
 	if host != "" && (strings.EqualFold(host, "localhost") || isLoopbackHost(host)) {
-		return pairingTarget{}, fmt.Errorf("helper LAN pairing requires a non-loopback listen address; run `ferngeist daemon run --lan` or set FERNGEIST_HELPER_LISTEN_ADDR=0.0.0.0:5788")
+		return pairingTarget{}, fmt.Errorf("gateway LAN pairing requires a non-loopback listen address; run `ferngeist-gateway daemon run --lan` or set FERNGEIST_GATEWAY_LISTEN_ADDR=0.0.0.0:5788")
 	}
 
 	lanHost, err := firstLANHost()
@@ -1357,14 +1357,14 @@ func firstLANHost() (string, error) {
 	return "", fmt.Errorf("no LAN address is available for pairing")
 }
 
-func (s *Server) helperDisplayName() string {
-	if name := strings.TrimSpace(s.cfg.HelperName); name != "" {
+func (s *Server) gatewayDisplayName() string {
+	if name := strings.TrimSpace(s.cfg.GatewayName); name != "" {
 		return name
 	}
-	return "ferngeist-helper"
+	return "ferngeist-gateway"
 }
 
-// remoteStatus builds a description of how this helper is reachable from outside.
+// remoteStatus builds a description of how this gateway is reachable from outside.
 // It classifies the connection mode (tailscale, cloudflare tunnel, LAN, local)
 // and detects the network scope (public vs private) for security warnings.
 func (s *Server) remoteStatus(includePublicURL bool) remoteStatus {
@@ -1547,7 +1547,7 @@ func (s *Server) attachStdioRuntime(w http.ResponseWriter, r *http.Request, runt
 	return clientConn, stdin, stdout, release, nil
 }
 
-func (s *Server) tailHelperLogs(limit int) ([]string, error) {
+func (s *Server) tailGatewayLogs(limit int) ([]string, error) {
 	if s.logs == nil {
 		return nil, nil
 	}
@@ -1869,42 +1869,42 @@ func (s *Server) verifyCredentialProof(r *http.Request, rawToken string, credent
 		return nil
 	}
 	if r == nil {
-		return errors.New("helper credential proof required")
+		return errors.New("gateway credential proof required")
 	}
 	timestampText := strings.TrimSpace(r.Header.Get(proofHeaderTimestamp))
 	nonce := strings.TrimSpace(r.Header.Get(proofHeaderNonce))
 	signatureText := strings.TrimSpace(r.Header.Get(proofHeaderSignature))
 	if timestampText == "" || nonce == "" || signatureText == "" {
-		return errors.New("helper credential proof required")
+		return errors.New("gateway credential proof required")
 	}
 	timestampUnix, err := strconv.ParseInt(timestampText, 10, 64)
 	if err != nil {
-		return errors.New("helper credential proof invalid")
+		return errors.New("gateway credential proof invalid")
 	}
 	now := s.now().UTC()
 	timestamp := time.Unix(timestampUnix, 0).UTC()
 	if timestamp.Before(now.Add(-proofSkewWindow)) || timestamp.After(now.Add(proofSkewWindow)) {
-		return errors.New("helper credential proof expired")
+		return errors.New("gateway credential proof expired")
 	}
 	if s.proofNonces != nil && !s.proofNonces.use(credential.DeviceID+":"+nonce, now) {
-		return errors.New("helper credential proof replayed")
+		return errors.New("gateway credential proof replayed")
 	}
 	bodyHash, err := requestBodyHash(r, jsonBodyLimit)
 	if err != nil {
-		return errors.New("helper credential proof invalid")
+		return errors.New("gateway credential proof invalid")
 	}
 	message := buildProofMessage(r.Method, requestPathWithRawQuery(r), rawToken, timestampText, nonce, bodyHash)
 	publicKey, err := parseProofPublicKey(credential.ProofPublicKey)
 	if err != nil {
-		return errors.New("helper credential proof invalid")
+		return errors.New("gateway credential proof invalid")
 	}
 	signature, err := decodeProofBase64(signatureText)
 	if err != nil {
-		return errors.New("helper credential proof invalid")
+		return errors.New("gateway credential proof invalid")
 	}
 	digest := sha256.Sum256([]byte(message))
 	if !ecdsa.VerifyASN1(publicKey, digest[:], signature) {
-		return errors.New("helper credential proof invalid")
+		return errors.New("gateway credential proof invalid")
 	}
 	return nil
 }

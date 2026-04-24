@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	windowsTaskName = "FerngeistDaemon"
+	windowsTaskName = "FerngeistGateway"
 )
 
 type windowsManager struct{}
@@ -281,7 +281,7 @@ func resolveWindowsPaths() (windowsPaths, error) {
 		localAppData = filepath.Join(home, "AppData", "Local")
 	}
 
-	rootDir := filepath.Join(localAppData, "FerngeistDaemon")
+	rootDir := filepath.Join(localAppData, "FerngeistGateway")
 	serviceDir := filepath.Join(rootDir, "service")
 	dataDir := filepath.Join(rootDir, "data")
 
@@ -294,11 +294,11 @@ func resolveWindowsPaths() (windowsPaths, error) {
 		dataDir:            dataDir,
 		dataLogsDir:        filepath.Join(dataDir, "logs"),
 		dataManagedBinDir:  filepath.Join(dataDir, "managed-bin"),
-		binaryPath:         filepath.Join(serviceDir, "bin", "ferngeist.exe"),
-		wrapperScriptPath:  filepath.Join(serviceDir, "scripts", "run-ferngeist-daemon.ps1"),
+		binaryPath:         filepath.Join(serviceDir, "bin", "ferngeist-gateway.exe"),
+		wrapperScriptPath:  filepath.Join(serviceDir, "scripts", "run-ferngeist-gateway-daemon.ps1"),
 		overrideScriptPath: filepath.Join(serviceDir, "config", "daemon-overrides.ps1"),
 		daemonLogPath:      filepath.Join(dataDir, "logs", "daemon.log"),
-		stateDBPath:        filepath.Join(dataDir, "ferngeist-helper.db"),
+		stateDBPath:        filepath.Join(dataDir, "ferngeist-gateway.db"),
 	}, nil
 }
 
@@ -328,7 +328,7 @@ func writeWindowsWrapperScript(paths windowsPaths, options InstallOptions) error
 	}
 	publicURLLine := ""
 	if options.PublicURL != "" {
-		publicURLLine = "$env:FERNGEIST_HELPER_PUBLIC_BASE_URL = '" + escapePowerShellSingleQuoted(options.PublicURL) + "'"
+		publicURLLine = "$env:FERNGEIST_GATEWAY_PUBLIC_BASE_URL = '" + escapePowerShellSingleQuoted(options.PublicURL) + "'"
 	}
 
 	content := fmt.Sprintf(
@@ -344,11 +344,11 @@ $managedBinDir = '%s'
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 New-Item -ItemType Directory -Force -Path $managedBinDir | Out-Null
 
-$env:FERNGEIST_HELPER_STATE_DB = $stateDBPath
-$env:FERNGEIST_HELPER_LOG_DIR = $logDir
-$env:FERNGEIST_HELPER_MANAGED_BIN_DIR = $managedBinDir
-$env:FERNGEIST_HELPER_LISTEN_ADDR = '%s'
-$env:FERNGEIST_HELPER_ENABLE_LAN = '%s'
+$env:FERNGEIST_GATEWAY_STATE_DB = $stateDBPath
+$env:FERNGEIST_GATEWAY_LOG_DIR = $logDir
+$env:FERNGEIST_GATEWAY_MANAGED_BIN_DIR = $managedBinDir
+$env:FERNGEIST_GATEWAY_LISTEN_ADDR = '%s'
+$env:FERNGEIST_GATEWAY_ENABLE_LAN = '%s'
 %s
 
 if (Test-Path $overrideScriptPath) {
@@ -385,9 +385,9 @@ func writeWindowsOverridesTemplate(paths windowsPaths) error {
 
 	content := []byte(`# Optional daemon runtime overrides.
 # Uncomment and edit as needed.
-# $env:FERNGEIST_HELPER_ENABLE_LAN = "1"
-# $env:FERNGEIST_HELPER_LISTEN_ADDR = "0.0.0.0:5788"
-# $env:FERNGEIST_HELPER_PUBLIC_BASE_URL = "https://example.com"
+# $env:FERNGEIST_GATEWAY_ENABLE_LAN = "1"
+# $env:FERNGEIST_GATEWAY_LISTEN_ADDR = "0.0.0.0:5788"
+# $env:FERNGEIST_GATEWAY_PUBLIC_BASE_URL = "https://example.com"
 `)
 
 	if err := os.WriteFile(paths.overrideScriptPath, content, 0o644); err != nil {

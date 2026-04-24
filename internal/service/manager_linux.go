@@ -260,7 +260,7 @@ func resolveLinuxPaths() (linuxPaths, error) {
 		return linuxPaths{}, fmt.Errorf("resolve user home directory: %w", err)
 	}
 
-	rootDir := filepath.Join(home, ".local", "share", "ferngeist-daemon")
+	rootDir := filepath.Join(home, ".local", "share", "ferngeist-gateway")
 	unitPath := filepath.Join(home, ".config", "systemd", "user", linuxUnitName)
 
 	return linuxPaths{
@@ -269,8 +269,8 @@ func resolveLinuxPaths() (linuxPaths, error) {
 		configDir:     filepath.Join(rootDir, "config"),
 		logDir:        filepath.Join(rootDir, "logs"),
 		managedBinDir: filepath.Join(rootDir, "managed-bin"),
-		dbPath:        filepath.Join(rootDir, "ferngeist-helper.db"),
-		binaryPath:    filepath.Join(rootDir, "bin", "ferngeist"),
+		dbPath:        filepath.Join(rootDir, "ferngeist-gateway.db"),
+		binaryPath:    filepath.Join(rootDir, "bin", "ferngeist-gateway"),
 		envPath:       filepath.Join(rootDir, "config", "daemon.env"),
 		unitPath:      unitPath,
 	}, nil
@@ -302,14 +302,14 @@ func writeLinuxEnvFile(paths linuxPaths, options InstallOptions) error {
 	}
 
 	lines := []string{
-		"FERNGEIST_HELPER_LISTEN_ADDR=" + listenAddr,
-		"FERNGEIST_HELPER_ENABLE_LAN=" + enableLAN,
-		"FERNGEIST_HELPER_STATE_DB=" + paths.dbPath,
-		"FERNGEIST_HELPER_LOG_DIR=" + paths.logDir,
-		"FERNGEIST_HELPER_MANAGED_BIN_DIR=" + paths.managedBinDir,
+		"FERNGEIST_GATEWAY_LISTEN_ADDR=" + listenAddr,
+		"FERNGEIST_GATEWAY_ENABLE_LAN=" + enableLAN,
+		"FERNGEIST_GATEWAY_STATE_DB=" + paths.dbPath,
+		"FERNGEIST_GATEWAY_LOG_DIR=" + paths.logDir,
+		"FERNGEIST_GATEWAY_MANAGED_BIN_DIR=" + paths.managedBinDir,
 	}
 	if options.PublicURL != "" {
-		lines = append(lines, "FERNGEIST_HELPER_PUBLIC_BASE_URL="+options.PublicURL)
+		lines = append(lines, "FERNGEIST_GATEWAY_PUBLIC_BASE_URL="+options.PublicURL)
 	}
 	lines = append(lines, "")
 

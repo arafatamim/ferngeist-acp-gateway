@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tamimarafat/ferngeist/desktop-helper/internal/storage"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/storage"
 )
 
 func TestServiceLoadsPersistedCredentials(t *testing.T) {
