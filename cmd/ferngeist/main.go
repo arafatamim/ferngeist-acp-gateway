@@ -12,22 +12,30 @@ import (
 	"text/tabwriter"
 	"time"
 
-	qrterminal "github.com/mdp/qrterminal/v3"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/adminclient"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/api"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/config"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/daemon"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/service"
+	qrterminal "github.com/mdp/qrterminal/v3"
 	"github.com/urfave/cli/v3"
 )
 
 var (
-	buildVersion = "0.3.0"
+	buildVersion = ""
 	buildCommit  = ""
 	buildTime    = ""
 )
 
+func requireBuildVersion() {
+	if strings.TrimSpace(buildVersion) == "" {
+		fmt.Fprintln(os.Stderr, "buildVersion is required; build with -ldflags \"-X main.buildVersion=...\"")
+		os.Exit(1)
+	}
+}
+
 func main() {
+	requireBuildVersion()
 	command := &cli.Command{
 		Name:  "ferngeist-gateway",
 		Usage: "manage the Ferngeist gateway daemon",

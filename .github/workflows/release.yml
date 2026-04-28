@@ -62,7 +62,7 @@ jobs:
           fi
           COMMIT="${{ github.sha }}"
           BUILD_TIME="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-          LDFLAGS="-X github.com/arafatamim/ferngeist-acp-gateway/cmd/ferngeist.buildVersion=${VERSION#v} -X github.com/arafatamim/ferngeist-acp-gateway/cmd/ferngeist.buildCommit=${COMMIT} -X github.com/arafatamim/ferngeist-acp-gateway/cmd/ferngeist.buildTime=${BUILD_TIME}"
+          LDFLAGS="-X main.buildVersion=${VERSION#v} -X main.buildCommit=${COMMIT} -X main.buildTime=${BUILD_TIME}"
           mkdir -p dist/${{ matrix.artifact_name }}
           go build -ldflags="$LDFLAGS" -o dist/${{ matrix.artifact_name }}/ferngeist-gateway ./cmd/ferngeist
           cp README.md LICENSE dist/${{ matrix.artifact_name }}/
@@ -144,7 +144,7 @@ jobs:
           fi
           COMMIT="${{ github.sha }}"
           BUILD_TIME="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-          LDFLAGS="-X github.com/arafatamim/ferngeist-acp-gateway/cmd/ferngeist.buildVersion=${VERSION#v} -X github.com/arafatamim/ferngeist-acp-gateway/cmd/ferngeist.buildCommit=${COMMIT} -X github.com/arafatamim/ferngeist-acp-gateway/cmd/ferngeist.buildTime=${BUILD_TIME}"
+          LDFLAGS="-X main.buildVersion=${VERSION#v} -X main.buildCommit=${COMMIT} -X main.buildTime=${BUILD_TIME}"
           mkdir -p dist/${{ matrix.artifact_name }}
           go build -ldflags="$LDFLAGS" -o dist/${{ matrix.artifact_name }}/ferngeist-gateway.exe ./cmd/ferngeist
           cp README.md LICENSE dist/${{ matrix.artifact_name }}/
