@@ -1,0 +1,231 @@
+name: Publish Gateway Release
+
+# Triggered when a release is published or when manually dispatched.
+# The workflow builds Linux and Windows binaries, packages them, computes checksums, and uploads the assets back to the release.
+
+on:
+  release:
+    types:
+      - published
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v1.0.0). Only needed for manual dispatch."
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+# Build jobs run in parallel for Linux and Windows, each targeting amd64 and arm64 where supported.
+
+jobs:
+  build-linux:
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            artifact_name: ferngeist-gateway_linux_amd64
+          - goos: linux
+            goarch: arm64
+            artifact_name: ferngeist-gateway_linux_arm64
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+          cache-dependency-path: go.sum
+
+      # Build the gateway binary for this OS/architecture pair.
+      - name: Build gateway binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        working-directory: .
+        run: |
+          VERSION="${{ github.event.release.tag_name }}"
+          if [ -z "$VERSION" ]; then
+            VERSION="${{ inputs.tag }}"
+          fi
+          if [ -z "$VERSION" ] && [ "${{ github.ref_type }}" = "tag" ]; then
+            VERSION="${{ github.ref_name }}"
+          fi
+          if [ -z "$VERSION" ]; then
+            echo "Release tag is required"
+            exit 1
+          fi
+          COMMIT="${{ github.sha }}"
+          BUILD_TIME="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+          LDFLAGS="-X github.com/arafatamim/ferngeist-acp-gateway/internal/api.buildVersion=${VERSION#v} -X github.com/arafatamim/ferngeist-acp-gateway/internal/api.buildCommit=${COMMIT} -X github.com/arafatamim/ferngeist-acp-gateway/internal/api.buildTime=${BUILD_TIME}"
+          mkdir -p dist/${{ matrix.artifact_name }}
+          go build -ldflags="$LDFLAGS" -o dist/${{ matrix.artifact_name }}/ferngeist-gateway ./cmd/ferngeist
+          cp README.md LICENSE dist/${{ matrix.artifact_name }}/
+
+      # Package the Linux build into a deterministic tar.gz archive.
+      - name: Create Linux archive
+        id: package_linux
+        shell: bash
+        working-directory: dist/${{ matrix.artifact_name }}
+        run: |
+          VERSION="${{ github.event.release.tag_name }}"
+          if [ -z "$VERSION" ]; then
+            VERSION="${{ inputs.tag }}"
+          fi
+          if [ -z "$VERSION" ] && [ "${{ github.ref_type }}" = "tag" ]; then
+            VERSION="${{ github.ref_name }}"
+          fi
+          if [ -z "$VERSION" ]; then
+            echo "Release tag is required"
+            exit 1
+          fi
+          VERSION="${VERSION#v}"
+          ARCHIVE="ferngeist-gateway_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz"
+          tar --sort=name --mtime='2025-01-01T00:00:00Z' --pax-option=exthdr.name=%d/PaxHeader,pnthdr.name=%d/PaxHeader -czf "../$ARCHIVE" .
+          echo "archive=$ARCHIVE" >> "$GITHUB_OUTPUT"
+
+      - name: Run smoke check (amd64 only)
+        if: matrix.goarch == 'amd64'
+        shell: bash
+        working-directory: dist/${{ matrix.artifact_name }}
+        run: ./ferngeist-gateway --version
+
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: dist/${{ steps.package_linux.outputs.archive }}
+          retention-days: 5
+
+  build-windows:
+    strategy:
+      matrix:
+        include:
+          - goos: windows
+            goarch: amd64
+            artifact_name: ferngeist-gateway_windows_amd64
+          - goos: windows
+            goarch: arm64
+            artifact_name: ferngeist-gateway_windows_arm64
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+          cache-dependency-path: go.sum
+
+      - name: Build gateway binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        shell: bash
+        working-directory: .
+        run: |
+          VERSION="${{ github.event.release.tag_name }}"
+          if [ -z "$VERSION" ]; then
+            VERSION="${{ inputs.tag }}"
+          fi
+          if [ -z "$VERSION" ] && [ "${{ github.ref_type }}" = "tag" ]; then
+            VERSION="${{ github.ref_name }}"
+          fi
+          if [ -z "$VERSION" ]; then
+            echo "Release tag is required"
+            exit 1
+          fi
+          COMMIT="${{ github.sha }}"
+          BUILD_TIME="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+          LDFLAGS="-X github.com/arafatamim/ferngeist-acp-gateway/internal/api.buildVersion=${VERSION#v} -X github.com/arafatamim/ferngeist-acp-gateway/internal/api.buildCommit=${COMMIT} -X github.com/arafatamim/ferngeist-acp-gateway/internal/api.buildTime=${BUILD_TIME}"
+          mkdir -p dist/${{ matrix.artifact_name }}
+          go build -ldflags="$LDFLAGS" -o dist/${{ matrix.artifact_name }}/ferngeist-gateway.exe ./cmd/ferngeist
+          cp README.md LICENSE dist/${{ matrix.artifact_name }}/
+
+      # Package the Windows build into a zip archive.
+      - name: Create Windows archive
+        id: package_windows
+        shell: powershell
+        working-directory: dist/${{ matrix.artifact_name }}
+        run: |
+          $version = "${{ github.event.release.tag_name }}"
+          if ([string]::IsNullOrWhiteSpace($version)) { $version = "${{ inputs.tag }}" }
+          if ([string]::IsNullOrWhiteSpace($version) -and "${{ github.ref_type }}" -eq "tag") { $version = "${{ github.ref_name }}" }
+          if ([string]::IsNullOrWhiteSpace($version)) { throw "Release tag is required" }
+          if ($version.StartsWith("v")) { $version = $version.Substring(1) }
+          $archive = "ferngeist-gateway_${version}_${{ matrix.goos }}_${{ matrix.goarch }}.zip"
+          Compress-Archive -Path * -DestinationPath "../$archive" -Force
+          "archive=$archive" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Run smoke check (amd64 only)
+        if: matrix.goarch == 'amd64'
+        shell: powershell
+        working-directory: dist/${{ matrix.artifact_name }}
+        run: .\ferngeist-gateway.exe --version
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: dist/${{ steps.package_windows.outputs.archive }}
+          retention-days: 5
+
+  publish:
+    needs: [build-linux, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      # Collect all build artifacts from the matrix jobs.
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          pattern: ferngeist-gateway_*
+          merge-multiple: true
+
+      # Generate a checksum file for the published release assets.
+      - name: Generate SHA256 checksums
+        shell: bash
+        run: |
+          cd artifacts
+          sha256sum ferngeist-gateway_*.zip ferngeist-gateway_*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+
+      # Resolve the release tag from the event or manual input.
+      - name: Resolve release tag
+        id: release_tag
+        shell: bash
+        run: |
+          TAG="${{ github.event.release.tag_name }}"
+          if [ -z "$TAG" ]; then
+            TAG="${{ inputs.tag }}"
+          fi
+          if [ -z "$TAG" ] && [ "${{ github.ref_type }}" = "tag" ]; then
+            TAG="${{ github.ref_name }}"
+          fi
+          if [ -z "$TAG" ]; then
+            echo "Release tag is required"
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      # Upload every packaged artifact and checksum file to the release.
+      - name: Upload release assets
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.release_tag.outputs.tag }}
+        shell: bash
+        run: |
+          for file in artifacts/*; do
+            echo "Uploading: $file"
+            gh release upload "$TAG" "$file" --clobber
+          done

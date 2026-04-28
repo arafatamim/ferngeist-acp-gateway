@@ -21,3 +21,4 @@ ferngeist-gateway
 ferngeist-gateway.exe
 ferngeist-gateway-*-amd64*
 ferngeist-gateway-*-arm64*
+.worktrees/
