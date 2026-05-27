@@ -1,3 +1,8 @@
+// Package storage provides a lightweight SQLite-backed persistence layer for the
+// gateway's durable state: pairings, runtime metadata, tokens, gateway settings,
+// acquired binaries, sessions, and inbound diagnostic logs. The store is
+// intentionally small and local — the gateway is a daemon, not a distributed
+// service.
 package storage
 
 import (
@@ -63,6 +68,23 @@ type AcquiredBinaryRecord struct {
 	InstalledAt time.Time
 }
 
+// SessionRecord represents a stored resilient session row in gateway_sessions.
+// Nullable time fields (LastClientConnectAt, LastClientDisconnectAt, DisconnectedSince)
+// use pointers so SQLITE NULL maps to Go nil without parsing zero-value timestamps.
+type SessionRecord struct {
+	SessionID              string
+	RuntimeID              string
+	DeviceID               string
+	AgentID                string
+	Status                 string
+	Leaseholder            string
+	CreatedAt              time.Time
+	LastClientConnectAt    *time.Time
+	LastClientDisconnectAt *time.Time
+	DisconnectedSince      *time.Time
+	Metadata               string
+}
+
 // SQLiteStore is the gateway's only durable state store. It is intentionally
 // limited to pairings, gateway settings, runtime metadata, runtime tokens, and
 // recent failures.
@@ -79,6 +101,13 @@ func Open(path string) (*SQLiteStore, error) {
 	}
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
+
+	// SQLite does not enforce foreign keys by default. Enable them so
+	// ON DELETE CASCADE on session_inbound_log automatically removes
+	// child rows when a session is deleted.
+	if _, err := db.ExecContext(context.Background(), "PRAGMA foreign_keys=ON"); err != nil {
+		return nil, err
+	}
 
 	store := &SQLiteStore{db: db}
 	if err := store.migrate(context.Background()); err != nil {
@@ -229,62 +258,6 @@ func (s *SQLiteStore) SaveRuntime(ctx context.Context, record RuntimeRecord) err
 		record.CreatedAt.UTC().Format(time.RFC3339Nano),
 	)
 	return err
-}
-
-func (s *SQLiteStore) UpdateRuntimeStatus(ctx context.Context, runtimeID, status, lastError string, pid int) error {
-	result, err := s.db.ExecContext(
-		ctx,
-		`UPDATE runtimes SET status = ?, last_error = ?, pid = ? WHERE runtime_id = ?`,
-		status,
-		lastError,
-		pid,
-		runtimeID,
-	)
-	if err != nil {
-		return err
-	}
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if rowsAffected == 0 {
-		return ErrNotFound
-	}
-	return nil
-}
-
-func (s *SQLiteStore) ListRuntimes(ctx context.Context) ([]RuntimeRecord, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT runtime_id, agent_id, agent_name, status, command, pid, last_error, created_at FROM runtimes`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var records []RuntimeRecord
-	for rows.Next() {
-		var (
-			record     RuntimeRecord
-			createdRaw string
-		)
-		if err := rows.Scan(
-			&record.RuntimeID,
-			&record.AgentID,
-			&record.AgentName,
-			&record.Status,
-			&record.Command,
-			&record.PID,
-			&record.LastError,
-			&createdRaw,
-		); err != nil {
-			return nil, err
-		}
-		record.CreatedAt, err = time.Parse(time.RFC3339Nano, createdRaw)
-		if err != nil {
-			return nil, err
-		}
-		records = append(records, record)
-	}
-	return records, rows.Err()
 }
 
 func (s *SQLiteStore) SaveRuntimeToken(ctx context.Context, record RuntimeTokenRecord) error {
@@ -492,6 +465,121 @@ func (s *SQLiteStore) ListRecentRuntimeFailures(ctx context.Context, limit int) 
 	return records, rows.Err()
 }
 
+// SaveSession inserts or updates a session record. Uses ON CONFLICT DO UPDATE
+// so the same method works for both initial creation and incremental status updates.
+func (s *SQLiteStore) SaveSession(ctx context.Context, record SessionRecord) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO gateway_sessions(session_id, runtime_id, device_id, agent_id, status, leaseholder, created_at, last_client_connect_at, last_client_disconnect_at, disconnected_since, metadata)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(session_id) DO UPDATE SET
+		   status = excluded.status,
+		   leaseholder = excluded.leaseholder,
+		   last_client_connect_at = excluded.last_client_connect_at,
+		   last_client_disconnect_at = excluded.last_client_disconnect_at,
+		   disconnected_since = excluded.disconnected_since,
+		   metadata = excluded.metadata`,
+		record.SessionID, record.RuntimeID, record.DeviceID, record.AgentID, record.Status, record.Leaseholder,
+		record.CreatedAt.UTC().Format(time.RFC3339Nano),
+		timeToNullable(record.LastClientConnectAt),
+		timeToNullable(record.LastClientDisconnectAt),
+		timeToNullable(record.DisconnectedSince),
+		record.Metadata,
+	)
+	return err
+}
+
+func scanSession(row *sql.Row) (SessionRecord, error) {
+	var rec SessionRecord
+	var createdRaw, connRaw, discRaw, sinceRaw string
+	err := row.Scan(&rec.SessionID, &rec.RuntimeID, &rec.DeviceID, &rec.AgentID, &rec.Status, &rec.Leaseholder, &createdRaw, &connRaw, &discRaw, &sinceRaw, &rec.Metadata)
+	if err != nil {
+		return SessionRecord{}, err
+	}
+	rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdRaw)
+	rec.LastClientConnectAt = nullableToTime(connRaw)
+	rec.LastClientDisconnectAt = nullableToTime(discRaw)
+	rec.DisconnectedSince = nullableToTime(sinceRaw)
+	return rec, nil
+}
+
+// GetSession retrieves a single session record by its session ID.
+// Returns ErrNotFound if no row exists.
+func (s *SQLiteStore) GetSession(ctx context.Context, sessionID string) (SessionRecord, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT session_id, runtime_id, device_id, agent_id, status, leaseholder, created_at, last_client_connect_at, last_client_disconnect_at, disconnected_since, metadata
+		 FROM gateway_sessions WHERE session_id = ?`, sessionID)
+	rec, err := scanSession(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return SessionRecord{}, ErrNotFound
+		}
+		return SessionRecord{}, err
+	}
+	return rec, nil
+}
+
+// DeleteSession removes a session and, via ON DELETE CASCADE, all its
+// associated inbound diagnostic rows.
+func (s *SQLiteStore) DeleteSession(ctx context.Context, sessionID string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM gateway_sessions WHERE session_id = ?`, sessionID)
+	return err
+}
+
+// ListSessionsByDevice returns all sessions owned by a device, ordered by
+// creation time descending (newest first). Used to enforce per-device limits
+// and for the sessions list endpoint.
+func (s *SQLiteStore) ListSessionsByDevice(ctx context.Context, deviceID string) ([]SessionRecord, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT session_id, runtime_id, device_id, agent_id, status, leaseholder, created_at, last_client_connect_at, last_client_disconnect_at, disconnected_since, metadata
+		 FROM gateway_sessions WHERE device_id = ? ORDER BY created_at DESC`, deviceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var records []SessionRecord
+	for rows.Next() {
+		var rec SessionRecord
+		var createdRaw, connRaw, discRaw, sinceRaw string
+		if err := rows.Scan(&rec.SessionID, &rec.RuntimeID, &rec.DeviceID, &rec.AgentID, &rec.Status, &rec.Leaseholder, &createdRaw, &connRaw, &discRaw, &sinceRaw, &rec.Metadata); err != nil {
+			return nil, err
+		}
+		rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdRaw)
+		rec.LastClientConnectAt = nullableToTime(connRaw)
+		rec.LastClientDisconnectAt = nullableToTime(discRaw)
+		rec.DisconnectedSince = nullableToTime(sinceRaw)
+		records = append(records, rec)
+	}
+	return records, rows.Err()
+}
+
+// ReconcileSessionsOnStartup transitions all sessions that were active or
+// disconnected at the last shutdown to failed. On restart, the backing runtime
+// processes no longer exist, so these sessions are unrecoverable.
+func (s *SQLiteStore) ReconcileSessionsOnStartup(ctx context.Context) error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE gateway_sessions SET status = 'failed', last_client_disconnect_at = ? WHERE status IN ('active', 'disconnected')`,
+		now)
+	return err
+}
+
+// AppendInboundDiagnostic stores a client-to-agent message for audit/debugging.
+// Written via a buffered channel so the hot path never blocks on SQLite I/O.
+func (s *SQLiteStore) AppendInboundDiagnostic(ctx context.Context, sessionID string, seq int64, payload string) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO session_inbound_log(session_id, seq, payload, recorded_at) VALUES (?, ?, ?, ?)`,
+		sessionID, seq, payload, time.Now().UTC().Format(time.RFC3339Nano))
+	return err
+}
+
+func (s *SQLiteStore) SaveFCMToken(ctx context.Context, deviceID, fcmToken string) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO device_fcm_tokens(device_id, fcm_token, updated_at) VALUES (?, ?, ?)
+		 ON CONFLICT(device_id) DO UPDATE SET fcm_token = excluded.fcm_token, updated_at = excluded.updated_at`,
+		deviceID, fcmToken, time.Now().UTC().Format(time.RFC3339Nano))
+	return err
+}
+
 // migrate is intentionally append-only and idempotent because the gateway is a
 // local daemon, not a service with a heavyweight migration framework.
 func (s *SQLiteStore) migrate(ctx context.Context) error {
@@ -549,6 +637,36 @@ func (s *SQLiteStore) migrate(ctx context.Context) error {
 			archive_url TEXT NOT NULL DEFAULT '',
 			installed_at TEXT NOT NULL
 		)`,
+		`CREATE TABLE IF NOT EXISTS gateway_sessions (
+			session_id TEXT PRIMARY KEY,
+			runtime_id TEXT NOT NULL,
+			device_id TEXT NOT NULL,
+			agent_id TEXT NOT NULL,
+			status TEXT NOT NULL DEFAULT 'active',
+			leaseholder TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL,
+			last_client_connect_at TEXT,
+			last_client_disconnect_at TEXT,
+			disconnected_since TEXT,
+			metadata TEXT NOT NULL DEFAULT '{}'
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_sessions_runtime ON gateway_sessions(runtime_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_sessions_device ON gateway_sessions(device_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_sessions_status ON gateway_sessions(status)`,
+		`CREATE TABLE IF NOT EXISTS session_inbound_log (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			session_id TEXT NOT NULL,
+			seq INTEGER NOT NULL,
+			payload TEXT NOT NULL,
+			recorded_at TEXT NOT NULL,
+			FOREIGN KEY (session_id) REFERENCES gateway_sessions(session_id) ON DELETE CASCADE
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_inbound_session_seq ON session_inbound_log(session_id, seq)`,
+		`CREATE TABLE IF NOT EXISTS device_fcm_tokens (
+			device_id TEXT PRIMARY KEY,
+			fcm_token TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		)`,
 	}
 
 	for _, statement := range statements {
@@ -558,6 +676,28 @@ func (s *SQLiteStore) migrate(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// timeToNullable formats a *time.Time for SQLite storage. Returns empty string
+// for nil pointers so the column gets SQL NULL.
+func timeToNullable(t *time.Time) string {
+	if t == nil {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339Nano)
+}
+
+// nullableToTime parses a SQLite text column back to *time.Time. Returns nil
+// for empty strings (SQL NULL) or parse errors.
+func nullableToTime(s string) *time.Time {
+	if s == "" {
+		return nil
+	}
+	t, err := time.Parse(time.RFC3339Nano, s)
+	if err != nil {
+		return nil
+	}
+	return &t
 }
 
 func boolToSQLiteInt(value bool) int {
