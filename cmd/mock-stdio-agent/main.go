@@ -105,6 +105,7 @@ func dispatch(w *bufio.Writer, req rpcRequest, logger *slog.Logger) {
 					"list":   map[string]any{},
 					"resume": map[string]any{},
 					"fork":   map[string]any{},
+					"close":  map[string]any{}, // advertises session/close support for gateway integration tests
 				},
 			},
 			"agentInfo":   agentInfo,
@@ -132,8 +133,8 @@ func dispatch(w *bufio.Writer, req rpcRequest, logger *slog.Logger) {
 				map[string]any{
 					"sessionId": "mock_sess_1",
 					"cwd":       "/home/user/project",
-					"title":      "Mock session for review",
-					"updatedAt":  "2025-12-01T12:00:00Z",
+					"title":     "Mock session for review",
+					"updatedAt": "2025-12-01T12:00:00Z",
 				},
 			},
 		})
@@ -165,6 +166,10 @@ func dispatch(w *bufio.Writer, req rpcRequest, logger *slog.Logger) {
 		writeResult(w, req, nil)
 	case "session/set_config_option":
 		writeResult(w, req, map[string]any{"configOptions": []any{}})
+	case "session/close":
+		writeResult(w, req, map[string]any{
+			"sessionId": "closed",
+		})
 	default:
 		logger.Warn("unknown method", slog.String("method", req.Method))
 		writeError(w, req, -32601, fmt.Sprintf("Method not found: %s", req.Method))
