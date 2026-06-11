@@ -10,20 +10,22 @@ import (
 )
 
 const (
-	defaultListenAddr            = "127.0.0.1:5788"
-	defaultAdminAddr             = "127.0.0.1:5789"
-	defaultLogLevel              = "info"
-	defaultLogDir                = "logs"
-	defaultLogMaxSize            = int64(1024 * 1024)
-	defaultLogBackups            = 3
-	defaultPairingArmTTL         = 2 * time.Minute
-	defaultPairingLockoutWindow  = 2 * time.Minute
-	defaultPairingStartRefill    = 5 * time.Second
-	defaultPairingCompleteRefill = 2 * time.Second
-	defaultPairingMaxAttempts    = 5
-	defaultPairingBurstPerIP     = 5
-	defaultPairingBurstGlobal    = 30
-	defaultCredentialTTL         = 7 * 24 * time.Hour
+	defaultListenAddr             = "127.0.0.1:5788"
+	defaultAdminAddr              = "127.0.0.1:5789"
+	defaultLogLevel               = "info"
+	defaultLogDir                 = "logs"
+	defaultLogMaxSize             = int64(1024 * 1024)
+	defaultLogBackups             = 3
+	defaultPairingArmTTL          = 2 * time.Minute
+	defaultPairingLockoutWindow   = 2 * time.Minute
+	defaultPairingStartRefill     = 5 * time.Second
+	defaultPairingCompleteRefill  = 2 * time.Second
+	defaultPairingMaxAttempts     = 5
+	defaultPairingBurstPerIP      = 5
+	defaultPairingBurstGlobal     = 30
+	defaultCredentialTTL          = 7 * 24 * time.Hour
+	defaultSessionMaxDisconnected = 15 * time.Minute
+	defaultMaxSessionsPerDevice   = 5
 )
 
 // Config is the daemon's effective runtime configuration after environment
@@ -53,6 +55,10 @@ type Config struct {
 	AllowRuntimeRestartEnv       bool
 	RequireProofOfPossession     bool
 	AllowLegacyBearerCredentials bool
+	// SessionMaxDisconnected is the TTL for disconnected sessions before the reaper closes them.
+	SessionMaxDisconnected time.Duration
+	// MaxSessionsPerDevice limits how many concurrent sessions a single device can hold.
+	MaxSessionsPerDevice int
 }
 
 type PersistedSettings struct {
@@ -89,6 +95,8 @@ func Load() Config {
 		CredentialTTL:          envDurationSecondsOrDefault("FERNGEIST_GATEWAY_CREDENTIAL_TTL_SECONDS", defaultCredentialTTL),
 		AllowDiagnosticsExport: envBool("FERNGEIST_GATEWAY_ALLOW_REMOTE_DIAGNOSTICS_EXPORT"),
 		AllowRuntimeRestartEnv: envBool("FERNGEIST_GATEWAY_ALLOW_REMOTE_RUNTIME_RESTART_ENV"),
+		SessionMaxDisconnected: envDurationSecondsOrDefault("FERNGEIST_GATEWAY_SESSION_MAX_DISCONNECTED_SECONDS", defaultSessionMaxDisconnected),
+		MaxSessionsPerDevice:   envIntOrDefault("FERNGEIST_GATEWAY_MAX_SESSIONS_PER_DEVICE", defaultMaxSessionsPerDevice),
 	}
 	return cfg.applySecurityDefaults()
 }
