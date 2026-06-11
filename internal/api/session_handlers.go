@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"net/http"
 
@@ -108,18 +109,15 @@ func (s *Server) handleACPWebSocket(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleSessionWebSocket handles reconnection to an existing resilient session.
-// Flow: validate attach token → upgrade to WebSocket → set pump client → proxy.
-// The client is responsible for calling session/load on the agent for context
-// restoration after reconnection.
+// Flow: validate attach token (taking over any stale connection) → upgrade to
+// WebSocket → bind pump client → proxy. A new valid attach always supersedes the
+// previous connection rather than being rejected, so a client whose socket died
+// (e.g. the app was killed) can always reconnect. The client is responsible for
+// calling session/load on the agent for context restoration after reconnection.
 func (s *Server) handleSessionWebSocket(w http.ResponseWriter, r *http.Request, runtimeID, sessionID, attachToken string) {
-	runtimeIDResult, err := s.sessionSvc.AttachClient(r.Context(), sessionID, attachToken)
+	runtimeIDResult, gen, err := s.sessionSvc.AttachClient(r.Context(), sessionID, attachToken)
 	if err != nil {
 		s.logger.Warn("attach client failed", "error", err)
-		if errors.Is(err, session.ErrSessionAlreadyBound) {
-			w.Header().Set("Retry-After", "2")
-			http.Error(w, err.Error(), http.StatusConflict)
-			return
-		}
 		if errors.Is(err, session.ErrAttachTokenInvalid) {
 			http.Error(w, err.Error(), http.StatusUnauthorized)
 			return
@@ -129,6 +127,7 @@ func (s *Server) handleSessionWebSocket(w http.ResponseWriter, r *http.Request, 
 	}
 
 	if runtimeIDResult != runtimeID {
+		s.sessionSvc.DetachClient(sessionID, gen)
 		http.Error(w, "runtime ID does not match session", http.StatusBadRequest)
 		return
 	}
@@ -136,22 +135,44 @@ func (s *Server) handleSessionWebSocket(w http.ResponseWriter, r *http.Request, 
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
 	if err != nil {
 		s.logger.Warn("websocket accept failed", "error", err)
-		s.sessionSvc.DetachClient(sessionID)
+		s.sessionSvc.DetachClient(sessionID, gen)
 		return
 	}
 	defer conn.CloseNow()
-	defer s.sessionSvc.DetachClient(sessionID)
+	defer s.sessionSvc.DetachClient(sessionID, gen)
 	conn.SetReadLimit(acpWebSocketReadLimit)
+
+	// Bind this connection to the session pump. If a newer attach raced ahead and
+	// already superseded us, bail out and let the deferred (no-op) detach clean up.
+	if !s.sessionSvc.BindConn(sessionID, conn, gen) {
+		return
+	}
 
 	pump, err := s.sessionSvc.GetPump(sessionID)
 	if err != nil {
 		s.logger.Warn("pump not found", "error", err)
 		return
 	}
-	pump.SetClient(conn)
+
+	// Detect a dead peer that never sent a close frame (half-open socket): ping
+	// periodically and close the conn on failure so the read loop unblocks and
+	// the session is released instead of lingering as falsely "connected".
+	pingCtx, stopPing := context.WithCancel(context.Background())
+	defer stopPing()
+	go keepAliveWebSocket(pingCtx, conn, s.logger)
+
+	// Intercept a duplicate `initialize` from a reconnecting client: the agent is
+	// already initialized, so replay the cached response instead of forwarding a
+	// second handshake that a strict agent may reject by exiting.
+	writeToAgent := func(payload []byte) error {
+		if pump.MaybeReplayInitialize(payload) {
+			return nil
+		}
+		return pump.WriteToAgent(payload)
+	}
 
 	done := make(chan error, 1)
-	go proxyWebSocketToStdio(conn, pump.WriteToAgent, func() {}, runtimeID, s.runtime.AppendLog,
+	go proxyWebSocketToStdio(conn, writeToAgent, func() {}, runtimeID, s.runtime.AppendLog,
 		func(payload []byte) {
 			s.sessionSvc.LogInbound(sessionID, string(payload))
 		}, done)

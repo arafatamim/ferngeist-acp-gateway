@@ -202,19 +202,33 @@ func (s *Server) handleRuntimeConnect(w http.ResponseWriter, r *http.Request) {
 	s.gateway.Register(descriptor)
 	resp := connectResponseFromDescriptor(r, descriptor)
 
-	// If the client requested a resilient session, create one and attach
-	// the session ID and attach token to the connect response.
+	// If the client requested a resilient session, attach the session ID and a
+	// fresh attach token to the connect response. Reuse an existing session for
+	// this runtime when one is still alive (the common reconnect-after-app-kill
+	// case): the agent process and the runtime lease are still held by it, so
+	// creating a second session would fail with ErrRuntimeLeaseHeld and leave the
+	// client without session credentials.
 	if r.Body != nil && r.ContentLength > 0 {
 		var body struct {
 			SessionMode string `json:"sessionMode"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err == nil && body.SessionMode == "resilient" && s.sessionSvc != nil {
-			sess, attachToken, err := s.sessionSvc.Create(r.Context(), runtimeID, credential.DeviceID, descriptor.AgentID)
-			if err != nil {
-				s.logger.Warn("failed to create resilient session", "error", err)
+			if existingID, ok := s.sessionSvc.FindReconnectableByRuntime(runtimeID, credential.DeviceID); ok {
+				attachToken, err := s.sessionSvc.Resume(r.Context(), existingID, credential.DeviceID)
+				if err != nil {
+					s.logger.Warn("failed to resume existing resilient session", "error", err)
+				} else {
+					resp.SessionID = existingID
+					resp.AttachToken = attachToken
+				}
 			} else {
-				resp.SessionID = sess.ID
-				resp.AttachToken = attachToken
+				sess, attachToken, err := s.sessionSvc.Create(r.Context(), runtimeID, credential.DeviceID, descriptor.AgentID)
+				if err != nil {
+					s.logger.Warn("failed to create resilient session", "error", err)
+				} else {
+					resp.SessionID = sess.ID
+					resp.AttachToken = attachToken
+				}
 			}
 		}
 	}

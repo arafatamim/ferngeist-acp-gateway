@@ -17,8 +17,11 @@ import (
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/gateway"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/logging"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/pairing"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/push"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/token"
 	acpregistry "github.com/arafatamim/ferngeist-acp-gateway/internal/registry"
 	gatewayruntime "github.com/arafatamim/ferngeist-acp-gateway/internal/runtime"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/session"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/storage"
 )
 
@@ -41,6 +44,14 @@ func Run(ctx context.Context, build api.BuildInfo) error {
 	if err := store.DeleteAllRuntimeTokens(context.Background()); err != nil {
 		return fmt.Errorf("clear stale runtime tokens: %w", err)
 	}
+
+	// Reconcile sessions orphaned by a previous shutdown.
+	// Any session that was active or disconnected at shutdown is now stale
+	// since its backing process no longer exists.
+	if err := store.ReconcileSessionsOnStartup(context.Background()); err != nil {
+		logger.Warn("failed to reconcile stale sessions on startup", slog.String("error", err.Error()))
+	}
+
 	cfg = ApplyPersistedSettings(logger, store, cfg)
 
 	registryClient := acpregistry.New(cfg.RegistryURL, 6*time.Hour)
@@ -54,6 +65,13 @@ func Run(ctx context.Context, build api.BuildInfo) error {
 		AllowRuntimeRestartEnv: cfg.AllowRuntimeRestartEnv,
 	})
 	gatewaySvc := gateway.New(logger, store)
+	tokenSvc := token.New(logger)
+	pushSvc := push.NewLogPushService(logger.With("component", "push"))
+	sessionSvc := session.NewRuntimeSession(logger, store, runtimeSvc, tokenSvc, session.Config{
+		MaxDisconnected: cfg.SessionMaxDisconnected,
+		MaxPerDevice:    cfg.MaxSessionsPerDevice,
+		PushSvc:         pushSvc,
+	})
 	discoverySvc := discovery.New(logger)
 
 	if cfg.EnableLAN {
@@ -78,6 +96,8 @@ func Run(ctx context.Context, build api.BuildInfo) error {
 		discoverySvc,
 		logSvc,
 		registryClient,
+		store,
+		sessionSvc,
 	)
 
 	logger.Info("starting gateway daemon",

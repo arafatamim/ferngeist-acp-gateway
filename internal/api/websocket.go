@@ -4,16 +4,53 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/coder/websocket"
+)
+
+// WebSocket keepalive tuning. Coder's websocket library does not auto-detect a
+// half-open peer, so the server pings periodically; a missed pong closes the
+// connection, which unblocks the read loop and releases the session.
+const (
+	wsKeepAliveInterval = 30 * time.Second
+	wsKeepAlivePingWait = 10 * time.Second
 )
 
 // websocketWriteContext returns a context with the configured ACP WebSocket
 // write timeout. Each outgoing message write is bounded by this deadline.
 func websocketWriteContext() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), acpWebSocketWriteTimeout)
+}
+
+// keepAliveWebSocket pings the client on a fixed interval until ctx is cancelled.
+// A ping that is not answered within wsKeepAlivePingWait is treated as a dead
+// peer: the connection is force-closed so the read loop returns and the session
+// detaches. This bounds how long a session can sit falsely "connected" behind a
+// half-open socket (e.g. the mobile app was killed without a clean close).
+func keepAliveWebSocket(ctx context.Context, conn *websocket.Conn, logger *slog.Logger) {
+	ticker := time.NewTicker(wsKeepAliveInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			pingCtx, cancel := context.WithTimeout(ctx, wsKeepAlivePingWait)
+			err := conn.Ping(pingCtx)
+			cancel()
+			if err != nil {
+				if ctx.Err() == nil {
+					logger.Warn("websocket keepalive ping failed; closing", "error", err)
+					conn.CloseNow()
+				}
+				return
+			}
+		}
+	}
 }
 
 // proxyWebSocketToStdio adapts ACP-over-WebSocket client messages into the

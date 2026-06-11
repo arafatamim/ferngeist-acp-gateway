@@ -30,6 +30,8 @@ import (
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/pairing"
 	acpregistry "github.com/arafatamim/ferngeist-acp-gateway/internal/registry"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/runtime"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/session"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/storage"
 )
 
 // Server is the main HTTP server that wires together all gateway subsystems into
@@ -48,13 +50,17 @@ type Server struct {
 	build       BuildInfo        // version/commit info baked at compile time
 	startedAt   time.Time        // used for uptime calculation
 	now         func() time.Time // injectable clock for testability
-	catalog     *catalog.Service
-	runtime     *runtime.Supervisor
-	pairing     *pairing.Service
-	gateway     *gateway.Service
-	discovery   *discovery.Service
-	logs        *logging.Service
-	registry    registryStatusProvider
+
+	catalog    *catalog.Service
+	runtime    *runtime.Supervisor
+	sessionSvc *session.RuntimeSession
+	store      *storage.SQLiteStore
+	pairing    *pairing.Service
+	gateway    *gateway.Service
+	discovery  *discovery.Service
+	logs       *logging.Service
+	registry   registryStatusProvider
+
 	rateLimiter *pairingRateLimiter    // protects pairing endpoints from abuse
 	attempts    *pairingAttemptTracker // tracks failed pairing attempts for lockout
 	proofNonces *proofNonceTracker     // prevents replay of credential proofs
@@ -64,10 +70,10 @@ type Server struct {
 // Clients use this to detect compatibility mismatches.
 const protocolVersion = "v1alpha1"
 
-// Operational limits and security defaults.
+// Security and request limits.
 const (
 	acpWebSocketReadLimit    = 1024 * 1024               // max ACP message size (1MB)
-	acpWebSocketWriteTimeout = 30 * time.Second          // write deadline per WebSocket frame
+	acpWebSocketWriteTimeout = 30 * time.Second          // write deadline per WebSocket frame — keep in sync with session/pump.go:acpWebSocketWriteTimeout
 	jsonBodyLimit            = int64(16 * 1024)          // max JSON request body size
 	pairingMaxAttempts       = 5                         // failures before temporary lockout
 	pairingLockoutWindow     = 2 * time.Minute           // cooldown period after max attempts
@@ -178,6 +184,8 @@ func NewServer(
 	discoverySvc *discovery.Service,
 	logSvc *logging.Service,
 	registrySvc registryStatusProvider,
+	store *storage.SQLiteStore,
+	sessionSvc *session.RuntimeSession,
 ) *Server {
 	cfg = normalizeSecurityConfig(cfg)
 	server := &Server{
@@ -196,6 +204,8 @@ func NewServer(
 		rateLimiter: newPairingRateLimiter(cfg),
 		attempts:    newPairingAttemptTracker(cfg),
 		proofNonces: newProofNonceTracker(),
+		store:       store,
+		sessionSvc:  sessionSvc,
 	}
 
 	mux := http.NewServeMux()
@@ -215,7 +225,8 @@ func NewServer(
 	mux.HandleFunc("POST /v1/agents/{agentId}/stop", server.handleAgentStop)
 	mux.HandleFunc("POST /v1/runtimes/{runtimeId}/connect", server.handleRuntimeConnect)
 	mux.HandleFunc("POST /v1/runtimes/{runtimeId}/restart", server.handleRuntimeRestart)
-	mux.HandleFunc("GET /v1/acp/{runtimeId}", server.handleACPWebSocket)
+	server.registerSessionRoutes(mux)
+	mux.HandleFunc("POST /v1/devices/fcm-token", server.handleRegisterFCMToken)
 	adminMux.HandleFunc("GET /admin/v1/status", server.handleAdminStatus)
 	adminMux.HandleFunc("POST /admin/v1/pairings/start", server.handleAdminPairingStart)
 	adminMux.HandleFunc("GET /admin/v1/pairings/{challengeId}", server.handleAdminPairingStatus)
