@@ -66,6 +66,10 @@ var (
 	// ErrRuntimeAlreadyAttached is returned when attempting to attach stdio to
 	// a runtime that already has an active ACP session connection.
 	ErrRuntimeAlreadyAttached = errors.New("runtime is already attached to an ACP session")
+
+	// ErrRuntimeLeaseHeld is returned when attempting to acquire a lease on a
+	// runtime that already has an active lease from a different leaseholder.
+	ErrRuntimeLeaseHeld = errors.New("runtime lease is held by another session")
 )
 
 // Status constants represent the possible lifecycle states of a runtime.
@@ -184,6 +188,9 @@ type ConnectDescriptor struct {
 	// RuntimeID is the runtime this descriptor connects to.
 	RuntimeID string `json:"runtimeId"`
 
+	// AgentID identifies which agent the runtime is running.
+	AgentID string `json:"agentId"`
+
 	// Protocol is the connection protocol (currently "acp").
 	Protocol string `json:"protocol"`
 
@@ -234,10 +241,13 @@ type Supervisor struct {
 
 	// installer handles automatic agent acquisition if not present.
 	installer *acquire.Installer
+
+	// onExitCallbacks maps runtime ID to a callback invoked when the process exits.
+	onExitCallbacks map[string]func(string)
 }
 
 // processHandle holds the OS process and lifecycle state for a running runtime.
-// It tracks stdin/stdout pipes for stdio transport, attachment status for
+// It tracks stdin/stdout pipes for stdio transport, leaseholder for
 // exclusive ACP sessions, and restart configuration.
 type processHandle struct {
 	// cmd is the underlying OS process being managed.
@@ -255,8 +265,9 @@ type processHandle struct {
 	// stdout is the process's standard output pipe for ACP communication.
 	stdout io.ReadCloser
 
-	// attached indicates whether an ACP session is actively using this runtime.
-	attached bool
+	// leaseholder identifies the current lease owner: empty = unleased,
+	// session ID or "legacy" = leased.
+	leaseholder string
 
 	// stopping indicates an intentional shutdown is in progress.
 	stopping bool
@@ -294,15 +305,16 @@ func NewSupervisorWithBaseDir(logger *slog.Logger, baseDir string, store *storag
 // automatic agent acquisition.
 func NewSupervisorWithBaseDirAndInstaller(logger *slog.Logger, baseDir string, store *storage.SQLiteStore, installer *acquire.Installer) *Supervisor {
 	return &Supervisor{
-		logger:         logger.With("component", "runtime"),
-		now:            time.Now,
-		runtimes:       make(map[string]Runtime),
-		runtimeByAgent: make(map[string]string),
-		processes:      make(map[string]*processHandle),
-		logs:           make(map[string][]LogEntry),
-		baseDir:        baseDir,
-		store:          store,
-		installer:      installer,
+		logger:          logger.With("component", "runtime"),
+		now:             time.Now,
+		runtimes:        make(map[string]Runtime),
+		runtimeByAgent:  make(map[string]string),
+		processes:       make(map[string]*processHandle),
+		logs:            make(map[string][]LogEntry),
+		baseDir:         baseDir,
+		store:           store,
+		installer:       installer,
+		onExitCallbacks: make(map[string]func(string)),
 	}
 }
 
@@ -311,8 +323,8 @@ func NewSupervisorWithBaseDirAndInstaller(logger *slog.Logger, baseDir string, s
 // launch mode and transport. If an installer is available and the agent is not
 // detected, it attempts automatic acquisition first.
 //
-// If a runtime for this agent already exists and is attached, it will be stopped
-// and replaced. If an unattached runtime exists, it is returned as-is.
+// If a runtime for this agent already exists and is leased, it will be stopped
+// and replaced. If an unleased runtime exists, it is returned as-is.
 //
 // Returns the Runtime descriptor on success, or an error if validation or
 // launch fails.
@@ -326,12 +338,16 @@ func (s *Supervisor) Start(agent catalog.Agent) (Runtime, error) {
 	// Look up if there's already a runtime for this agent
 	if runtimeID, ok := s.runtimeByAgent[agent.ID]; ok {
 		if existing, exists := s.runtimes[runtimeID]; exists {
-			// Check if the existing runtime has an attached ACP session
-			// If attached, it's "stale" and needs to be replaced
-			if handle, attached := s.processes[runtimeID]; attached && handle != nil && handle.attached {
-				staleRuntimeID = runtimeID
+			// Check if the existing runtime has an active lease
+			// If leased, it's "stale" and needs to be replaced
+			// If a processHandle exists and is leased ONLY by a legacy client
+		// (fate-bound), we can stop and replace it. Session-leased runtimes
+		// (leaseholder is a session ID, not "legacy") must be protected —
+		// killing them would orphan a resilient session.
+		if handle, exists := s.processes[runtimeID]; exists && handle != nil && handle.leaseholder == "legacy" {
+			staleRuntimeID = runtimeID
 			} else {
-				// Runtime exists but not attached - return it without launching a new one
+				// Runtime exists but not leased - return it without launching a new one
 				s.mu.Unlock()
 				return existing, nil
 			}
@@ -726,49 +742,12 @@ func (s *Supervisor) Connect(runtimeID string) (ConnectDescriptor, error) {
 
 	return ConnectDescriptor{
 		RuntimeID:      runtime.ID,
+		AgentID:        runtime.AgentID,
 		Protocol:       "acp",
 		WebSocketPath:  fmt.Sprintf("/v1/acp/%s", runtime.ID),
 		BearerToken:    randomToken(24),
 		TokenExpiresAt: s.now().UTC().Add(connectTokenTTL),
 	}, nil
-}
-
-// AttachStdio hands out exclusive access to a stdio runtime because ACP over
-// stdio is a single-client stream in this gateway. The returned release func
-// must be called when the bridge is torn down.
-func (s *Supervisor) AttachStdio(runtimeID string) (io.WriteCloser, io.ReadCloser, func(), error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.pruneStoppedRuntimesLocked(s.now().UTC())
-
-	runtime, ok := s.runtimes[runtimeID]
-	if !ok {
-		return nil, nil, nil, ErrRuntimeNotFound
-	}
-	if runtime.Status != StatusRunning {
-		return nil, nil, nil, ErrRuntimeNotRunning
-	}
-	if runtime.Transport != "stdio" {
-		return nil, nil, nil, ErrRuntimeNotConnectable
-	}
-
-	handle, ok := s.processes[runtimeID]
-	if !ok || handle.stdin == nil || handle.stdout == nil {
-		return nil, nil, nil, ErrRuntimeNotConnectable
-	}
-	if handle.attached {
-		return nil, nil, nil, ErrRuntimeAlreadyAttached
-	}
-	handle.attached = true
-
-	release := func() {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		if existing, exists := s.processes[runtimeID]; exists {
-			existing.attached = false
-		}
-	}
-	return handle.stdin, handle.stdout, release, nil
 }
 
 // Logs retrieves the buffered log entries for a specific runtime. The buffer
@@ -988,6 +967,10 @@ func (s *Supervisor) handleProcessExit(runtimeID, agentID string, handle *proces
 	// Remove process handle immediately - it's no longer valid
 	delete(s.processes, runtimeID)
 
+	// Save and remove any exit callback for notification outside the lock.
+	exitCallback := s.onExitCallbacks[runtimeID]
+	delete(s.onExitCallbacks, runtimeID)
+
 	// Check if we should attempt automatic restart:
 	// 1. Process exited with error
 	// 2. Restart policy allows it (on_failure mode)
@@ -1005,6 +988,9 @@ func (s *Supervisor) handleProcessExit(runtimeID, agentID string, handle *proces
 		runtime.LastFailureAt = s.now().UTC()
 		s.runtimes[runtimeID] = runtime
 		s.mu.Unlock()
+		if exitCallback != nil {
+			exitCallback(runtimeID)
+		}
 		s.persistRuntime(runtime)
 		s.appendLog(runtimeID, LogEntry{
 			Timestamp: s.now().UTC(),
@@ -1018,7 +1004,13 @@ func (s *Supervisor) handleProcessExit(runtimeID, agentID string, handle *proces
 
 	// No restart - clean up agent mapping and determine final state
 	s.deleteRuntimeByAgentIfMatchesLocked(agentID, runtimeID)
-	if handle.waitErr != nil {
+	// handle.stopping means an intentional stop/restart killed the process, so a
+	// non-nil waitErr is the expected result of that kill — not a failure. Treat
+	// it as a clean stop; otherwise this branch races the stop path's StatusStopped
+	// write (flaking status to "failed") and would spuriously trip the circuit
+	// breaker. Genuine launch failures set stopping too but persist their own
+	// failure record via cleanupFailedLaunch, so they remain accounted for.
+	if handle.waitErr != nil && !handle.stopping {
 		// Process failed - mark as failed and check circuit breaker
 		runtime.Status = StatusFailed
 		runtime.LastError = handle.waitErr.Error()
@@ -1030,6 +1022,9 @@ func (s *Supervisor) handleProcessExit(runtimeID, agentID string, handle *proces
 		runtime.CircuitOpen = restartMode(handle.agent.Launch.Restart) == "on_failure" && !handle.stopping
 		s.runtimes[runtimeID] = runtime
 		s.mu.Unlock()
+		if exitCallback != nil {
+			exitCallback(runtimeID)
+		}
 		s.persistRuntime(runtime)
 		if runtime.CircuitOpen {
 			s.appendLog(runtimeID, LogEntry{
@@ -1039,7 +1034,7 @@ func (s *Supervisor) handleProcessExit(runtimeID, agentID string, handle *proces
 			})
 		}
 		// Persist failure for post-mortem diagnostics
-		s.persistFailure(runtimeID, runtime, lastLogEntries(s.logs[runtimeID], 5), s.now().UTC())
+		s.persistFailure(runtimeID, runtime, s.recentLogs(runtimeID, 5), s.now().UTC())
 		return
 	}
 
@@ -1049,6 +1044,9 @@ func (s *Supervisor) handleProcessExit(runtimeID, agentID string, handle *proces
 	runtime.StoppedAt = s.now().UTC()
 	s.runtimes[runtimeID] = runtime
 	s.mu.Unlock()
+	if exitCallback != nil {
+		exitCallback(runtimeID)
+	}
 	s.persistRuntime(runtime)
 }
 
@@ -1103,7 +1101,7 @@ func (s *Supervisor) restartAfterBackoff(runtimeInfo Runtime, agent catalog.Agen
 	s.mu.Unlock()
 
 	s.persistRuntime(runtimeInfo)
-	s.persistFailure(runtimeInfo.ID, runtimeInfo, lastLogEntries(s.logs[runtimeInfo.ID], 5), s.now().UTC())
+	s.persistFailure(runtimeInfo.ID, runtimeInfo, s.recentLogs(runtimeInfo.ID, 5), s.now().UTC())
 }
 
 // cleanupFailedLaunch removes a runtime that never reached running state and
@@ -1124,7 +1122,7 @@ func (s *Supervisor) cleanupFailedLaunch(runtimeID, agentID string, err error) {
 	runtimeInfo.LastError = err.Error()
 	runtimeInfo.PID = 0
 	s.persistRuntime(runtimeInfo)
-	s.persistFailure(runtimeID, runtimeInfo, lastLogEntries(s.logs[runtimeID], 5), s.now().UTC())
+	s.persistFailure(runtimeID, runtimeInfo, s.recentLogs(runtimeID, 5), s.now().UTC())
 }
 
 // captureLogs copies process output into the in-memory ring buffer while also
@@ -1169,6 +1167,17 @@ func (s *Supervisor) appendLog(runtimeID string, entry LogEntry) {
 	s.logs[runtimeID] = entries
 }
 
+// recentLogs returns a copy of the last `limit` log entries for a runtime,
+// taking s.mu so it is safe to call from paths that have already released the
+// lock. lastLogEntries copies the tail, so the returned slice never aliases the
+// live buffer. Use this instead of a bare lastLogEntries(s.logs[id], n) read,
+// which races with the concurrent writes in appendLog.
+func (s *Supervisor) recentLogs(runtimeID string, limit int) []LogEntry {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return lastLogEntries(s.logs[runtimeID], limit)
+}
+
 // deleteRuntimeByAgentIfMatchesLocked removes the agent-to-runtime mapping only
 // if it points to the specified runtime ID. This prevents accidentally deleting
 // a mapping that has been updated to point to a different runtime.
@@ -1197,10 +1206,10 @@ func mergeEnvOverrides(current map[string]string, updates map[string]string) map
 	if len(current) == 0 && len(updates) == 0 {
 		return nil
 	}
-	merged := cloneStringMap(current)
-	if merged == nil {
-		merged = make(map[string]string, len(updates))
+	if len(current) == 0 {
+		return cloneStringMap(updates)
 	}
+	merged := cloneStringMap(current)
 	for key, value := range updates {
 		merged[key] = value
 	}
@@ -1345,7 +1354,9 @@ func stopProcessWithContext(ctx context.Context, handle *processHandle) error {
 	default:
 	}
 
-	// Stage 1: Close stdin to signal EOF to the process
+	// Stage 1: Close stdin to signal EOF to the process.
+	// A legacy lease release may already have closed it — double-close is safe
+	// as the error is discarded.
 	if handle.stdin != nil {
 		_ = handle.stdin.Close()
 	}

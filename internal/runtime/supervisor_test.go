@@ -100,11 +100,11 @@ func TestStartReplacesAttachedRuntimeForReconnect(t *testing.T) { // TestStartRe
 		t.Fatalf("Start() error = %v", err)
 	}
 
-	_, _, release, err := supervisor.AttachStdio(first.ID)
+	legacyPipes, err := supervisor.AcquireLease(first.ID, "legacy")
 	if err != nil {
-		t.Fatalf("AttachStdio() error = %v", err)
+		t.Fatalf("AcquireLease() error = %v", err)
 	}
-	defer release()
+	defer legacyPipes.Release()
 
 	second, err := supervisor.Start(agent)
 	if err != nil {
@@ -190,11 +190,14 @@ func TestRestartLaunchesNewRuntimeWithMergedEnv(t *testing.T) { // TestRestartLa
 		t.Fatal("Restart() should create a new runtime id")
 	}
 
-	stdin, stdout, release, err := supervisor.AttachStdio(restarted.ID)
+	rawPipes, err := supervisor.AcquireLease(restarted.ID, "legacy")
 	if err != nil {
-		t.Fatalf("AttachStdio() error = %v", err)
+		t.Fatalf("AcquireLease() error = %v", err)
 	}
-	defer release()
+	lp := rawPipes.(*LeasedPipes)
+	stdin := lp.Stdin
+	stdout := lp.Stdout
+	defer lp.Release()
 	defer stdin.Close()
 
 	if _, err := io.WriteString(stdin, "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"initialize\",\"params\":{\"protocolVersion\":1,\"capabilities\":{},\"clientInfo\":{\"name\":\"test\",\"version\":\"0\"}}}\n"); err != nil {
@@ -412,11 +415,14 @@ func TestStartSupportsExternalStdioRuntime(t *testing.T) { // TestStartSupportsE
 		t.Fatalf("Transport = %q, want %q", runtimeInfo.Transport, "stdio")
 	}
 
-	stdin, stdout, release, err := supervisor.AttachStdio(runtimeInfo.ID)
+	rawPipes, err := supervisor.AcquireLease(runtimeInfo.ID, "legacy")
 	if err != nil {
-		t.Fatalf("AttachStdio() error = %v", err)
+		t.Fatalf("AcquireLease() error = %v", err)
 	}
-	defer release()
+	lp := rawPipes.(*LeasedPipes)
+	stdin := lp.Stdin
+	stdout := lp.Stdout
+	defer lp.Release()
 
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
@@ -649,11 +655,14 @@ func TestOptionalInstalledOpenCodeACPSmoke(t *testing.T) { // TestOptionalInstal
 		_, _ = supervisor.StopByRuntimeID(runtimeInfo.ID)
 	})
 
-	stdin, stdout, release, err := supervisor.AttachStdio(runtimeInfo.ID)
+	rawPipes, err := supervisor.AcquireLease(runtimeInfo.ID, "legacy")
 	if err != nil {
-		t.Fatalf("AttachStdio() error = %v", err)
+		t.Fatalf("AcquireLease() error = %v", err)
 	}
-	defer release()
+	lp := rawPipes.(*LeasedPipes)
+	stdin := lp.Stdin
+	stdout := lp.Stdout
+	defer lp.Release()
 
 	request := "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"initialize\",\"params\":{\"protocolVersion\":1,\"capabilities\":{},\"clientInfo\":{\"name\":\"ferngeist-smoke\",\"version\":\"dev\"}}}\n"
 	if _, err := io.WriteString(stdin, request); err != nil {
@@ -885,10 +894,10 @@ func TestStartAutoAcquiresMissingExternalBinary(t *testing.T) { // TestStartAuto
 	if runtimeInfo.Status != StatusRunning {
 		t.Fatalf("Status = %q, want %q", runtimeInfo.Status, StatusRunning)
 	}
-	if _, _, release, err := supervisor.AttachStdio(runtimeInfo.ID); err != nil {
-		t.Fatalf("AttachStdio() error = %v", err)
+	if legacyPipes, err := supervisor.AcquireLease(runtimeInfo.ID, "legacy"); err != nil {
+		t.Fatalf("AcquireLease() error = %v", err)
 	} else {
-		release()
+		legacyPipes.Release()
 	}
 	if _, err := supervisor.StopByRuntimeID(runtimeInfo.ID); err != nil {
 		t.Fatalf("StopByRuntimeID() error = %v", err)
@@ -2137,7 +2146,7 @@ func TestHandleProcessExitRuntimeAlreadyRemoved(t *testing.T) { // TestHandlePro
 	}
 }
 
-func TestAttachStdioOnNonRunningRuntime(t *testing.T) { // TestAttachStdioOnNonRunningRuntime verifies that AttachStdio returns ErrRuntimeNotRunning for stopped runtimes.
+func TestAcquireLeaseOnNonRunningRuntime(t *testing.T) { // TestAcquireLeaseOnNonRunningRuntime verifies that AcquireLease returns ErrRuntimeNotRunning for stopped runtimes.
 	supervisor := NewSupervisor(slog.New(slog.NewTextHandler(io.Discard, nil)))
 	supervisor.now = func() time.Time { return time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC) }
 
@@ -2149,9 +2158,9 @@ func TestAttachStdioOnNonRunningRuntime(t *testing.T) { // TestAttachStdioOnNonR
 		CreatedAt: time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC),
 	}
 
-	_, _, _, err := supervisor.AttachStdio("run-stopped")
+	_, err := supervisor.AcquireLease("run-stopped", "legacy")
 	if err != ErrRuntimeNotRunning {
-		t.Fatalf("AttachStdio() error = %v, want %v", err, ErrRuntimeNotRunning)
+		t.Fatalf("AcquireLease() error = %v, want %v", err, ErrRuntimeNotRunning)
 	}
 }
 
