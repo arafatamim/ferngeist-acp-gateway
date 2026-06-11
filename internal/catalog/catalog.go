@@ -334,9 +334,6 @@ func validateAgent(agent Agent) error {
 	if !agent.Security.CuratedLaunch {
 		return errors.New("launch definitions must be curated")
 	}
-	if agent.Launch.Mode != "process" && !agent.Security.AllowsRemoteStart {
-		// Non-bundled adapters stay visible but are not launchable until a trusted local adapter exists.
-	}
 
 	if err := validateDetection(agent.Detection); err != nil {
 		return err

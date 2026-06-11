@@ -13,6 +13,8 @@ import (
 	"sync"
 	"time"
 
+	"slices"
+
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/storage"
 )
 
@@ -252,7 +254,7 @@ func (s *Service) CompletePairingWithProofKey(challengeID, code, deviceName, pro
 	now := s.now().UTC()
 	s.pruneExpiredCredentialsLocked(now)
 
-	challengeID, challenge, err := s.resolveChallengeLocked(challengeID, code, now)
+	challengeID, challenge, err := s.resolveChallengeLocked(challengeID, now)
 	if err != nil {
 		return Credential{}, err
 	}
@@ -265,7 +267,7 @@ func (s *Service) CompletePairingWithProofKey(challengeID, code, deviceName, pro
 		DeviceName:     deviceName,
 		Token:          randomToken(32),
 		ExpiresAt:      now.Add(s.tokenTTL),
-		Scopes:         append([]string(nil), s.baseScopes...),
+		Scopes:         slices.Clone(s.baseScopes),
 		ProofPublicKey: proofPublicKey,
 	}
 	credential.TokenHash = hashCredentialToken(credential.Token)
@@ -297,7 +299,7 @@ func (s *Service) CompletePairingWithProofKey(challengeID, code, deviceName, pro
 	return credential, nil
 }
 
-func (s *Service) resolveChallengeLocked(challengeID, code string, now time.Time) (string, challengeRecord, error) {
+func (s *Service) resolveChallengeLocked(challengeID string, now time.Time) (string, challengeRecord, error) {
 	if challengeID != "" {
 		challenge, ok := s.challenges[challengeID]
 		if !ok {
@@ -323,9 +325,6 @@ func (s *Service) resolveChallengeLocked(challengeID, code string, now time.Time
 	if now.After(record.challenge.ExpiresAt) {
 		s.expireChallengeLocked(record.challenge.ID, record)
 		return "", challengeRecord{}, ErrChallengeExpired
-	}
-	if record.challenge.Code != code {
-		return record.challenge.ID, record, nil
 	}
 	return record.challenge.ID, record, nil
 }
@@ -405,12 +404,7 @@ func (s *Service) RefreshCredential(token string) (Credential, error) {
 }
 
 func (c Credential) HasScope(scope string) bool {
-	for _, existing := range c.Scopes {
-		if existing == scope {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(c.Scopes, scope)
 }
 
 func (c Credential) RequireScope(scope string) error {
@@ -583,9 +577,9 @@ func defaultCredentialScopes(allowDiagnosticsExport, allowRuntimeRestartEnv bool
 
 func fallbackScopes(scopes []string, fallback []string) []string {
 	if len(scopes) > 0 {
-		return append([]string(nil), scopes...)
+		return slices.Clone(scopes)
 	}
-	return append([]string(nil), fallback...)
+	return slices.Clone(fallback)
 }
 
 const credentialHashPrefix = "sha256:"
