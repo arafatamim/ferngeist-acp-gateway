@@ -7,34 +7,26 @@ import (
 	"testing"
 )
 
-func TestSendNotificationReturnsNil(t *testing.T) {
-	svc := NewLogPushService(slog.New(slog.NewTextHandler(io.Discard, nil)))
-	err := svc.SendNotification(context.Background(), "device-1", "Hello", "Test body", map[string]string{"key": "val"})
+func TestLogProviderSendReturnsNil(t *testing.T) {
+	p := NewLogProvider(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	err := p.Send(context.Background(), "device-token", Notification{
+		Title: "Hello", Body: "Test body", Category: CategoryTurnComplete, SessionID: "sess-1",
+	})
 	if err != nil {
-		t.Fatalf("SendNotification() error = %v", err)
+		t.Fatalf("Send() error = %v", err)
 	}
 }
 
-func TestNilLoggerDoesNotPanic(t *testing.T) {
-	svc := &LogPushService{}
-	err := svc.SendNotification(context.Background(), "device-1", "Hello", "Test body", map[string]string{"key": "val"})
-	if err != nil {
-		t.Fatalf("SendNotification() with nil logger error = %v", err)
+func TestLogProviderNilLoggerDoesNotPanic(t *testing.T) {
+	p := NewLogProvider(nil)
+	if err := p.Send(context.Background(), "device-token", Notification{Title: "Hello"}); err != nil {
+		t.Fatalf("Send() with nil logger error = %v", err)
 	}
 }
 
-func TestSendNotificationReturnsNilWithNilDataMap(t *testing.T) {
-	svc := NewLogPushService(slog.New(slog.NewTextHandler(io.Discard, nil)))
-	err := svc.SendNotification(context.Background(), "device-1", "Hello", "Test body", nil)
-	if err != nil {
-		t.Fatalf("SendNotification() with nil data error = %v", err)
-	}
-}
-
-func TestSendNotificationReturnsNilWithEmptyStrings(t *testing.T) {
-	svc := NewLogPushService(slog.New(slog.NewTextHandler(io.Discard, nil)))
-	err := svc.SendNotification(context.Background(), "", "", "", map[string]string{})
-	if err != nil {
-		t.Fatalf("SendNotification() with empty strings error = %v", err)
+func TestLogProviderSendReturnsNilWithEmptyNotification(t *testing.T) {
+	p := NewLogProvider(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := p.Send(context.Background(), "", Notification{}); err != nil {
+		t.Fatalf("Send() with empty notification error = %v", err)
 	}
 }
