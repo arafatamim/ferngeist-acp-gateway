@@ -1157,3 +1157,109 @@ func TestSessionStore_ListSessionsByDeviceMultiple(t *testing.T) {
 		t.Errorf("expected 2 sessions for dev_multi, got %d", len(sessions))
 	}
 }
+
+// ========================================================================
+// Push tokens and gateway identity
+// ========================================================================
+
+// TestDevicePushTokenRoundtrip verifies upsert (token + platform), read-back,
+// the zero-result for an unregistered device, replacement on re-register, and
+// deletion.
+func TestDevicePushTokenRoundtrip(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "push_tokens.db"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	// Unregistered device is a normal zero result, not an error.
+	token, platform, err := store.GetDevicePushToken(ctx, "dev-1")
+	if err != nil {
+		t.Fatalf("GetDevicePushToken(unregistered) error = %v", err)
+	}
+	if token != "" || platform != "" {
+		t.Fatalf("GetDevicePushToken(unregistered) = (%q, %q), want empty", token, platform)
+	}
+
+	if err := store.SaveDevicePushToken(ctx, "dev-1", "fcm-token-1", "android"); err != nil {
+		t.Fatalf("SaveDevicePushToken() error = %v", err)
+	}
+	token, platform, err = store.GetDevicePushToken(ctx, "dev-1")
+	if err != nil {
+		t.Fatalf("GetDevicePushToken() error = %v", err)
+	}
+	if token != "fcm-token-1" || platform != "android" {
+		t.Fatalf("GetDevicePushToken() = (%q, %q), want (fcm-token-1, android)", token, platform)
+	}
+
+	// Re-register replaces the token in place (tokens rotate).
+	if err := store.SaveDevicePushToken(ctx, "dev-1", "fcm-token-2", "ios"); err != nil {
+		t.Fatalf("SaveDevicePushToken(replace) error = %v", err)
+	}
+	token, platform, err = store.GetDevicePushToken(ctx, "dev-1")
+	if err != nil {
+		t.Fatalf("GetDevicePushToken(after replace) error = %v", err)
+	}
+	if token != "fcm-token-2" || platform != "ios" {
+		t.Fatalf("GetDevicePushToken(after replace) = (%q, %q), want (fcm-token-2, ios)", token, platform)
+	}
+
+	if err := store.DeleteDevicePushToken(ctx, "dev-1"); err != nil {
+		t.Fatalf("DeleteDevicePushToken() error = %v", err)
+	}
+	token, _, err = store.GetDevicePushToken(ctx, "dev-1")
+	if err != nil {
+		t.Fatalf("GetDevicePushToken(after delete) error = %v", err)
+	}
+	if token != "" {
+		t.Fatalf("GetDevicePushToken(after delete) token = %q, want empty", token)
+	}
+	// Deleting an absent token is a no-op, not an error.
+	if err := store.DeleteDevicePushToken(ctx, "dev-1"); err != nil {
+		t.Fatalf("DeleteDevicePushToken(absent) error = %v", err)
+	}
+}
+
+// TestEnsureGatewayID verifies an id is generated on first call and is stable
+// across subsequent calls and reopens of the same database.
+func TestEnsureGatewayID(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "gateway_id.db")
+	store, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	ctx := context.Background()
+
+	id1, err := store.EnsureGatewayID(ctx)
+	if err != nil {
+		t.Fatalf("EnsureGatewayID() error = %v", err)
+	}
+	if strings.TrimSpace(id1) == "" {
+		t.Fatal("EnsureGatewayID() returned an empty id")
+	}
+
+	// Stable within the same store instance.
+	id2, err := store.EnsureGatewayID(ctx)
+	if err != nil {
+		t.Fatalf("EnsureGatewayID(second) error = %v", err)
+	}
+	if id2 != id1 {
+		t.Fatalf("EnsureGatewayID() not stable: %q != %q", id2, id1)
+	}
+	store.Close()
+
+	// Stable across a reopen of the same database file.
+	reopened, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open(reopen) error = %v", err)
+	}
+	defer reopened.Close()
+	id3, err := reopened.EnsureGatewayID(ctx)
+	if err != nil {
+		t.Fatalf("EnsureGatewayID(reopen) error = %v", err)
+	}
+	if id3 != id1 {
+		t.Fatalf("EnsureGatewayID() not stable across reopen: %q != %q", id3, id1)
+	}
+}

@@ -7,7 +7,9 @@ package storage
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"time"
@@ -572,12 +574,79 @@ func (s *SQLiteStore) AppendInboundDiagnostic(ctx context.Context, sessionID str
 	return err
 }
 
-func (s *SQLiteStore) SaveFCMToken(ctx context.Context, deviceID, fcmToken string) error {
+// SaveDevicePushToken upserts a device's push registration token and the platform
+// it was issued for ("android", "ios", "web", …). The platform is the routing key
+// the push dispatcher uses to pick the right delivery provider, so it is stored
+// alongside the token rather than inferred at send time. One token per device:
+// tokens rotate, and a re-registration replaces the prior token.
+func (s *SQLiteStore) SaveDevicePushToken(ctx context.Context, deviceID, token, platform string) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO device_fcm_tokens(device_id, fcm_token, updated_at) VALUES (?, ?, ?)
-		 ON CONFLICT(device_id) DO UPDATE SET fcm_token = excluded.fcm_token, updated_at = excluded.updated_at`,
-		deviceID, fcmToken, time.Now().UTC().Format(time.RFC3339Nano))
+		`INSERT INTO device_push_tokens(device_id, token, platform, updated_at) VALUES (?, ?, ?, ?)
+		 ON CONFLICT(device_id) DO UPDATE SET
+		   token = excluded.token,
+		   platform = excluded.platform,
+		   updated_at = excluded.updated_at`,
+		deviceID, token, platform, time.Now().UTC().Format(time.RFC3339Nano))
 	return err
+}
+
+// GetDevicePushToken returns the device's registered push token and its platform,
+// or ("", "", nil) if the device has never registered one. A missing token is a
+// normal state — the user may not have granted notification permission — so it is
+// reported as a zero result rather than ErrNotFound, letting the push dispatcher
+// skip delivery quietly.
+func (s *SQLiteStore) GetDevicePushToken(ctx context.Context, deviceID string) (token, platform string, err error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT token, platform FROM device_push_tokens WHERE device_id = ?`, deviceID)
+	if err := row.Scan(&token, &platform); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", "", nil
+		}
+		return "", "", err
+	}
+	return token, platform, nil
+}
+
+// DeleteDevicePushToken removes a device's push token. The dispatcher calls this
+// when a provider reports the token as permanently unregistered (the app was
+// uninstalled or the token rotated), so the dead token is not retried.
+func (s *SQLiteStore) DeleteDevicePushToken(ctx context.Context, deviceID string) error {
+	_, err := s.db.ExecContext(ctx,
+		`DELETE FROM device_push_tokens WHERE device_id = ?`, deviceID)
+	return err
+}
+
+// EnsureGatewayID returns this gateway's stable instance identifier, generating
+// and persisting one on first call. Unlike the gateway name (which the user can
+// rename freely), this id never changes for the lifetime of the state database —
+// it is the gateway-owned identity paired clients store to address it, e.g. to
+// resolve a push back to the right server entry for deep-linking.
+func (s *SQLiteStore) EnsureGatewayID(ctx context.Context) (string, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT gateway_id FROM gateway_identity WHERE id = 1`)
+	var id string
+	switch err := row.Scan(&id); {
+	case err == nil:
+		return id, nil
+	case !errors.Is(err, sql.ErrNoRows):
+		return "", err
+	}
+
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	id = hex.EncodeToString(buf)
+	// INSERT OR IGNORE guards against a concurrent first-boot insert racing us;
+	// re-read so we return whichever id actually won.
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT OR IGNORE INTO gateway_identity(id, gateway_id) VALUES (1, ?)`, id); err != nil {
+		return "", err
+	}
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT gateway_id FROM gateway_identity WHERE id = 1`).Scan(&id); err != nil {
+		return "", err
+	}
+	return id, nil
 }
 
 // migrate is intentionally append-only and idempotent because the gateway is a
@@ -662,10 +731,15 @@ func (s *SQLiteStore) migrate(ctx context.Context) error {
 			FOREIGN KEY (session_id) REFERENCES gateway_sessions(session_id) ON DELETE CASCADE
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_inbound_session_seq ON session_inbound_log(session_id, seq)`,
-		`CREATE TABLE IF NOT EXISTS device_fcm_tokens (
+		`CREATE TABLE IF NOT EXISTS device_push_tokens (
 			device_id TEXT PRIMARY KEY,
-			fcm_token TEXT NOT NULL,
+			token TEXT NOT NULL,
+			platform TEXT NOT NULL DEFAULT 'android',
 			updated_at TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS gateway_identity (
+			id INTEGER PRIMARY KEY CHECK (id = 1),
+			gateway_id TEXT NOT NULL
 		)`,
 	}
 
