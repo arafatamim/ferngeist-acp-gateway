@@ -1140,8 +1140,8 @@ func TestPumpTurnCompletePushUsesACPSessionID(t *testing.T) {
 		sessionID: "resilient-id",
 		logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		appendLog: func(string, string, string) {},
-		onPushNotification: func(sessionID, acpSessionID, category, title, body string) {
-			pushCh <- push.Notification{Category: category, ServerID: sessionID, SessionID: acpSessionID}
+		onPushNotification: func(e PushEvent) {
+			pushCh <- push.Notification{Category: e.Category, ServerID: e.SessionID, SessionID: e.AcpSessionID}
 		},
 	}
 

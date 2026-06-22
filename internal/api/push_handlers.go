@@ -39,6 +39,8 @@ func (s *Server) handleRegisterPushToken(w http.ResponseWriter, r *http.Request)
 	// indefinitely). Older/other clients that omit it are treated as Android.
 	platform := strings.TrimSpace(body.Platform)
 	if platform == "" {
+		s.logger.Warn("push token registered with empty platform, defaulting to android; client may be outdated",
+			"device_id", credential.DeviceID)
 		platform = "android"
 	}
 

@@ -28,6 +28,16 @@ const acpWebSocketWriteTimeout = 30 * time.Second
 // notifications regardless of client attachment: the gateway cannot tell whether
 // the app is foregrounded or backgrounded (only whether a socket is attached, a
 // poor proxy), so it always emits and lets the client decide whether to display.
+// PushEvent carries all context for a push notification fired by the pump.
+// The client decides whether to display it based on its own foreground state.
+type PushEvent struct {
+	SessionID   string
+	AcpSessionID string
+	Category    string
+	Title       string
+	Body        string
+}
+
 type StdioPump struct {
 	pipes     *runtime.LeasedPipes
 	runtimeID string
@@ -35,7 +45,7 @@ type StdioPump struct {
 	logger    *slog.Logger
 	appendLog func(string, string, string)
 
-	onPushNotification func(sessionID, acpSessionID, category, title, body string) // fires on a notable agent event; the client decides whether to display
+	onPushNotification func(PushEvent)
 
 	clientMu      sync.Mutex
 	client        *websocket.Conn // current connected WebSocket, or nil
@@ -94,16 +104,7 @@ func (p *StdioPump) StdoutDrainLoop(ctx context.Context) {
 		// Fire a push on notable events regardless of client attachment — the
 		// client suppresses it when foregrounded and shows it when backgrounded
 		// or killed, which is a distinction the gateway cannot make itself.
-		if p.onPushNotification != nil {
-			switch {
-			case isTurnComplete([]byte(line)):
-				p.onPushNotification(p.sessionID, p.AcpSessionID(), push.CategoryTurnComplete, "Turn Complete", "Your agent has finished processing.")
-			case isPermissionRequest([]byte(line)):
-				p.onPushNotification(p.sessionID, p.AcpSessionID(), push.CategoryPermissionRequest, "Permission Required", "Your agent needs approval to run a tool.")
-			case isJSONRPCError([]byte(line)):
-				p.onPushNotification(p.sessionID, p.AcpSessionID(), push.CategoryError, "Agent Error", "Your agent encountered an unexpected error.")
-			}
-		}
+		p.checkAndNotify(line)
 
 		p.clientMu.Lock()
 		if p.client != nil {
@@ -123,6 +124,23 @@ func (p *StdioPump) StdoutDrainLoop(ctx context.Context) {
 			}
 		}
 		p.clientMu.Unlock()
+	}
+}
+
+// checkAndNotify fires a push notification when the agent emits a notable
+// event (turn complete, permission request, or error). The client decides
+// whether to display it based on its own foreground/background state.
+func (p *StdioPump) checkAndNotify(line string) {
+	if p.onPushNotification == nil {
+		return
+	}
+	switch {
+	case isTurnComplete([]byte(line)):
+		p.onPushNotification(PushEvent{SessionID: p.sessionID, AcpSessionID: p.AcpSessionID(), Category: push.CategoryTurnComplete, Title: "Turn Complete", Body: "Your agent has finished processing."})
+	case isPermissionRequest([]byte(line)):
+		p.onPushNotification(PushEvent{SessionID: p.sessionID, AcpSessionID: p.AcpSessionID(), Category: push.CategoryPermissionRequest, Title: "Permission Required", Body: "Your agent needs approval to run a tool."})
+	case isJSONRPCError([]byte(line)):
+		p.onPushNotification(PushEvent{SessionID: p.sessionID, AcpSessionID: p.AcpSessionID(), Category: push.CategoryError, Title: "Agent Error", Body: "Your agent encountered an unexpected error."})
 	}
 }
 
