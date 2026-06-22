@@ -35,7 +35,12 @@ Base path: `/v1`
 
 - `POST /v1/pair/complete`
   - Completes pairing with a challenge ID, code, and device name.
-  - Returns the issued device credential.
+  - Returns the issued device credential, plus `gatewayId` — this gateway's
+    stable instance identifier. It is user-independent and never changes for the
+    lifetime of the state database (unlike the gateway *name*, which can be
+    renamed). Clients should store it as the server identity and use it to address
+    this gateway and to resolve incoming pushes back to the right server entry for
+    deep-linking (see [Push notification registration](#push-notification-registration)).
 
 - `GET /v1/pair/status/{challengeId}`
   - Returns the current pairing state for a challenge.
@@ -155,19 +160,65 @@ Base path: `/v1`
 
 ### Push notification registration
 
-- `POST /v1/devices/fcm-token`
-  - Registers or updates the FCM push notification token for the authenticated device.
-  - Authenticated with the device credential (bearer token).
+- `POST /v1/devices/push-token`
+  - Registers or updates the calling device's push token. The device identity is
+    taken from the authenticated credential, **never from the body** — the body
+    carries only the token and the platform it was issued for.
+  - Authenticated with the device credential (bearer token + proof-of-possession
+    headers, the same scheme as every other `/v1` route).
   - Request body:
     ```json
     {
-      "fcmToken": "string"
+      "token": "string",
+      "platform": "android"
     }
     ```
+    - `platform` is the routing key the gateway uses to pick a delivery provider
+      (`android` today; `ios`/`web` are reserved for future clients). It is
+      optional and defaults to `android` if omitted.
+  - **Idempotent.** The client re-POSTs on every app start and whenever the token
+    rotates, once per paired gateway; the gateway upserts one token per device,
+    replacing any prior token.
   - Response: `204 No Content`
   - Error responses:
-    - `400` — missing or empty fcmToken
+    - `400` — missing or empty `token`
     - `401` — invalid or missing device credential
+
+**Client obligation.** After pairing, the client must register its push token
+here, and re-register whenever the platform rotates the token. A device with no
+registered token simply receives no pushes — delivery is best-effort and never
+blocks a session.
+
+**Delivery payload (hybrid notification + data).** Pushes are sent as **hybrid**
+messages carrying both an FCM `notification` block and a `data` block. The
+`notification` block (title, body) is what lets Android display the alert when the
+app is **killed** — the system renders it with no app process running. The `data`
+block duplicates the title/body and adds the deep-link keys; the **foreground**
+client reads `data` to suppress the duplicate and route a tap into the right chat.
+For FCM the data keys are:
+
+| key         | meaning                                                              |
+|-------------|---------------------------------------------------------------------|
+| `title`     | notification title                                                  |
+| `body`      | notification body                                                   |
+| `category`  | event kind — `turn_complete`, `permission_request`, `agent_error`, or `agent_crash` |
+| `serverId`  | the gateway's `gatewayId` (from pairing); deep-links with `sessionId` |
+| `sessionId` | target gateway session/chat                                         |
+| `cwd`       | working directory for the chat route, when known                    |
+
+All `data` values are strings. A push deep-links into a chat only when it carries
+**both** `serverId` and `sessionId`; otherwise a tap just opens the app. Empty
+optional fields are omitted from `data`.
+
+The message also carries an `android` block with `priority: high` (to wake the
+device promptly) and a per-category `channel_id`: alert-worthy events
+(`permission_request`, `agent_error`, `agent_crash`) route to the heads-up
+`ferngeist_push` channel, and `turn_complete` routes to the quiet
+`ferngeist_push_updates` channel.
+
+> A force-stopped app (Settings → Force Stop, or some OEM task-killers) cannot
+> receive any push until the user reopens it — an Android platform rule. Normal
+> "killed" (swiped from recents, reaped for memory) delivers fine.
 
 ### ACP bridge
 
@@ -250,8 +301,8 @@ The ACP WebSocket endpoint is the primary transport for agent traffic.
 1. Pair a device.
 2. `POST /v1/runtimes/{id}/connect` — get `sessionId`, `attachToken`, and connection details.
 3. `GET /v1/acp/{runtimeId}?sessionId=<id>&attachToken=<token>` — WebSocket connect.
-4. Exchange ACP messages. Disconnect does NOT kill the runtime; the gateway session stays `disconnected`. While disconnected, push notifications may be dispatched on turn complete, permission requests, or agent errors.
-5. Register FCM token: `POST /v1/devices/fcm-token` (authenticated with device credential).
+4. Exchange ACP messages. Disconnect does NOT kill the runtime; the gateway session stays `disconnected`. The gateway sends hybrid notification+data push notifications on notable events (turn complete, permission request, agent error, agent crash) regardless of whether a client is attached — the client suppresses them in the foreground and the system displays them when backgrounded or killed (when `FERNGEIST_GATEWAY_FCM_CREDENTIALS_FILE` is configured; otherwise these are logged only).
+5. Register the push token: `POST /v1/devices/push-token` (authenticated with device credential).
 6. To reconnect: `POST /v1/sessions/{id}/resume` (authenticated with device credential) — get new `attachToken`.
 7. `GET /v1/acp/{runtimeId}?sessionId=<id>&attachToken=<token>` — live proxying resumes. The client calls `session/load` on the agent for context restoration.
 8. `DELETE /v1/sessions/{id}` — close the gateway session and stop the runtime.

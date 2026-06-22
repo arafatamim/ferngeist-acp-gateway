@@ -22,6 +22,7 @@ Ferngeist Gateway is configured through environment variables and persisted stat
 
 | Variable | Purpose | Default |
 |---|---|---|
+| `FERNGEIST_GATEWAY_FCM_CREDENTIALS_FILE` | Path to Firebase service-account JSON for push notifications | unset (log-only fallback) |
 | `FERNGEIST_GATEWAY_SESSION_MAX_DISCONNECTED_SECONDS` | TTL for disconnected sessions before reaper closes them | `900` (15 min) |
 | `FERNGEIST_GATEWAY_MAX_SESSIONS_PER_DEVICE` | Max concurrent sessions per device | `5` |
 | `FERNGEIST_GATEWAY_SESSION_REAPER_INTERVAL_SECONDS` | Interval between reaper sweeps | `30` |
@@ -43,4 +44,5 @@ Ferngeist Gateway is configured through environment variables and persisted stat
 - `daemon install` registers the extracted binary as a background service.
 - `PUBLIC_BASE_URL` should match the URL clients use to reach the gateway.
 - In public mode, proof-of-possession is required unless legacy bearer credentials are explicitly enabled.
+- Push notifications are optional. With `FERNGEIST_GATEWAY_FCM_CREDENTIALS_FILE` set, the gateway delivers hybrid notification+data pushes via FCM HTTP v1; without it, notifications are logged only and the gateway runs normally. A bad or unreadable credentials file is non-fatal — the daemon logs a warning and degrades to log-only.
 - Exact defaults can vary by platform and release build.

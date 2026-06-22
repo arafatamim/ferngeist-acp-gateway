@@ -1,6 +1,6 @@
 # Ferngeist Gateway
 
-`Ferngeist Gateway` is a self-hosted backend service for ACP-compatible agents. Its main purpose is to expose ACP agents through a unified WebSocket API with **resilient sessions** that survive WebSocket disconnection — keeping agents alive, dispatching push notifications (`end_turn`, permission requests, agent errors), and allowing seamless reconnection. It discovers and launches supported agents, provides one authenticated endpoint, and manages pairing and paired devices. It also powers the [Ferngeist](https://github.com/arafatamim/Ferngeist) Android app.
+`Ferngeist Gateway` is a self-hosted backend service for ACP-compatible agents. Its main purpose is to expose ACP agents through a unified WebSocket API with **resilient sessions** that survive WebSocket disconnection — keeping agents alive, dispatching FCM push notifications (`end_turn`, permission requests, agent errors, agent crashes), and allowing seamless reconnection. It discovers and launches supported agents, provides one authenticated endpoint, and manages pairing and paired devices. It also powers the [Ferngeist](https://github.com/arafatamim/Ferngeist) Android app.
 
 ## Quick Start
 
@@ -83,7 +83,7 @@ Then pair the device and add the public URL in the Ferngeist app.
 - exposes ACP agents through one unified WebSocket API
 - discovers supported agents and launches them on demand
 - handles pairing and paired device credentials
-- supports **resilient sessions** that survive WebSocket disconnection with push notification wake-up
+- supports **resilient sessions** that survive WebSocket disconnection with push notification wake-up (FCM, with a pluggable provider seam for other platforms) and seamless reconnection
 - supports local and LAN-based access
 - stores gateway state in SQLite
 
