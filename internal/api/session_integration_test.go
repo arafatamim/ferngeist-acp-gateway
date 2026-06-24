@@ -284,6 +284,29 @@ func waitForSessionStatus(t *testing.T, store *storage.SQLiteStore, sessionID, e
 	t.Fatalf("session %s status = %s, want %s (timeout %v)", sessionID, rec.Status, expectedStatus, timeout)
 }
 
+// waitForSessionDeleted polls until GetSession returns ErrNotFound (session was
+// fully reclaimed), or the timeout expires.
+func waitForSessionDeleted(t *testing.T, store *storage.SQLiteStore, sessionID string, timeout time.Duration) {
+	t.Helper()
+
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		_, err := store.GetSession(context.Background(), sessionID)
+		if err == storage.ErrNotFound {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	rec, err := store.GetSession(context.Background(), sessionID)
+	if err != storage.ErrNotFound {
+		if err != nil {
+			t.Fatalf("GetSession() error = %v, want ErrNotFound", err)
+		}
+		t.Fatalf("session %s still exists with status %s, want deleted (timeout %v)", sessionID, rec.Status, timeout)
+	}
+}
+
 // ---- Integration tests ----
 
 func TestResilientSession_FullLifecycle(t *testing.T) {
@@ -537,5 +560,5 @@ func TestResilientSession_AgentDeathDuringSession(t *testing.T) {
 		t.Fatalf("StopByRuntimeID() error = %v", err)
 	}
 
-	waitForSessionStatus(t, h.store, connectResp.SessionID, session.StatusFailed, 5*time.Second)
+	waitForSessionDeleted(t, h.store, connectResp.SessionID, 5*time.Second)
 }
