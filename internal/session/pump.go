@@ -168,6 +168,21 @@ func (p *StdioPump) StdoutDrainLoop(ctx context.Context) {
 		}
 		p.clientMu.Unlock()
 	}
+
+	// After the scanner exits (ctx cancelled, agent stdout closed, or scan error),
+	// close any attached client WebSocket. This unblocks proxyWebSocketToStdio's
+	// read loop so handleSessionWebSocket can clean up the connection. Without
+	// this, a dead agent — whose stdout pipe has closed — leaves the WebSocket
+	// open and the client waiting forever.
+	p.clientMu.Lock()
+	if p.client != nil {
+		failed := p.client
+		p.client = nil
+		p.clientMu.Unlock()
+		failed.CloseNow()
+	} else {
+		p.clientMu.Unlock()
+	}
 }
 
 // bufferLoadHistory appends a session/update frame to its session's replay
