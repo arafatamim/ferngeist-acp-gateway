@@ -13,6 +13,7 @@ import (
 	goruntime "runtime"
 	"sort"
 	"strings"
+	"time"
 	"unicode"
 
 	acpregistry "github.com/arafatamim/ferngeist-acp-gateway/internal/registry"
@@ -114,10 +115,11 @@ type RegistrySource interface {
 }
 
 type Service struct {
-	agents   []Agent
-	adapters []Agent
-	baseDir  string
-	registry RegistrySource
+	agents             []Agent
+	adapters           []Agent
+	baseDir            string
+	registry           RegistrySource
+	resolveNpmBinaries func(string) []string
 }
 
 // New returns the default gateway catalog rooted at the current working
@@ -142,6 +144,13 @@ func NewWithBaseDirAndRegistry(baseDir string, registrySource RegistrySource) *S
 	}
 	service.Refresh()
 	return service
+}
+
+// SetNpmResolver sets the function used to resolve binary names from npm
+// package metadata. Called by the daemon after construction; tests that
+// construct Service directly or through daemon.Run() skip npm lookups.
+func (s *Service) SetNpmResolver(resolve func(string) []string) {
+	s.resolveNpmBinaries = resolve
 }
 
 func loadEmbeddedAgents() ([]Agent, error) {
@@ -199,6 +208,24 @@ func (s *Service) Get(id string) (Agent, error) {
 
 	for _, agent := range s.agents {
 		if agent.ID == id {
+			// If the agent would be launched via npm exec and we have a
+			// metadata resolver, try to find a locally-installed binary
+			// whose name differs from the registry ID (e.g., @github/copilot
+			// installs binary "copilot"). This avoids an unnecessary npm
+			// install when the binary is already on PATH.
+			if s.resolveNpmBinaries != nil && agent.Launch.Command == "npm" && agent.Registry.NpxPackage != "" {
+				for _, name := range s.resolveNpmBinaries(agent.Registry.NpxPackage) {
+					if _, err := exec.LookPath(name); err == nil {
+						agent.Launch.Command = name
+						agent.Launch.Args = append([]string(nil), agent.Registry.NpxArgs...)
+						agent.Detection = DetectionConfig{
+							Mode:    "path_lookup",
+							Command: name,
+						}
+						break
+					}
+				}
+			}
 			return agent, nil
 		}
 	}
@@ -226,7 +253,7 @@ func (s *Service) Refresh() {
 		ids := sortedRegistryIDs(registrySnapshot.Agents)
 		for _, id := range ids {
 			entry := registrySnapshot.Agents[id]
-			registryAgent := registryEntryToAgent(entry)
+			registryAgent := registryEntryToAgent(entry, nil)
 			agent := registryAgent
 			if adapter, ok := adapterByID[id]; ok {
 				validationError := validateAgent(adapter)
@@ -234,7 +261,7 @@ func (s *Service) Refresh() {
 				agent.ValidationError = validationErrorString(validationError)
 				if validationError == nil {
 					agent = mergeAdapter(registryAgent, adapter)
-					agent, agent.Registry = applyRegistryInfo(agent, agent.Registry, registrySnapshot, nil, true, agent.ID)
+					agent, agent.Registry = applyRegistryInfo(agent, agent.Registry, registrySnapshot, nil, true, agent.ID, nil)
 				}
 			} else {
 				agent.ManifestValid = true
@@ -252,7 +279,7 @@ func (s *Service) Refresh() {
 
 		validationError := validateAgent(adapter)
 		agent := adapter
-		agent, agent.Registry = applyRegistryInfo(agent, agent.Registry, registrySnapshot, registryErr, registryEnabled, agent.ID)
+		agent, agent.Registry = applyRegistryInfo(agent, agent.Registry, registrySnapshot, registryErr, registryEnabled, agent.ID, nil)
 		if validationError == nil && agent.Registry.Required && agent.Registry.ValidationStatus == "missing" {
 			validationError = errors.New("agent is not present in ACP registry")
 		}
@@ -289,11 +316,11 @@ func (s *Service) detect(agent Agent) bool {
 	}
 }
 
-func detectNpxPackage(pkg string) bool {
+func detectNpmPackage(pkg string) bool {
 	if strings.TrimSpace(pkg) == "" {
 		return false
 	}
-	_, err := exec.LookPath("npx")
+	_, err := exec.LookPath("npm")
 	return err == nil
 }
 
@@ -570,12 +597,12 @@ func sortedRegistryIDs(entries map[string]acpregistry.AgentEntry) []string {
 	return ids
 }
 
-func registryEntryToAgent(entry acpregistry.AgentEntry) Agent {
+func registryEntryToAgent(entry acpregistry.AgentEntry, resolveBinaries func(string) []string) Agent {
 	displayName := strings.TrimSpace(entry.Name)
 	if displayName == "" {
 		displayName = entry.ID
 	}
-	launchPlan := buildRegistryLaunchPlan(entry)
+	launchPlan := buildRegistryLaunchPlan(entry, resolveBinaries)
 
 	agent := Agent{
 		ID:              entry.ID,
@@ -633,7 +660,7 @@ func registryInfoFromEntry(entry acpregistry.AgentEntry) RegistryInfo {
 // applyRegistryInfo enriches an agent with ACP registry metadata. When a local
 // gateway-owned manifest exists, the registry augments it. Otherwise, registry
 // entries stand on their own as long as they provide a supported launch method.
-func applyRegistryInfo(agent Agent, base RegistryInfo, snapshot acpregistry.Snapshot, registryErr error, registryEnabled bool, agentID string) (Agent, RegistryInfo) {
+func applyRegistryInfo(agent Agent, base RegistryInfo, snapshot acpregistry.Snapshot, registryErr error, registryEnabled bool, agentID string, resolveBinaries func(string) []string) (Agent, RegistryInfo) {
 	if !base.Required {
 		base.ValidationStatus = "not_required"
 		return agent, base
@@ -667,7 +694,7 @@ func applyRegistryInfo(agent Agent, base RegistryInfo, snapshot acpregistry.Snap
 	base.NpxArgs = registryInfo.NpxArgs
 	base.UvxPackage = registryInfo.UvxPackage
 	base.UvxArgs = registryInfo.UvxArgs
-	agent = synthesizeRegistryLaunch(agent, buildRegistryLaunchPlan(entry))
+	agent = synthesizeRegistryLaunch(agent, buildRegistryLaunchPlan(entry, resolveBinaries))
 	return agent, base
 }
 
@@ -681,7 +708,7 @@ func synthesizeRegistryLaunch(agent Agent, plan registryLaunchPlan) Agent {
 	if plan.Launch.Mode == "" {
 		return agent
 	}
-	if normalizeExecutableName(plan.Launch.Command) == "npx" || normalizeExecutableName(plan.Launch.Command) == "uvx" {
+	if normalizeExecutableName(plan.Launch.Command) == "npm" || normalizeExecutableName(plan.Launch.Command) == "uvx" {
 		agent.Detection = plan.Detection
 		agent.Launch = plan.Launch
 		return agent
@@ -694,8 +721,9 @@ func synthesizeRegistryLaunch(agent Agent, plan registryLaunchPlan) Agent {
 }
 
 // buildRegistryLaunchPlan picks the gateway launch strategy for a registry entry
-// in host-aware order: PATH binary, npx, uvx, then downloadable binary.
-func buildRegistryLaunchPlan(entry acpregistry.AgentEntry) registryLaunchPlan {
+// in host-aware order: registry binary, PATH binary, npm metadata, npm exec,
+// uvx, then downloadable binary.
+func buildRegistryLaunchPlan(entry acpregistry.AgentEntry, resolveBinaries func(string) []string) registryLaunchPlan {
 	// Prefer a locally available binary from the registry if one is declared.
 	if binary := entry.CurrentBinary; binary != nil && strings.TrimSpace(binary.CommandName) != "" {
 		if _, err := exec.LookPath(binary.CommandName); err == nil {
@@ -703,10 +731,28 @@ func buildRegistryLaunchPlan(entry acpregistry.AgentEntry) registryLaunchPlan {
 		}
 	}
 
-	// If no binary is available, try the package-based launcher that ships the
-	// agent on demand through npx.
-	if detectNpxPackage(entry.NpxPackage) {
-		return registryExternalLaunchPlan("npx", append([]string{"-y", entry.NpxPackage}, entry.NpxArgs...))
+	// If no registry-declared binary was found, check if the agent's canonical
+	// registry ID is available as a PATH binary.
+	if _, err := exec.LookPath(entry.ID); err == nil {
+		return registryExternalLaunchPlan(entry.ID, nil)
+	}
+
+	// If the registry provides an npm package and a resolver is set, query
+	// npm metadata for the actual binary names it installs.
+	if resolveBinaries != nil {
+		if pkg := entry.NpxPackage; pkg != "" {
+			for _, name := range resolveBinaries(pkg) {
+				if _, err := exec.LookPath(name); err == nil {
+					return registryExternalLaunchPlan(name, append([]string(nil), entry.NpxArgs...))
+				}
+			}
+		}
+	}
+
+	// If no local binary was found, try the package-based launcher that ships the
+	// agent on demand through npm exec.
+	if detectNpmPackage(entry.NpxPackage) {
+		return registryExternalLaunchPlan("npm", append([]string{"exec", "--yes", entry.NpxPackage, "--"}, entry.NpxArgs...))
 	}
 
 	// uvx is the next fallback when the agent is published as a Python package.
@@ -758,4 +804,58 @@ func mockAgentExecutableName() string {
 		return "mock-stdio-agent.exe"
 	}
 	return "mock-stdio-agent"
+}
+
+// ResolveNpmBinaryNames queries the npm registry for a package's bin entries.
+// Uses a 10-second timeout since this is a network call via `npm view`.
+// Returns the binary names the package installs (e.g., @github/copilot → ["copilot"]),
+// or nil if the query fails (npm metadata query fails, network error, or no bin field).
+// Failures are silent — the caller falls through to npm exec as a fallback.
+func ResolveNpmBinaryNames(pkg string) []string {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "npm", "view", pkg, "name", "bin", "--json")
+	output, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+	var raw json.RawMessage
+	if err := json.Unmarshal(output, &raw); err != nil {
+		return nil
+	}
+	// npm view can return a single object or an array (one per version match).
+	var arr []json.RawMessage
+	if err := json.Unmarshal(raw, &arr); err == nil && len(arr) > 0 {
+		raw = arr[0]
+	}
+	var info struct {
+		Name string          `json:"name"`
+		Bin  json.RawMessage `json:"bin"`
+	}
+	if err := json.Unmarshal(raw, &info); err != nil {
+		return nil
+	}
+	// Case 1: bin is an object {"command": "path"} — extract command names.
+	var binMap map[string]string
+	if err := json.Unmarshal(info.Bin, &binMap); err == nil {
+		names := make([]string, 0, len(binMap))
+		for name := range binMap {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		return names
+	}
+	// No bin field (or explicit null) — nothing to resolve.
+	if len(info.Bin) == 0 || string(info.Bin) == "null" {
+		return nil
+	}
+	// Case 2: bin is a string path — the command name is the package name.
+	// For scoped packages (@scope/pkg), strip the scope → "pkg".
+	if info.Name != "" {
+		if idx := strings.LastIndex(info.Name, "/"); idx >= 0 {
+			return []string{info.Name[idx+1:]}
+		}
+		return []string{info.Name}
+	}
+	return nil
 }

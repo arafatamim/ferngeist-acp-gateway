@@ -126,11 +126,11 @@ func TestRefreshMarksInvalidManifestAsUndetected(t *testing.T) {
 func TestInvalidAdapterFallsBackToRegistryLaunch(t *testing.T) {
 	originalPath := os.Getenv("PATH")
 	pathDir := t.TempDir()
-	npxName := "npx"
+	npmName := "npm"
 	if goruntime.GOOS == "windows" {
-		npxName = "npx.exe"
+		npmName = "npm.exe"
 	}
-	if err := os.WriteFile(filepath.Join(pathDir, npxName), []byte("placeholder"), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(pathDir, npmName), []byte("placeholder"), 0o755); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
 	t.Setenv("PATH", pathDir+string(os.PathListSeparator)+originalPath)
@@ -189,36 +189,41 @@ func TestInvalidAdapterFallsBackToRegistryLaunch(t *testing.T) {
 		t.Fatal("ValidationError should be populated for the broken local adapter")
 	}
 	if !agent.Detected {
-		t.Fatal("registry fallback should still be detected when npx is available")
+		t.Fatal("registry fallback should still be detected when npm is available")
 	}
-	if agent.Launch.Command != "npx" {
-		t.Fatalf("Launch.Command = %q, want %q", agent.Launch.Command, "npx")
+	if agent.Launch.Command != "npm" {
+		t.Fatalf("Launch.Command = %q, want %q", agent.Launch.Command, "npm")
 	}
-	if agent.Detection.Command != "npx" {
-		t.Fatalf("Detection.Command = %q, want %q", agent.Detection.Command, "npx")
+	if agent.Detection.Command != "npm" {
+		t.Fatalf("Detection.Command = %q, want %q", agent.Detection.Command, "npm")
 	}
 }
 
 func TestRegistryAgentIsSurfacedAndEnriched(t *testing.T) {
-	service := NewWithBaseDirAndRegistry(t.TempDir(), fakeRegistrySource{
-		snapshot: acpregistry.Snapshot{
-			Version: "1.0.0",
-			Agents: map[string]acpregistry.AgentEntry{
-				"codex-acp": {
-					ID:                "codex-acp",
-					Name:              "Codex CLI",
-					Version:           "0.10.0",
-					Repository:        "https://github.com/zed-industries/codex-acp",
-					DistributionKinds: []string{"binary", "npx"},
-					NpxPackage:        "@zed-industries/codex-acp@0.10.0",
-					NpxArgs:           []string{"--acp"},
-					CurrentBinary: &acpregistry.BinaryTarget{
-						CommandName: "codex-acp",
+	service := &Service{
+		baseDir:  t.TempDir(),
+		adapters: []Agent{},
+		registry: fakeRegistrySource{
+			snapshot: acpregistry.Snapshot{
+				Version: "1.0.0",
+				Agents: map[string]acpregistry.AgentEntry{
+					"codex-acp": {
+						ID:                "codex-acp",
+						Name:              "Codex CLI",
+						Version:           "0.10.0",
+						Repository:        "https://github.com/zed-industries/codex-acp",
+						DistributionKinds: []string{"binary", "npx"},
+						NpxPackage:        "@zed-industries/codex-acp@0.10.0",
+						NpxArgs:           []string{"--acp"},
+						CurrentBinary: &acpregistry.BinaryTarget{
+							CommandName: "codex-acp",
+						},
 					},
 				},
 			},
 		},
-	})
+	}
+	service.Refresh()
 
 	agent, err := service.Get("codex-acp")
 	if err != nil {
@@ -385,94 +390,103 @@ func TestRegistrySynthesizesBinaryArgsForTrustedExternalAdapter(t *testing.T) {
 	}
 }
 
-func TestRegistrySynthesizesNpxLaunchForTrustedExternalAdapter(t *testing.T) {
+func TestRegistrySynthesizesNpmExecLaunchForTrustedExternalAdapter(t *testing.T) {
 	originalPath := os.Getenv("PATH")
 	pathDir := t.TempDir()
-	npxName := "npx"
+	npmName := "npm"
 	if goruntime.GOOS == "windows" {
-		npxName = "npx.exe"
+		npmName = "npm.exe"
 	}
-	if err := os.WriteFile(filepath.Join(pathDir, npxName), []byte("placeholder"), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(pathDir, npmName), []byte("placeholder"), 0o755); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
 	t.Setenv("PATH", pathDir+string(os.PathListSeparator)+originalPath)
 
-	service := NewWithBaseDirAndRegistry(t.TempDir(), fakeRegistrySource{
-		snapshot: acpregistry.Snapshot{
-			Version: "1.0.0",
-			Agents: map[string]acpregistry.AgentEntry{
-				"codex-acp": {
-					ID:                "codex-acp",
-					Name:              "Codex CLI",
-					Version:           "0.10.0",
-					DistributionKinds: []string{"npx"},
-					NpxPackage:        "@zed-industries/codex-acp@0.10.0",
-					NpxArgs:           []string{"--acp"},
-				},
-			},
-		},
-	})
-
-	agent, err := service.Get("codex-acp")
-	if err != nil {
-		t.Fatalf("Get() error = %v", err)
-	}
-	if !agent.Detected {
-		t.Fatal("codex-acp should be detected when npx is available and registry exposes an npx package")
-	}
-	if agent.Launch.Command != "npx" {
-		t.Fatalf("Launch.Command = %q, want %q", agent.Launch.Command, "npx")
-	}
-	if len(agent.Launch.Args) != 3 || agent.Launch.Args[0] != "-y" || agent.Launch.Args[1] != "@zed-industries/codex-acp@0.10.0" || agent.Launch.Args[2] != "--acp" {
-		t.Fatalf("Launch.Args = %v, want [-y @zed-industries/codex-acp@0.10.0 --acp]", agent.Launch.Args)
-	}
-}
-
-func TestRegistryPrefersNpxOverBinaryWhenBothExist(t *testing.T) {
-	originalPath := os.Getenv("PATH")
-	pathDir := t.TempDir()
-	npxName := "npx"
-	if goruntime.GOOS == "windows" {
-		npxName = "npx.exe"
-	}
-	if err := os.WriteFile(filepath.Join(pathDir, npxName), []byte("placeholder"), 0o755); err != nil {
-		t.Fatalf("WriteFile() error = %v", err)
-	}
-	t.Setenv("PATH", pathDir+string(os.PathListSeparator)+originalPath)
-
-	service := NewWithBaseDirAndRegistry(t.TempDir(), fakeRegistrySource{
-		snapshot: acpregistry.Snapshot{
-			Version: "1.0.0",
-			Agents: map[string]acpregistry.AgentEntry{
-				"codex-acp": {
-					ID:                "codex-acp",
-					Name:              "Codex CLI",
-					Version:           "0.10.0",
-					DistributionKinds: []string{"binary", "npx"},
-					NpxPackage:        "@zed-industries/codex-acp@0.10.0",
-					CurrentBinary: &acpregistry.BinaryTarget{
-						CommandName: "codex-acp",
-						Command:     "./codex-acp",
-						ArchiveURL:  "https://example.com/codex-acp.tar.gz",
+	service := &Service{
+		baseDir:  t.TempDir(),
+		adapters: []Agent{},
+		registry: fakeRegistrySource{
+			snapshot: acpregistry.Snapshot{
+				Version: "1.0.0",
+				Agents: map[string]acpregistry.AgentEntry{
+					"codex-acp": {
+						ID:                "codex-acp",
+						Name:              "Codex CLI",
+						Version:           "0.10.0",
+						DistributionKinds: []string{"npx"},
+						NpxPackage:        "@zed-industries/codex-acp@0.10.0",
+						NpxArgs:           []string{"--acp"},
 					},
 				},
 			},
 		},
-	})
+	}
+	service.Refresh()
 
 	agent, err := service.Get("codex-acp")
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
 	}
 	if !agent.Detected {
-		t.Fatal("codex-acp should be detected when npx is available")
+		t.Fatal("codex-acp should be detected when npm is available and registry exposes an npm package")
 	}
-	if agent.Launch.Command != "npx" {
-		t.Fatalf("Launch.Command = %q, want %q", agent.Launch.Command, "npx")
+	if agent.Launch.Command != "npm" {
+		t.Fatalf("Launch.Command = %q, want %q", agent.Launch.Command, "npm")
+	}
+	if len(agent.Launch.Args) != 5 || agent.Launch.Args[0] != "exec" || agent.Launch.Args[1] != "--yes" || agent.Launch.Args[2] != "@zed-industries/codex-acp@0.10.0" || agent.Launch.Args[3] != "--" || agent.Launch.Args[4] != "--acp" {
+		t.Fatalf("Launch.Args = %v, want [exec --yes @zed-industries/codex-acp@0.10.0 -- --acp]", agent.Launch.Args)
 	}
 }
 
-func TestRegistryFallsBackToBinaryAfterNpxAndUvx(t *testing.T) {
+func TestRegistryUsesNpmExecWhenBinaryNotInPath(t *testing.T) {
+	originalPath := os.Getenv("PATH")
+	pathDir := t.TempDir()
+	npmName := "npm"
+	if goruntime.GOOS == "windows" {
+		npmName = "npm.exe"
+	}
+	if err := os.WriteFile(filepath.Join(pathDir, npmName), []byte("placeholder"), 0o755); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	t.Setenv("PATH", pathDir+string(os.PathListSeparator)+originalPath)
+	service := &Service{
+		baseDir:  t.TempDir(),
+		adapters: []Agent{},
+		registry: fakeRegistrySource{
+			snapshot: acpregistry.Snapshot{
+				Version: "1.0.0",
+				Agents: map[string]acpregistry.AgentEntry{
+					"codex-acp": {
+						ID:                "codex-acp",
+						Name:              "Codex CLI",
+						Version:           "0.10.0",
+						DistributionKinds: []string{"binary", "npx"},
+						NpxPackage:        "@zed-industries/codex-acp@0.10.0",
+						CurrentBinary: &acpregistry.BinaryTarget{
+							CommandName: "codex-acp",
+							Command:     "./codex-acp",
+							ArchiveURL:  "https://example.com/codex-acp.tar.gz",
+						},
+					},
+				},
+			},
+		},
+	}
+	service.Refresh()
+
+	agent, err := service.Get("codex-acp")
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if !agent.Detected {
+		t.Fatal("codex-acp should be detected when npm is available")
+	}
+	if agent.Launch.Command != "npm" {
+		t.Fatalf("Launch.Command = %q, want %q", agent.Launch.Command, "npm")
+	}
+}
+
+func TestRegistryPrefersBinaryOverNpmExecAndUvx(t *testing.T) {
 	baseDir := t.TempDir()
 	pathDir := filepath.Join(baseDir, "path")
 	if err := os.MkdirAll(pathDir, 0o755); err != nil {
@@ -523,26 +537,31 @@ func TestRegistryFallsBackToBinaryAfterNpxAndUvx(t *testing.T) {
 
 func TestRegistryLeavesBinaryDownloadAsLastResort(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
-	service := NewWithBaseDirAndRegistry(t.TempDir(), fakeRegistrySource{
-		snapshot: acpregistry.Snapshot{
-			Version: "1.0.0",
-			Agents: map[string]acpregistry.AgentEntry{
-				"codex-acp": {
-					ID:                "codex-acp",
-					Name:              "Codex CLI",
-					Version:           "0.10.0",
-					DistributionKinds: []string{"binary", "npx", "uvx"},
-					NpxPackage:        "@zed-industries/codex-acp@0.10.0",
-					UvxPackage:        "codex-acp",
-					CurrentBinary: &acpregistry.BinaryTarget{
-						CommandName: "codex-acp",
-						Command:     "./codex-acp",
-						ArchiveURL:  "https://example.com/codex-acp.tar.gz",
+	service := &Service{
+		baseDir:  t.TempDir(),
+		adapters: []Agent{},
+		registry: fakeRegistrySource{
+			snapshot: acpregistry.Snapshot{
+				Version: "1.0.0",
+				Agents: map[string]acpregistry.AgentEntry{
+					"codex-acp": {
+						ID:                "codex-acp",
+						Name:              "Codex CLI",
+						Version:           "0.10.0",
+						DistributionKinds: []string{"binary", "npx", "uvx"},
+						NpxPackage:        "@zed-industries/codex-acp@0.10.0",
+						UvxPackage:        "codex-acp",
+						CurrentBinary: &acpregistry.BinaryTarget{
+							CommandName: "codex-acp",
+							Command:     "./codex-acp",
+							ArchiveURL:  "https://example.com/codex-acp.tar.gz",
+						},
 					},
 				},
 			},
 		},
-	})
+	}
+	service.Refresh()
 
 	agent, err := service.Get("codex-acp")
 	if err != nil {

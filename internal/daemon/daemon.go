@@ -18,11 +18,11 @@ import (
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/logging"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/pairing"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/push"
-	"github.com/arafatamim/ferngeist-acp-gateway/internal/token"
 	acpregistry "github.com/arafatamim/ferngeist-acp-gateway/internal/registry"
 	gatewayruntime "github.com/arafatamim/ferngeist-acp-gateway/internal/runtime"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/session"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/storage"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/token"
 )
 
 // Run boots the full gateway daemon and blocks until the context is cancelled or
@@ -65,6 +65,7 @@ func Run(ctx context.Context, build api.BuildInfo) error {
 
 	registryClient := acpregistry.New(cfg.RegistryURL, 6*time.Hour)
 	catalogSvc := catalog.NewWithBaseDirAndRegistry(".", registryClient)
+	catalogSvc.SetNpmResolver(catalog.ResolveNpmBinaryNames)
 	installer := acquire.New(logger, cfg.ManagedBinDir, store)
 	runtimeSvc := gatewayruntime.NewSupervisorWithBaseDirAndInstaller(logger, ".", store, installer)
 	pairingSvc := pairing.NewServiceWithOptions(logger, store, pairing.Options{
