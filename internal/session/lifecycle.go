@@ -28,6 +28,18 @@ import (
 // the runtime is alive and unleased. On failure at any step, delete the record
 // and release any acquired lease to leave no orphaned state.
 func (rs *RuntimeSession) Create(ctx context.Context, runtimeID, deviceID, agentID string) (*Session, string, error) {
+	// Enforce one live session per (device, agent). A device that opens a new
+	// resilient session for an agent has, in practice, moved to a freshly started
+	// runtime; any earlier live session for the same agent is bound to an
+	// abandoned runtime that still holds a lease and — the reason this matters —
+	// a per-device quota slot. Left alone, re-opening the same agent a handful of
+	// times exhausts MaxPerDevice and every further Create fails with
+	// ErrSessionLimitReached even though nothing is actually running. Supersede
+	// those stale sessions first, freeing the slot and stopping the orphan. This
+	// must precede rs.mu.Lock: the teardown stops the orphaned runtime, whose
+	// OnProcessExit callback also acquires rs.mu.
+	rs.supersedeAgentSessions(deviceID, agentID, runtimeID)
+
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
 
@@ -133,6 +145,51 @@ func (rs *RuntimeSession) Create(ctx context.Context, runtimeID, deviceID, agent
 	}
 
 	return sess, attachToken, nil
+}
+
+// supersedeAgentSessions tears down every live (active or disconnected) session
+// for the given device+agent except one bound to keepRuntimeID. It enforces the
+// one-live-session-per-(device, agent) invariant: a new session for an agent
+// makes any earlier one stale, so the earlier session's orphaned runtime is
+// stopped and its lease, store record, and quota slot are released.
+//
+// keepRuntimeID is the runtime the caller is about to bind to. A live session on
+// that same runtime is a genuine reconnect target (resumed by the connect
+// handler before Create is reached), never an orphan, so it is left untouched.
+//
+// The teardown mirrors reapExpired: mark each victim StatusClosing under rs.mu
+// (so the runtime's OnProcessExit, fired during StopByRuntimeID, treats the exit
+// as intentional and emits no false crash push), then stop, release, and delete
+// outside the lock to avoid deadlocking against that callback.
+func (rs *RuntimeSession) supersedeAgentSessions(deviceID, agentID, keepRuntimeID string) {
+	rs.mu.Lock()
+	toClose := make(map[string]*Session)
+	for id, sess := range rs.sessions {
+		sess.mu.Lock()
+		stale := sess.DeviceID == deviceID && sess.AgentID == agentID &&
+			sess.RuntimeID != keepRuntimeID &&
+			(sess.Status == StatusActive || sess.Status == StatusDisconnected)
+		if stale {
+			sess.Status = StatusClosing
+		}
+		sess.mu.Unlock()
+		if stale {
+			toClose[id] = sess
+		}
+	}
+	rs.mu.Unlock()
+
+	for id, sess := range toClose {
+		if sess.cancelPump != nil {
+			sess.cancelPump()
+		}
+		rs.pm.StopByRuntimeID(sess.RuntimeID)
+		rs.pm.ReleaseLease(sess.RuntimeID, sess.Leaseholder)
+		rs.store.DeleteSession(context.Background(), sess.ID)
+		rs.mu.Lock()
+		delete(rs.sessions, id)
+		rs.mu.Unlock()
+	}
 }
 
 // sendPushNotification dispatches a push notification asynchronously with a 10s

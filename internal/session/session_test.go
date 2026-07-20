@@ -416,6 +416,90 @@ func TestCreateSessionLimitIgnoresDeadSessions(t *testing.T) {
 	}
 }
 
+// TestCreateSupersedesStaleSameAgentSession verifies the one-live-session-per-
+// (device, agent) invariant: opening a new resilient session for an agent that
+// already has a live session supersedes the old one — stopping its orphaned
+// runtime and freeing its per-device quota slot — instead of rejecting the new
+// session with ErrSessionLimitReached.
+func TestCreateSupersedesStaleSameAgentSession(t *testing.T) {
+	rs, store, pm, _, ctx := setupTest(t, Config{MaxPerDevice: 1})
+	defer rs.Shutdown()
+	defer store.Close()
+
+	first, _, err := rs.Create(ctx, "rt-old", "dev-sup", "agent-x")
+	if err != nil {
+		t.Fatalf("Create first: %v", err)
+	}
+
+	// Same device + agent on a fresh runtime: must succeed by superseding the
+	// stale session, even though the device is already at MaxPerDevice=1.
+	second, _, err := rs.Create(ctx, "rt-new", "dev-sup", "agent-x")
+	if err != nil {
+		t.Fatalf("Create second (should supersede, not hit limit): %v", err)
+	}
+	if second.ID == first.ID {
+		t.Fatal("expected a distinct new session, got the old one back")
+	}
+
+	// The orphaned runtime is stopped and its lease released; the new runtime holds the lease.
+	if !pm.stopped["rt-old"] {
+		t.Error("expected orphaned runtime rt-old to be stopped")
+	}
+	if pm.leases["rt-old"] != "" {
+		t.Errorf("expected rt-old lease released, still held by %q", pm.leases["rt-old"])
+	}
+	if pm.leases["rt-new"] != second.ID {
+		t.Errorf("expected rt-new leased by %s, got %q", second.ID, pm.leases["rt-new"])
+	}
+
+	// The old record is gone from the store; exactly one live session remains, on rt-new.
+	if _, err := store.GetSession(ctx, first.ID); err == nil {
+		t.Error("expected old session record to be deleted from store")
+	}
+	records, err := store.ListSessionsByDevice(ctx, "dev-sup")
+	if err != nil {
+		t.Fatalf("ListSessionsByDevice: %v", err)
+	}
+	live := 0
+	for _, rec := range records {
+		if rec.Status == StatusActive || rec.Status == StatusDisconnected {
+			live++
+			if rec.RuntimeID != "rt-new" {
+				t.Errorf("live session on unexpected runtime %s, want rt-new", rec.RuntimeID)
+			}
+		}
+	}
+	if live != 1 {
+		t.Errorf("expected exactly 1 live session after supersede, got %d", live)
+	}
+}
+
+// TestCreateDoesNotSupersedeDifferentAgent verifies the supersede logic is scoped
+// to the same agent: a live session for a different agent on the same device is
+// left intact (and so still counts toward the per-device quota).
+func TestCreateDoesNotSupersedeDifferentAgent(t *testing.T) {
+	rs, store, pm, _, ctx := setupTest(t, Config{})
+	defer rs.Shutdown()
+	defer store.Close()
+
+	first, _, err := rs.Create(ctx, "rt-a", "dev-multi", "agent-a")
+	if err != nil {
+		t.Fatalf("Create first: %v", err)
+	}
+
+	if _, _, err := rs.Create(ctx, "rt-b", "dev-multi", "agent-b"); err != nil {
+		t.Fatalf("Create second (different agent): %v", err)
+	}
+
+	// The first agent's session and runtime are untouched.
+	if pm.stopped["rt-a"] {
+		t.Error("different-agent session must not be superseded (rt-a was stopped)")
+	}
+	if _, err := store.GetSession(ctx, first.ID); err != nil {
+		t.Errorf("expected first session to survive, got %v", err)
+	}
+}
+
 func TestCreateDuplicateRuntime(t *testing.T) {
 	rs, store, _, _, ctx := setupTest(t, Config{})
 	defer rs.Shutdown()
