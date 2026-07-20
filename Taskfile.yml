@@ -1,0 +1,51 @@
+version: '3'
+
+vars:
+  PKG: ./cmd/ferngeist
+  BIN_DIR: bin
+  BINARY: ferngeist{{if eq OS "windows"}}.exe{{end}}
+  VERSION:
+    sh: git describe --tags --always --dirty 2>/dev/null || echo dev
+  COMMIT:
+    sh: git rev-parse --short HEAD 2>/dev/null || echo none
+  BUILD_TIME:
+    sh: date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown
+  # buildVersion is mandatory (cmd/ferngeist/main.go:requireBuildVersion);
+  # buildCommit/buildTime are optional but useful in `--version`.
+  LDFLAGS: >-
+    -X main.buildVersion={{.VERSION}}
+    -X main.buildCommit={{.COMMIT}}
+    -X main.buildTime={{.BUILD_TIME}}
+
+tasks:
+  default:
+    desc: List available tasks
+    cmds:
+      - task --list
+    silent: true
+
+  build:
+    desc: Build the gateway binary into ./bin
+    cmds:
+      - go build -ldflags "{{.LDFLAGS}}" -o {{.BIN_DIR}}/{{.BINARY}} {{.PKG}}
+
+  run:
+    desc: 'Run the gateway daemon in the foreground (pass extra flags with --, e.g. task run -- --listen :9000)'
+    cmds:
+      - go run -ldflags "{{.LDFLAGS}}" {{.PKG}} daemon run {{.CLI_ARGS}}
+
+  run:lan:
+    desc: Run the gateway daemon exposed on the local network
+    cmds:
+      - go run -ldflags "{{.LDFLAGS}}" {{.PKG}} daemon run --lan {{.CLI_ARGS}}
+
+  test:
+    desc: Run the full test suite
+    cmds:
+      - go test ./...
+
+  clean:
+    desc: Remove build artifacts
+    cmds:
+      - go clean
+      - '{{if eq OS "windows"}}powershell -NoProfile -Command "Remove-Item -Recurse -Force {{.BIN_DIR}} -ErrorAction SilentlyContinue"{{else}}rm -rf {{.BIN_DIR}}{{end}}'
