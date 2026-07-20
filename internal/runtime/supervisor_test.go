@@ -616,6 +616,131 @@ func main() {
 	}
 }
 
+func TestSessionLeasedRuntimeNotAutoRestarted(t *testing.T) { // TestSessionLeasedRuntimeNotAutoRestarted verifies that a runtime held by a resilient session (session-ID leaseholder) is NOT auto-restarted on crash, even with restart mode on_failure — the session's own crash-reclamation path is the sole recovery mechanism.
+	baseDir := t.TempDir()
+	binDir := filepath.Join(baseDir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+
+	// A long-lived agent that stays alive until stdin closes or it is killed, so
+	// the lease can be acquired deterministically before the simulated crash.
+	longLivedSource := filepath.Join(baseDir, "long-lived.go")
+	source := `package main
+import (
+	"bufio"
+	"os"
+)
+func main() {
+	r := bufio.NewReader(os.Stdin)
+	for {
+		if _, err := r.ReadString('\n'); err != nil {
+			return
+		}
+	}
+}
+`
+	if err := os.WriteFile(longLivedSource, []byte(source), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	outputPath := filepath.Join(binDir, namedBinary("long-lived-acp-agent"))
+	command := exec.Command("go", "build", "-o", outputPath, longLivedSource)
+	command.Stdout = os.Stdout
+	command.Stderr = os.Stderr
+	if err := command.Run(); err != nil {
+		t.Fatalf("go build long-lived agent error = %v", err)
+	}
+
+	supervisor := NewSupervisorWithBaseDir(slog.New(slog.NewTextHandler(io.Discard, nil)), baseDir, nil)
+	rt, err := supervisor.Start(catalog.Agent{
+		ID:          "long-lived-acp",
+		DisplayName: "Long Lived ACP",
+		Detected:    true,
+		Security:    catalog.SecurityConfig{AllowsRemoteStart: true},
+		Launch: catalog.LaunchConfig{
+			Mode:      "process",
+			Command:   filepath.Join("bin", namedBinary("long-lived-acp-agent")),
+			Transport: "stdio",
+			Readiness: catalog.ReadinessConfig{Mode: "immediate"},
+			Restart: catalog.RestartConfig{
+				Mode:       "on_failure",
+				MaxRetries: 3,
+			},
+		},
+		HealthCheck: catalog.HealthCheckConfig{Mode: "none"},
+	})
+	if err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = supervisor.StopByRuntimeID(rt.ID)
+	})
+
+	// Acquire a session lease (leaseholder is a session ID, not "legacy"), which
+	// marks the runtime as owned by a resilient session.
+	if _, err := supervisor.AcquireLease(rt.ID, "sess-protected"); err != nil {
+		t.Fatalf("AcquireLease() error = %v", err)
+	}
+
+	exitCh := make(chan string, 1)
+	supervisor.OnProcessExit(rt.ID, func(id string) { exitCh <- id })
+
+	// Simulate an unexpected crash: kill the OS process directly rather than via
+	// StopByRuntimeID, so handle.stopping stays false and waitErr is non-nil —
+	// the exact shape of a genuine agent death.
+	supervisor.mu.Lock()
+	handle := supervisor.processes[rt.ID]
+	supervisor.mu.Unlock()
+	if handle == nil || handle.cmd == nil || handle.cmd.Process == nil {
+		t.Fatal("expected a running process handle")
+	}
+	if err := handle.cmd.Process.Kill(); err != nil {
+		t.Fatalf("kill process error = %v", err)
+	}
+
+	// The crash-reclamation path fires the exit callback.
+	select {
+	case <-exitCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("OnProcessExit callback not fired after crash")
+	}
+
+	// The runtime must land in StatusFailed with no restart attempt — a
+	// session-leased runtime is never auto-restarted in place.
+	var got Runtime
+	found := false
+	for range 50 {
+		supervisor.mu.Lock()
+		rtNow, ok := supervisor.runtimes[rt.ID]
+		supervisor.mu.Unlock()
+		if ok && rtNow.Status == StatusFailed {
+			got = rtNow
+			found = true
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !found {
+		t.Fatal("expected session-leased runtime to end in StatusFailed, not restart")
+	}
+	if got.RestartAttempts != 0 {
+		t.Fatalf("RestartAttempts = %d, want 0 (no auto-restart for session-leased runtime)", got.RestartAttempts)
+	}
+
+	// Give any erroneous restart goroutine time to relaunch, then confirm it did not.
+	time.Sleep(300 * time.Millisecond)
+	supervisor.mu.Lock()
+	rtFinal, ok := supervisor.runtimes[rt.ID]
+	supervisor.mu.Unlock()
+	if !ok {
+		t.Fatal("runtime should still exist after crash")
+	}
+	if rtFinal.Status == StatusRunning || rtFinal.Status == StatusStarting {
+		t.Fatalf("runtime was auto-restarted (status %q); session-leased runtimes must not restart", rtFinal.Status)
+	}
+}
+
 // --- Smoke test ---
 
 func TestOptionalInstalledOpenCodeACPSmoke(t *testing.T) { // TestOptionalInstalledOpenCodeACPSmoke is a smoke test (opt-in via FERNGEIST_RUN_REAL_AGENT_TESTS=1) that launches the installed opencode binary over ACP.

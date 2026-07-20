@@ -137,6 +137,10 @@ func Run(ctx context.Context, build api.BuildInfo) error {
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		return fmt.Errorf("graceful shutdown failed: %w", err)
 	}
+	// Stop the session service first (reaper, inbound diagnostic writer, and all
+	// session pumps) while the backing runtimes are still alive, then stop the
+	// runtimes. Skipping this leaks the reaper and inbound-writer goroutines.
+	sessionSvc.Shutdown()
 	if err := runtimeSvc.Shutdown(shutdownCtx); err != nil {
 		return fmt.Errorf("runtime shutdown failed: %w", err)
 	}

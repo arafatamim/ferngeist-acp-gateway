@@ -341,11 +341,11 @@ func (s *Supervisor) Start(agent catalog.Agent) (Runtime, error) {
 			// Check if the existing runtime has an active lease
 			// If leased, it's "stale" and needs to be replaced
 			// If a processHandle exists and is leased ONLY by a legacy client
-		// (fate-bound), we can stop and replace it. Session-leased runtimes
-		// (leaseholder is a session ID, not "legacy") must be protected —
-		// killing them would orphan a resilient session.
-		if handle, exists := s.processes[runtimeID]; exists && handle != nil && handle.leaseholder == "legacy" {
-			staleRuntimeID = runtimeID
+			// (fate-bound), we can stop and replace it. Session-leased runtimes
+			// (leaseholder is a session ID, not "legacy") must be protected —
+			// killing them would orphan a resilient session.
+			if handle, exists := s.processes[runtimeID]; exists && handle != nil && handle.leaseholder == "legacy" {
+				staleRuntimeID = runtimeID
 			} else {
 				// Runtime exists but not leased - return it without launching a new one
 				s.mu.Unlock()
@@ -977,7 +977,13 @@ func (s *Supervisor) handleProcessExit(runtimeID, agentID string, handle *proces
 	// 3. Transport is stdio (only supported mode)
 	// 4. Haven't exceeded max retry count
 	// 5. Not an intentional stop (handle.stopping or runtime status)
-	if handle.waitErr != nil && s.shouldRestart(handle.agent.Launch.Restart, runtime.Transport, runtime.RestartAttempts) && !handle.stopping && runtime.Status != StatusStopping {
+	// 6. Not held by a resilient session. A session-leased runtime has its own
+	//    recovery path: the exitCallback below reclaims the crashed session and
+	//    notifies the client, which reconnects and gets a fresh session. Restarting
+	//    in place instead would orphan the session (its pump is cancelled and its
+	//    lease released by the callback) and leave the new process with no client
+	//    and no stdout drain — so the two recovery mechanisms are mutually exclusive.
+	if handle.waitErr != nil && s.shouldRestart(handle.agent.Launch.Restart, runtime.Transport, runtime.RestartAttempts) && !handle.stopping && runtime.Status != StatusStopping && !sessionLeased(handle) {
 		// Transition to starting state for restart
 		runtime.Status = StatusStarting
 		runtime.LastError = handle.waitErr.Error()
@@ -1425,6 +1431,18 @@ func readinessMode(launch catalog.LaunchConfig) string {
 		return "immediate"
 	}
 	return ""
+}
+
+// sessionLeased reports whether the runtime's process handle is held by a
+// resilient session (leaseholder is a session ID) rather than being unleased
+// ("") or held by a legacy fate-bound WebSocket ("legacy"). Session-leased
+// runtimes are excluded from supervisor auto-restart so the session's own
+// crash-reclamation path is the sole recovery mechanism.
+func sessionLeased(handle *processHandle) bool {
+	if handle == nil {
+		return false
+	}
+	return handle.leaseholder != "" && handle.leaseholder != "legacy"
 }
 
 // shouldRestart determines whether a failed runtime should be automatically
