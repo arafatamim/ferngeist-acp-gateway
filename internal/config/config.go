@@ -26,6 +26,7 @@ const (
 	defaultCredentialTTL          = 7 * 24 * time.Hour
 	defaultSessionMaxDisconnected = 15 * time.Minute
 	defaultMaxSessionsPerDevice   = 5
+	defaultProgressInterval       = 15 * time.Second
 )
 
 // Config is the daemon's effective runtime configuration after environment
@@ -59,6 +60,9 @@ type Config struct {
 	SessionMaxDisconnected time.Duration
 	// MaxSessionsPerDevice limits how many concurrent sessions a single device can hold.
 	MaxSessionsPerDevice int
+	// ProgressInterval is the minimum seconds between live progress push
+	// notifications while an agent is mid-turn. 0 means use the default.
+	ProgressInterval time.Duration
 	// FCMCredentialsFile is the path to a Firebase service-account JSON used to
 	// authenticate FCM HTTP v1 push delivery. When empty, push notifications fall
 	// back to the log-only stub so local/dev runs work without a Firebase project.
@@ -106,6 +110,7 @@ func Load() Config {
 		AllowRuntimeRestartEnv: envBool("FERNGEIST_GATEWAY_ALLOW_REMOTE_RUNTIME_RESTART_ENV"),
 		SessionMaxDisconnected: envDurationSecondsOrDefault("FERNGEIST_GATEWAY_SESSION_MAX_DISCONNECTED_SECONDS", defaultSessionMaxDisconnected),
 		MaxSessionsPerDevice:   envIntOrDefault("FERNGEIST_GATEWAY_MAX_SESSIONS_PER_DEVICE", defaultMaxSessionsPerDevice),
+		ProgressInterval:       envDurationSecondsOrDefault("FERNGEIST_GATEWAY_PROGRESS_INTERVAL_SECONDS", defaultProgressInterval),
 		FCMCredentialsFile:     strings.TrimSpace(os.Getenv("FERNGEIST_GATEWAY_FCM_CREDENTIALS_FILE")),
 	}
 	return cfg.applySecurityDefaults()

@@ -201,7 +201,7 @@ For FCM the data keys are:
 |-------------|---------------------------------------------------------------------|
 | `title`     | notification title                                                  |
 | `body`      | notification body                                                   |
-| `category`  | event kind — `turn_complete`, `permission_request`, `agent_error`, or `agent_crash` |
+| `category`  | event kind — `turn_complete`, `permission_request`, `agent_error`, `agent_crash`, or `progress` |
 | `serverId`  | the gateway's `gatewayId` (from pairing); deep-links with `sessionId` |
 | `sessionId` | target gateway session/chat                                         |
 | `cwd`       | working directory for the chat route, when known                    |
@@ -213,8 +213,10 @@ optional fields are omitted from `data`.
 The message also carries an `android` block with `priority: high` (to wake the
 device promptly) and a per-category `channel_id`: alert-worthy events
 (`permission_request`, `agent_error`, `agent_crash`) route to the heads-up
-`ferngeist_push` channel, and `turn_complete` routes to the quiet
-`ferngeist_push_updates` channel.
+`ferngeist_push` channel, and `turn_complete` and `progress` route to the quiet
+`ferngeist_push_updates` channel. `progress` pushes are throttled to one per
+`FERNGEIST_GATEWAY_PROGRESS_INTERVAL_SECONDS` (default 15s) while the agent is
+mid-turn, and always fire on each tool call that completes or fails.
 
 > A force-stopped app (Settings → Force Stop, or some OEM task-killers) cannot
 > receive any push until the user reopens it — an Android platform rule. Normal

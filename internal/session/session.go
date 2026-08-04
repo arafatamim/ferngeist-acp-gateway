@@ -34,8 +34,9 @@ const (
 	StatusClosing      = "closing"
 	StatusFailed       = "failed"
 
-	defaultMaxDisconnected = 15 * time.Minute
-	defaultReaperInterval  = 30 * time.Second
+	defaultMaxDisconnected  = 15 * time.Minute
+	defaultReaperInterval   = 30 * time.Second
+	defaultProgressInterval = 15 * time.Second
 )
 
 var (
@@ -94,6 +95,9 @@ type Config struct {
 	MaxPerDevice int
 	// ReaperInterval is how often the reaper scans for expired disconnected sessions.
 	ReaperInterval time.Duration
+	// ProgressInterval is the minimum seconds between live progress push
+	// notifications while the agent is mid-turn. 0 means use the default.
+	ProgressInterval time.Duration
 	// PushSvc is the push notification service for turn-complete notifications.
 	// nil-able — when nil, push notifications are disabled.
 	PushSvc push.PushService
@@ -134,9 +138,9 @@ type Session struct {
 	CreatedAt      time.Time
 	DisconnectedAt *time.Time // set when client detaches, nil when attached
 
-	pump        *StdioPump           // long-lived stdout drain + stdin writer
-	leasedPipes runtime.Pipes        // exclusive stdio lease
-	cancelPump  context.CancelFunc   // stops the StdoutDrainLoop on session close
+	pump        *StdioPump         // long-lived stdout drain + stdin writer
+	leasedPipes runtime.Pipes      // exclusive stdio lease
+	cancelPump  context.CancelFunc // stops the StdoutDrainLoop on session close
 
 	currentConn *websocket.Conn // the active client conn, or nil; used to evict on takeover
 	connGen     int64           // bumped on every attach; fences stale detaches from evicted conns
@@ -161,6 +165,9 @@ func NewRuntimeSession(logger *slog.Logger, store *storage.SQLiteStore, pm Proce
 	if cfg.ReaperInterval <= 0 {
 		rs.cfg.ReaperInterval = defaultReaperInterval
 	}
+	if cfg.ProgressInterval <= 0 {
+		rs.cfg.ProgressInterval = defaultProgressInterval
+	}
 	rs.inbound = newInboundWriter(store)
 	ctx, cancel := context.WithCancel(context.Background())
 	rs.cancelReaper = cancel
@@ -173,4 +180,3 @@ func generateID() string {
 	rand.Read(b)
 	return hex.EncodeToString(b)
 }
-

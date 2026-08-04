@@ -90,6 +90,16 @@ type StdioPump struct {
 
 	lastStdoutAt time.Time // updated on each agent stdout line; used by reaper to avoid killing active agents
 	lastStdoutMu sync.Mutex
+
+	// ProgressInterval is the minimum time between non-terminal progress pushes.
+	// 0 means push every new/different tool with no throttle.
+	ProgressInterval time.Duration
+
+	// Throttle/dedupe state for live progress pushes. Guarded by progressMu.
+	progressMu           sync.Mutex
+	lastProgressPush     time.Time
+	lastProgressToolCall string
+	lastProgressSummary  string
 }
 
 // StdoutDrainLoop continuously reads from agent stdout and forwards frames
@@ -355,7 +365,40 @@ func (p *StdioPump) checkAndNotify(line string) {
 		p.onPushNotification(PushEvent{SessionID: p.sessionID, AcpSessionID: p.AcpSessionID(), Category: push.CategoryPermissionRequest, Title: "Permission Required", Body: "Your agent needs approval to run a tool."})
 	case isJSONRPCError([]byte(line)):
 		p.onPushNotification(PushEvent{SessionID: p.sessionID, AcpSessionID: p.AcpSessionID(), Category: push.CategoryError, Title: "Agent Error", Body: "Your agent encountered an unexpected error."})
+	default:
+		if ev := isProgressEvent(line); ev != nil {
+			p.maybeNotifyProgress(ev)
+		}
 	}
+}
+
+// maybeNotifyProgress fires a progress push, throttled by ProgressInterval and
+// deduplicated against the previous tool call + summary. Terminal events
+// (completed/failed) always push immediately so the user sees the boundary.
+func (p *StdioPump) maybeNotifyProgress(ev *progressEvent) {
+	p.progressMu.Lock()
+	defer p.progressMu.Unlock()
+
+	if !ev.terminal {
+		// Dedupe: same tool call, same summary → skip.
+		if ev.toolCallID == p.lastProgressToolCall && ev.summary == p.lastProgressSummary {
+			return
+		}
+		// Throttle: respect the minimum interval for non-terminal updates.
+		if p.ProgressInterval > 0 && time.Since(p.lastProgressPush) < p.ProgressInterval {
+			return
+		}
+	}
+	p.lastProgressPush = time.Now()
+	p.lastProgressToolCall = ev.toolCallID
+	p.lastProgressSummary = ev.summary
+	p.onPushNotification(PushEvent{
+		SessionID:    p.sessionID,
+		AcpSessionID: p.AcpSessionID(),
+		Category:     push.CategoryProgress,
+		Title:        "Agent working",
+		Body:         ev.summary,
+	})
 }
 
 // snoopInitialize inspects an outbound frame for the agent's `initialize`
@@ -528,6 +571,96 @@ func isJSONRPCError(data []byte) bool {
 		return false
 	}
 	return resp.Error != nil
+}
+
+// progressEvent is a parsed live-progress signal from an agent's session/update
+// notification. summary is the human-readable line to push; terminal is true
+// when the tool call completed or failed (which should push immediately, not
+// throttled).
+type progressEvent struct {
+	summary    string
+	terminal   bool
+	toolCallID string
+}
+
+// isProgressEvent parses a stdout line for an ACP session/update tool_call or
+// tool_call_update event and returns a progressEvent, or nil when the line is
+// not a progress-relevant session/update frame. Summary resolution order:
+// required `title` (tool_call) or optional `title` (tool_call_update), then the
+// first text content block, then a verb derived from `kind`. A frame with no
+// resolvable summary, or a non-tool session/update variant, yields nil.
+func isProgressEvent(line string) *progressEvent {
+	var probe struct {
+		Method string `json:"method"`
+		Params *struct {
+			Update *struct {
+				Discriminator string `json:"sessionUpdate"`
+				ToolCallID    string `json:"toolCallId"`
+				Status        string `json:"status"`
+				Title         string `json:"title"`
+				Kind          string `json:"kind"`
+				Content       []struct {
+					Type string `json:"type"`
+					Text string `json:"text"`
+				} `json:"content"`
+			} `json:"update"`
+		} `json:"params"`
+	}
+	if err := json.Unmarshal([]byte(line), &probe); err != nil ||
+		probe.Method != "session/update" ||
+		probe.Params == nil || probe.Params.Update == nil {
+		return nil
+	}
+	u := probe.Params.Update
+	switch u.Discriminator {
+	case "tool_call", "tool_call_update":
+	default:
+		return nil
+	}
+	if u.Status != "in_progress" && u.Status != "completed" && u.Status != "failed" {
+		return nil
+	}
+	summary := u.Title
+	if summary == "" && len(u.Content) > 0 {
+		summary = u.Content[0].Text
+	}
+	if summary == "" {
+		summary = verbForKind(u.Kind)
+		if summary == "" {
+			return nil
+		}
+	}
+	return &progressEvent{
+		summary:    summary,
+		terminal:   u.Status == "completed" || u.Status == "failed",
+		toolCallID: u.ToolCallID,
+	}
+}
+
+// verbForKind maps a ToolKind to a generic progress verb, or "" for unknown/other.
+func verbForKind(kind string) string {
+	switch kind {
+	case "read":
+		return "Reading files"
+	case "edit":
+		return "Editing files"
+	case "delete":
+		return "Removing files"
+	case "move":
+		return "Moving files"
+	case "search":
+		return "Searching"
+	case "execute":
+		return "Running a command"
+	case "think":
+		return "Thinking"
+	case "fetch":
+		return "Fetching data"
+	case "switch_mode":
+		return "Switching mode"
+	default:
+		return ""
+	}
 }
 
 func (p *StdioPump) WriteToAgent(payload []byte) error {

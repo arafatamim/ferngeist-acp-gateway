@@ -29,6 +29,7 @@ const (
 	CategoryPermissionRequest = "permission_request"
 	CategoryError             = "agent_error"
 	CategoryAgentCrash        = "agent_crash"
+	CategoryProgress          = "progress"
 )
 
 // Notification is a platform-neutral, renderable event destined for a device.

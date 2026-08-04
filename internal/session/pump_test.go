@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 )
 
 // newRecoveryPump builds a bare StdioPump suitable for exercising the re-load
@@ -141,5 +142,114 @@ func TestBufferLoadHistoryEvictsOldest(t *testing.T) {
 	}
 	if !strings.Contains(p.loadHistory[sid][0], "xxxx") {
 		t.Fatal("expected the most recent (large) frame to be retained")
+	}
+}
+
+func TestIsProgressEventToolCallCreate(t *testing.T) {
+	line := `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"tool_call","toolCallId":"c1","kind":"edit","status":"in_progress","title":"Editing auth.go"}}}`
+	ev := isProgressEvent(line)
+	if ev == nil {
+		t.Fatal("expected progress event, got nil")
+	}
+	if ev.summary != "Editing auth.go" {
+		t.Errorf("summary = %q, want %q", ev.summary, "Editing auth.go")
+	}
+	if ev.terminal {
+		t.Error("in_progress should not be terminal")
+	}
+	if ev.toolCallID != "c1" {
+		t.Errorf("toolCallID = %q, want c1", ev.toolCallID)
+	}
+}
+
+func TestIsProgressEventFallsBackToContentText(t *testing.T) {
+	line := `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"tool_call_update","toolCallId":"c1","status":"in_progress","content":[{"type":"text","text":"Running go test..."}]}}}`
+	ev := isProgressEvent(line)
+	if ev == nil {
+		t.Fatal("expected progress event, got nil")
+	}
+	if ev.summary != "Running go test..." {
+		t.Errorf("summary = %q, want %q", ev.summary, "Running go test...")
+	}
+}
+
+func TestIsProgressEventFallsBackToKindVerb(t *testing.T) {
+	line := `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"tool_call","toolCallId":"c1","kind":"execute","status":"in_progress"}}}`
+	ev := isProgressEvent(line)
+	if ev == nil {
+		t.Fatal("expected progress event, got nil")
+	}
+	if ev.summary != "Running a command" {
+		t.Errorf("summary = %q, want %q", ev.summary, "Running a command")
+	}
+}
+
+func TestIsProgressEventTerminal(t *testing.T) {
+	line := `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"tool_call_update","toolCallId":"c1","status":"completed","title":"Edited auth.go"}}}`
+	ev := isProgressEvent(line)
+	if ev == nil {
+		t.Fatal("expected progress event, got nil")
+	}
+	if !ev.terminal {
+		t.Error("completed should be terminal")
+	}
+}
+
+func TestIsProgressEventIgnoresNonToolAndNonProgress(t *testing.T) {
+	cases := []string{
+		`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","text":"hi"}}}`,
+		`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"tool_call","toolCallId":"c1","status":"pending","title":"Waiting"}}}`,
+		`{"jsonrpc":"2.0","method":"other","params":{}}`,
+		`not json`,
+	}
+	for _, line := range cases {
+		if ev := isProgressEvent(line); ev != nil {
+			t.Errorf("isProgressEvent(%q) = %+v, want nil", line, ev)
+		}
+	}
+}
+
+func TestVerbForKind(t *testing.T) {
+	if got := verbForKind("execute"); got != "Running a command" {
+		t.Errorf("execute verb = %q", got)
+	}
+	if got := verbForKind("other"); got != "" {
+		t.Errorf("other verb = %q, want empty", got)
+	}
+	if got := verbForKind(""); got != "" {
+		t.Errorf("empty verb = %q, want empty", got)
+	}
+}
+
+func TestMaybeNotifyProgressThrottlesAndDedupes(t *testing.T) {
+	var fired []string
+	p := &StdioPump{
+		logger:             slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProgressInterval:   time.Hour, // effectively disable throttle between first and second
+		onPushNotification: func(e PushEvent) { fired = append(fired, e.Body) },
+	}
+
+	// First in_progress: fires.
+	p.maybeNotifyProgress(&progressEvent{summary: "Editing auth.go", toolCallID: "c1"})
+	if len(fired) != 1 || fired[0] != "Editing auth.go" {
+		t.Fatalf("first push = %v, want [Editing auth.go]", fired)
+	}
+
+	// Same tool + same summary: deduped, no throttled push.
+	p.maybeNotifyProgress(&progressEvent{summary: "Editing auth.go", toolCallID: "c1"})
+	if len(fired) != 1 {
+		t.Fatalf("dedupe failed, fired = %v", fired)
+	}
+
+	// New tool + new summary within interval: throttled.
+	p.maybeNotifyProgress(&progressEvent{summary: "Editing routes.go", toolCallID: "c2"})
+	if len(fired) != 1 {
+		t.Fatalf("throttle failed, fired = %v", fired)
+	}
+
+	// Terminal event: fires immediately despite interval.
+	p.maybeNotifyProgress(&progressEvent{summary: "Edited auth.go", toolCallID: "c1", terminal: true})
+	if len(fired) != 2 || fired[1] != "Edited auth.go" {
+		t.Fatalf("terminal push = %v, want appends", fired)
 	}
 }

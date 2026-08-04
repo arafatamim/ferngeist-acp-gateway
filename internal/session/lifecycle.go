@@ -117,6 +117,7 @@ func (rs *RuntimeSession) Create(ctx context.Context, runtimeID, deviceID, agent
 		logger:             rs.logger,
 		appendLog:          rs.pm.AppendLog,
 		onPushNotification: onPushNotification,
+		ProgressInterval:   rs.cfg.ProgressInterval,
 	}
 
 	go pump.StdoutDrainLoop(pumpCtx)

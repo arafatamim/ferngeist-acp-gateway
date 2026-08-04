@@ -27,13 +27,13 @@ Every connection creates a persistent gateway session with:
 
 - **StdioPump** — a long-lived goroutine that drains agent stdout and forwards frames to the WebSocket when a client is attached. When no client is connected, output is discarded after end-turn detection and log append. The pump owns the pipe lifecycle and runs independently of WebSocket connectivity.
 - **Lease** — the session holds an exclusive lease on the runtime's stdio pipes via `AcquireLease`/`ReleaseLease`. The runtime is not stopped on WebSocket disconnect — only the leaseholder string is cleared. Sessions always stop the runtime on close.
-- **Push notifications** — when the pump detects a notable event (turn complete, permission request, or agent error) — or the runtime crashes — it emits a platform-neutral notification through the push dispatcher, which routes it to the device's provider (FCM when credentials are configured, otherwise log-only). Pushes fire **regardless of whether a client is attached**: the gateway can't tell whether the app is foregrounded or backgrounded (only whether a socket is attached, a poor proxy), so it always emits a hybrid notification+data message — the foreground client suppresses the duplicate, while the system displays the `notification` block when the app is backgrounded or killed. The client reconnects and calls `session/load` on the agent for context restoration.
+- **Push notifications** — when the pump detects a notable event (turn complete, permission request, agent error, or live progress) — or the runtime crashes — it emits a platform-neutral notification through the push dispatcher, which routes it to the device's provider (FCM when credentials are configured, otherwise log-only). Pushes fire **regardless of whether a client is attached**: the gateway can't tell whether the app is foregrounded or backgrounded (only whether a socket is attached, a poor proxy), so it always emits a hybrid notification+data message — the foreground client suppresses the duplicate, while the system displays the `notification` block when the app is backgrounded or killed. The client reconnects and calls `session/load` on the agent for context restoration.
 - **Inbound diagnostics** — client-to-agent frames are logged asynchronously to SQLite via a buffered channel (non-blocking, dropped on overflow with counter).
 - **ACP session/close** — before stopping the runtime on session close, the gateway sends a `session/close` JSON-RPC request to the agent if it advertised `sessionCapabilities.close` during initialize. The mock agent supports this for testing.
 
 There is no ring buffer or catchup replay. On WebSocket disconnect:
 1. The pump continues running, discarding agent output.
-2. On notable events (turn complete, permission request, agent error, agent crash), a push notification is dispatched (if a push service is configured). Pushes also fire while a client is attached — the client suppresses foreground notifications — so disconnection is not what gates them.
+2. On notable events (turn complete, permission request, agent error, agent crash, or live progress), a push notification is dispatched (if a push service is configured). Pushes also fire while a client is attached — the client suppresses foreground notifications — so disconnection is not what gates them.
 3. The client reconnects, calls `session/load` on the agent, and resumes live proxying.
 
 ## Session lifecycle
@@ -94,7 +94,8 @@ device's registered platform.
     a killed app's system display the alert, while the `data` block duplicates
     title/body and carries the deep-link keys for the foreground client. Adds an
     `android` block with high priority and a per-category channel (`ferngeist_push`
-    for alerts, `ferngeist_push_updates` for quiet updates). Reports
+    for alerts, `ferngeist_push_updates` for quiet updates — `turn_complete` and
+    live `progress` use the quiet channel). Reports
     `ErrTokenUnregistered` on `UNREGISTERED`/404.
   - Is store-free — token lookup and eviction live in the dispatcher.
 - `internal/push/log.go` provides `LogProvider`, which logs instead of delivering.
@@ -109,6 +110,16 @@ device's registered platform.
   the session `closing` first, so it is not reported as a crash. `Config.PushSvc`
   is nil-able (when nil, push is disabled). The neutral `Notification` carries the
   gateway's `gatewayId` as `serverId` for deep-linking.
+- **Live progress** — the pump parses each agent stdout line for ACP
+  `session/update` frames with a `tool_call` or `tool_call_update` discriminator
+  and emits a `progress` push so a phone user sees the agent working mid-turn.
+  The summary resolves from the frame's `title`, then the first `content` text
+  block, then a verb derived from `kind` (e.g. "Running a command"). Non-terminal
+  updates (`in_progress`) are deduplicated by `(toolCallId, summary)` and
+  throttled to one push per `FERNGEIST_GATEWAY_PROGRESS_INTERVAL_SECONDS`
+  (default 15s); terminal updates (`completed`/`failed`) always push immediately
+  so the user sees the tool boundary. Progress pushes route to the quiet
+  `ferngeist_push_updates` channel.
 - `POST /v1/devices/push-token` registers/updates a device's `(token, platform)`,
   stored in SQLite. The interface only sends; registration is via the API endpoint.
 

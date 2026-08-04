@@ -26,6 +26,7 @@ Ferngeist Gateway is configured through environment variables and persisted stat
 | `FERNGEIST_GATEWAY_SESSION_MAX_DISCONNECTED_SECONDS` | TTL for disconnected sessions before reaper closes them | `900` (15 min) |
 | `FERNGEIST_GATEWAY_MAX_SESSIONS_PER_DEVICE` | Max concurrent sessions per device | `5` |
 | `FERNGEIST_GATEWAY_SESSION_REAPER_INTERVAL_SECONDS` | Interval between reaper sweeps | `30` |
+| `FERNGEIST_GATEWAY_PROGRESS_INTERVAL_SECONDS` | Minimum seconds between live progress pushes while the agent is mid-turn | `15` |
 
 ## Pairing controls
 
