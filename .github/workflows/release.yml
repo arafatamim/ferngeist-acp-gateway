@@ -250,8 +250,92 @@ jobs:
           path: dist/${{ steps.package_windows.outputs.archive }}
           retention-days: 5
 
+  # Build the gateway for Android. arm64 is pure Go (no NDK); armeabi-v7a
+  # (android/arm) forces cgo, so it uses the NDK clang that ships on the runner.
+  build-android:
+    strategy:
+      matrix:
+        include:
+          - goos: android
+            goarch: arm64
+            artifact_name: ferngeist-gateway_android_arm64
+            cgo_enabled: "0"
+            cc: ""
+          - goos: android
+            goarch: arm
+            goarm: "7"
+            artifact_name: ferngeist-gateway_android_armv7
+            cgo_enabled: "1"
+            cc: "${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi21-clang"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+          cache-dependency-path: go.sum
+
+      - name: Build gateway binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
+          CGO_ENABLED: ${{ matrix.cgo_enabled }}
+          CC: ${{ matrix.cc }}
+        working-directory: .
+        run: |
+          VERSION="${{ github.event.release.tag_name }}"
+          if [ -z "$VERSION" ]; then
+            VERSION="${{ inputs.tag }}"
+          fi
+          if [ -z "$VERSION" ] && [ "${{ github.ref_type }}" = "tag" ]; then
+            VERSION="${{ github.ref_name }}"
+          fi
+          if [ -z "$VERSION" ]; then
+            echo "Release tag is required"
+            exit 1
+          fi
+          COMMIT="${{ github.sha }}"
+          BUILD_TIME="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+          LDFLAGS="-X main.buildVersion=${VERSION#v} -X main.buildCommit=${COMMIT} -X main.buildTime=${BUILD_TIME}"
+          mkdir -p dist/${{ matrix.artifact_name }}
+          go build -ldflags="$LDFLAGS" -o dist/${{ matrix.artifact_name }}/ferngeist-gateway ./cmd/ferngeist
+          cp README.md LICENSE dist/${{ matrix.artifact_name }}/
+
+      # Package the Android build into a deterministic tar.gz archive.
+      - name: Create Android archive
+        id: package_android
+        shell: bash
+        working-directory: dist/${{ matrix.artifact_name }}
+        run: |
+          VERSION="${{ github.event.release.tag_name }}"
+          if [ -z "$VERSION" ]; then
+            VERSION="${{ inputs.tag }}"
+          fi
+          if [ -z "$VERSION" ] && [ "${{ github.ref_type }}" = "tag" ]; then
+            VERSION="${{ github.ref_name }}"
+          fi
+          if [ -z "$VERSION" ]; then
+            echo "Release tag is required"
+            exit 1
+          fi
+          VERSION="${VERSION#v}"
+          ARCHIVE="ferngeist-gateway_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz"
+          tar --sort=name --mtime='2025-01-01T00:00:00Z' --pax-option=exthdr.name=%d/PaxHeader,pnthdr.name=%d/PaxHeader -czf "../$ARCHIVE" .
+          echo "archive=$ARCHIVE" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Android artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: dist/${{ steps.package_android.outputs.archive }}
+          retention-days: 5
+
   publish:
-    needs: [build-linux, build-macos, build-windows]
+    needs: [build-linux, build-macos, build-windows, build-android]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository

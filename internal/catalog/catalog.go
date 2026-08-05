@@ -608,7 +608,7 @@ func registryEntryToAgent(entry acpregistry.AgentEntry, resolveBinaries func(str
 		ID:              entry.ID,
 		DisplayName:     displayName,
 		Protocol:        "acp",
-		PlatformSupport: []string{"windows", "darwin", "linux"},
+		PlatformSupport: []string{"windows", "darwin", "linux", "android"},
 		HealthCheck: HealthCheckConfig{
 			Mode: "none",
 		},
