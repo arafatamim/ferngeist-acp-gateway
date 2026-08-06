@@ -71,6 +71,7 @@ func Run(ctx context.Context, build api.BuildInfo) error {
 	pairingSvc := pairing.NewServiceWithOptions(logger, store, pairing.Options{
 		ArmTTL:                 cfg.PairingArmTTL,
 		CredentialTTL:          cfg.CredentialTTL,
+		GracePeriod:            cfg.CredentialGracePeriod,
 		AllowDiagnosticsExport: cfg.AllowDiagnosticsExport,
 		AllowRuntimeRestartEnv: cfg.AllowRuntimeRestartEnv,
 	})

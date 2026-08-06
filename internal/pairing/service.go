@@ -8,12 +8,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
 	"time"
-
-	"slices"
 
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/storage"
 )
@@ -22,22 +21,24 @@ const (
 	defaultChallengeTTL = 2 * time.Minute
 	defaultArmTTL       = 2 * time.Minute
 	defaultTokenTTL     = 7 * 24 * time.Hour
+	defaultGracePeriod  = 90 * 24 * time.Hour
 	challengeHistoryTTL = 10 * time.Minute
 	codeLength          = 6
 )
 
 var (
-	ErrChallengeNotFound  = errors.New("pairing challenge not found")
-	ErrChallengeExpired   = errors.New("pairing challenge expired")
-	ErrChallengeAmbiguous = errors.New("pairing challenge is ambiguous")
-	ErrCodeMismatch       = errors.New("pairing code mismatch")
-	ErrInvalidDeviceName  = errors.New("device name is required")
-	ErrDeviceNotFound     = errors.New("paired device not found")
-	ErrCredentialMissing  = errors.New("gateway credential missing")
-	ErrCredentialInvalid  = errors.New("gateway credential invalid")
-	ErrCredentialExpired  = errors.New("gateway credential expired")
-	ErrCredentialScope    = errors.New("gateway credential does not allow this operation")
-	ErrPairingNotArmed    = errors.New("pairing requires local approval")
+	ErrChallengeNotFound      = errors.New("pairing challenge not found")
+	ErrChallengeExpired       = errors.New("pairing challenge expired")
+	ErrChallengeAmbiguous     = errors.New("pairing challenge is ambiguous")
+	ErrCodeMismatch           = errors.New("pairing code mismatch")
+	ErrInvalidDeviceName      = errors.New("device name is required")
+	ErrDeviceNotFound         = errors.New("paired device not found")
+	ErrCredentialMissing      = errors.New("gateway credential missing")
+	ErrCredentialInvalid      = errors.New("gateway credential invalid")
+	ErrCredentialExpired      = errors.New("gateway credential expired")
+	ErrCredentialGraceExpired = errors.New("gateway credential expired beyond grace period")
+	ErrCredentialScope        = errors.New("gateway credential does not allow this operation")
+	ErrPairingNotArmed        = errors.New("pairing requires local approval")
 )
 
 const (
@@ -70,6 +71,10 @@ type Credential struct {
 	ExpiresAt      time.Time `json:"expiresAt"`
 	Scopes         []string  `json:"scopes,omitempty"`
 	ProofPublicKey string    `json:"proofPublicKey,omitempty"`
+	// ExpiredAt records when the credential's access token lapsed. A nil value
+	// means the credential is live. Non-nil marks a soft-expired credential that
+	// is still recoverable via refresh within the grace window.
+	ExpiredAt *time.Time `json:"expiredAt,omitempty"`
 }
 
 type CompletedDevice struct {
@@ -102,6 +107,7 @@ type Service struct {
 	now         func() time.Time
 	armTTL      time.Duration
 	tokenTTL    time.Duration
+	gracePeriod time.Duration
 	baseScopes  []string
 	activeID    string
 	armedUntil  time.Time
@@ -111,8 +117,11 @@ type Service struct {
 }
 
 type Options struct {
-	ArmTTL                 time.Duration
-	CredentialTTL          time.Duration
+	ArmTTL        time.Duration
+	CredentialTTL time.Duration
+	// GracePeriod is how long an expired credential stays recoverable via
+	// refresh. A value <= 0 restores hard-delete-on-expiry (no grace).
+	GracePeriod            time.Duration
 	AllowDiagnosticsExport bool
 	AllowRuntimeRestartEnv bool
 }
@@ -130,11 +139,16 @@ func NewServiceWithOptions(logger *slog.Logger, store *storage.SQLiteStore, opti
 	if tokenTTL <= 0 {
 		tokenTTL = defaultTokenTTL
 	}
+	gracePeriod := options.GracePeriod
+	if gracePeriod < 0 {
+		gracePeriod = defaultGracePeriod
+	}
 	service := &Service{
 		logger:      logger.With("component", "pairing"),
 		now:         time.Now,
 		armTTL:      armTTL,
 		tokenTTL:    tokenTTL,
+		gracePeriod: gracePeriod,
 		baseScopes:  defaultCredentialScopes(options.AllowDiagnosticsExport, options.AllowRuntimeRestartEnv),
 		challenges:  make(map[string]challengeRecord),
 		credentials: make(map[string]Credential),
@@ -352,7 +366,13 @@ func (s *Service) ValidateCredential(token string) (Credential, error) {
 	for id, credential := range s.credentials {
 		if credentialMatchesToken(credential, token) {
 			if now.After(credential.ExpiresAt) {
-				s.deleteCredentialLocked(id)
+				if s.gracePeriod <= 0 {
+					s.deleteCredentialLocked(id)
+					return Credential{}, ErrCredentialExpired
+				}
+				expiredAt := now
+				credential.ExpiredAt = &expiredAt
+				s.credentials[id] = credential
 				return Credential{}, ErrCredentialExpired
 			}
 			return credential, nil
@@ -377,12 +397,19 @@ func (s *Service) RefreshCredential(token string) (Credential, error) {
 			continue
 		}
 		if now.After(credential.ExpiresAt) {
-			s.deleteCredentialLocked(id)
-			return Credential{}, ErrCredentialExpired
+			if s.gracePeriod <= 0 {
+				s.deleteCredentialLocked(id)
+				return Credential{}, ErrCredentialExpired
+			}
+			if now.Sub(credential.ExpiresAt) > s.gracePeriod {
+				s.deleteCredentialLocked(id)
+				return Credential{}, ErrCredentialGraceExpired
+			}
 		}
 		credential.Token = randomToken(32)
 		credential.TokenHash = hashCredentialToken(credential.Token)
 		credential.ExpiresAt = now.Add(s.tokenTTL)
+		credential.ExpiredAt = nil
 		s.credentials[id] = credential
 		if s.store != nil {
 			if err := s.store.SavePairing(context.Background(), storage.PairingRecord{
@@ -462,10 +489,23 @@ func (s *Service) pruneExpiredLocked(now time.Time) {
 
 func (s *Service) pruneExpiredCredentialsLocked(now time.Time) {
 	for id, credential := range s.credentials {
-		if now.After(credential.ExpiresAt) {
+		if s.shouldReapCredential(credential, now) {
 			s.deleteCredentialLocked(id)
 		}
 	}
+}
+
+// shouldReapCredential reports whether a credential should be hard-deleted:
+// immediately on expiry when grace is disabled, or once the grace window
+// (measured from the credential's ExpiresAt) has elapsed.
+func (s *Service) shouldReapCredential(credential Credential, now time.Time) bool {
+	if !now.After(credential.ExpiresAt) {
+		return false
+	}
+	if s.gracePeriod <= 0 {
+		return true
+	}
+	return now.Sub(credential.ExpiresAt) > s.gracePeriod
 }
 
 func (s *Service) deleteCredentialLocked(deviceID string) {
@@ -535,13 +575,13 @@ func (s *Service) loadPersistedCredentials() {
 
 	now := s.now().UTC()
 	for _, record := range records {
-		if now.After(record.ExpiresAt) {
+		if s.shouldReapPersistedCredential(record, now) {
 			if err := s.store.DeletePairing(context.Background(), record.DeviceID); err != nil && !errors.Is(err, storage.ErrNotFound) {
 				s.logger.Error("delete expired pairing failed", "device_id", record.DeviceID, "error", err)
 			}
 			continue
 		}
-		s.credentials[record.DeviceID] = Credential{
+		credential := Credential{
 			DeviceID:       record.DeviceID,
 			DeviceName:     record.DeviceName,
 			TokenHash:      storedCredentialHash(record.Token),
@@ -549,6 +589,13 @@ func (s *Service) loadPersistedCredentials() {
 			Scopes:         fallbackScopes(record.Scopes, s.baseScopes),
 			ProofPublicKey: record.ProofPublicKey,
 		}
+		if now.After(record.ExpiresAt) && s.gracePeriod > 0 {
+			// Expired but still within the grace window: mark it soft-expired so
+			// a proof-validated refresh can recover it later.
+			expiredAt := record.ExpiresAt
+			credential.ExpiredAt = &expiredAt
+		}
+		s.credentials[record.DeviceID] = credential
 		if !isHashedCredentialToken(record.Token) && s.store != nil {
 			if err := s.store.SavePairing(context.Background(), storage.PairingRecord{
 				DeviceID:       record.DeviceID,
@@ -562,6 +609,19 @@ func (s *Service) loadPersistedCredentials() {
 			}
 		}
 	}
+}
+
+// shouldReapPersistedCredential mirrors shouldReapCredential for stored rows:
+// when grace is disabled, any row past ExpiresAt is reaped; otherwise only
+// rows whose expiry is more than gracePeriod in the past.
+func (s *Service) shouldReapPersistedCredential(record storage.PairingRecord, now time.Time) bool {
+	if s.gracePeriod <= 0 {
+		return now.After(record.ExpiresAt)
+	}
+	if !now.After(record.ExpiresAt) {
+		return false
+	}
+	return now.Sub(record.ExpiresAt) > s.gracePeriod
 }
 
 func defaultCredentialScopes(allowDiagnosticsExport, allowRuntimeRestartEnv bool) []string {

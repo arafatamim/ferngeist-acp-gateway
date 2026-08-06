@@ -139,3 +139,50 @@ func TestRefreshedCredentialReloadsAfterRestart(t *testing.T) {
 		t.Fatalf("DeviceID = %q, want %q", validated.DeviceID, refreshed.DeviceID)
 	}
 }
+
+func TestSoftExpiredCredentialReloadsWithinGrace(t *testing.T) {
+	store, err := storage.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("storage.Open() error = %v", err)
+	}
+	defer store.Close()
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	// Base the clock far enough in the past that the persisted row is already
+	// past ExpiresAt when the reloaded service constructs (which loads with the
+	// real clock), yet still within the grace window.
+	now := time.Now().UTC().Add(-2 * time.Hour)
+
+	service := NewServiceWithOptions(logger, store, Options{CredentialTTL: time.Hour, GracePeriod: 24 * time.Hour})
+	service.now = func() time.Time { return now }
+
+	challenge, err := service.StartPairingWithLocalApproval()
+	if err != nil {
+		t.Fatalf("StartPairingWithLocalApproval() error = %v", err)
+	}
+	credential, err := service.CompletePairing(challenge.ID, challenge.Code, "Pixel 9")
+	if err != nil {
+		t.Fatalf("CompletePairing() error = %v", err)
+	}
+
+	// Move past expiry but within grace, soft-expire via validation.
+	service.now = func() time.Time { return now.Add(2 * time.Hour) }
+	if _, err := service.ValidateCredential(credential.Token); err != ErrCredentialExpired {
+		t.Fatalf("ValidateCredential() error = %v, want %v", err, ErrCredentialExpired)
+	}
+
+	// Reload: the soft-expired row should load back with ExpiredAt derived from ExpiresAt.
+	reloaded := NewServiceWithOptions(logger, store, Options{CredentialTTL: time.Hour, GracePeriod: 24 * time.Hour})
+	reloaded.now = func() time.Time { return now.Add(2 * time.Hour) }
+
+	cred, ok := reloaded.credentials[credential.DeviceID]
+	if !ok {
+		t.Fatal("soft-expired credential should reload within grace window")
+	}
+	if cred.ExpiredAt == nil {
+		t.Fatal("reloaded soft-expired credential should have ExpiredAt set")
+	}
+	if _, err := reloaded.ValidateCredential(credential.Token); err != ErrCredentialExpired {
+		t.Fatalf("ValidateCredential() error = %v, want %v", err, ErrCredentialExpired)
+	}
+}

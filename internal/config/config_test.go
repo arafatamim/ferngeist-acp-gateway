@@ -167,3 +167,26 @@ func TestApplyPersistedSettingsDefaultsPublicModeToProofAndNoLegacy(t *testing.T
 		t.Fatal("AllowLegacyBearerCredentials should default to false in public mode")
 	}
 }
+
+func TestLoadDefaultsCredentialGracePeriod(t *testing.T) {
+	cfg := Load()
+	if cfg.CredentialGracePeriod != 90*24*time.Hour {
+		t.Fatalf("CredentialGracePeriod = %v, want %v", cfg.CredentialGracePeriod, 90*24*time.Hour)
+	}
+}
+
+func TestLoadReadsCredentialGracePeriodEnv(t *testing.T) {
+	t.Setenv("FERNGEIST_GATEWAY_CREDENTIAL_GRACE_SECONDS", "3600")
+	cfg := Load()
+	if cfg.CredentialGracePeriod != time.Hour {
+		t.Fatalf("CredentialGracePeriod = %v, want %v", cfg.CredentialGracePeriod, time.Hour)
+	}
+}
+
+func TestLoadAllowsDisablingGrace(t *testing.T) {
+	t.Setenv("FERNGEIST_GATEWAY_CREDENTIAL_GRACE_SECONDS", "0")
+	cfg := Load()
+	if cfg.CredentialGracePeriod != 0 {
+		t.Fatalf("CredentialGracePeriod = %v, want 0", cfg.CredentialGracePeriod)
+	}
+}

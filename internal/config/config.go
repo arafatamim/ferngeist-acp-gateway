@@ -24,6 +24,7 @@ const (
 	defaultPairingBurstPerIP      = 5
 	defaultPairingBurstGlobal     = 30
 	defaultCredentialTTL          = 7 * 24 * time.Hour
+	defaultCredentialGracePeriod  = 90 * 24 * time.Hour
 	defaultSessionMaxDisconnected = 15 * time.Minute
 	defaultMaxSessionsPerDevice   = 5
 	defaultProgressInterval       = 15 * time.Second
@@ -32,26 +33,29 @@ const (
 // Config is the daemon's effective runtime configuration after environment
 // variables and persisted settings have been merged.
 type Config struct {
-	ListenAddr                   string
-	AdminListenAddr              string
-	LogLevel                     string
-	LogDir                       string
-	LogMaxSize                   int64
-	LogMaxBackups                int
-	RegistryURL                  string
-	PublicBaseURL                string
-	EnableLAN                    bool
-	StateDBPath                  string
-	GatewayName                  string
-	ManagedBinDir                string
-	PairingArmTTL                time.Duration
-	PairingMaxAttempts           int
-	PairingLockoutWindow         time.Duration
-	PairingStartRefill           time.Duration
-	PairingCompleteRefill        time.Duration
-	PairingBurstPerIP            int
-	PairingBurstGlobal           int
-	CredentialTTL                time.Duration
+	ListenAddr            string
+	AdminListenAddr       string
+	LogLevel              string
+	LogDir                string
+	LogMaxSize            int64
+	LogMaxBackups         int
+	RegistryURL           string
+	PublicBaseURL         string
+	EnableLAN             bool
+	StateDBPath           string
+	GatewayName           string
+	ManagedBinDir         string
+	PairingArmTTL         time.Duration
+	PairingMaxAttempts    int
+	PairingLockoutWindow  time.Duration
+	PairingStartRefill    time.Duration
+	PairingCompleteRefill time.Duration
+	PairingBurstPerIP     int
+	PairingBurstGlobal    int
+	CredentialTTL         time.Duration
+	// CredentialGracePeriod is how long an expired credential stays recoverable
+	// via refresh. A value of 0 disables grace and restores hard-delete-on-expiry.
+	CredentialGracePeriod        time.Duration
 	AllowDiagnosticsExport       bool
 	AllowRuntimeRestartEnv       bool
 	RequireProofOfPossession     bool
@@ -106,6 +110,7 @@ func Load() Config {
 		PairingBurstPerIP:      envIntOrDefault("FERNGEIST_GATEWAY_PAIRING_BURST_PER_IP", defaultPairingBurstPerIP),
 		PairingBurstGlobal:     envIntOrDefault("FERNGEIST_GATEWAY_PAIRING_BURST_GLOBAL", defaultPairingBurstGlobal),
 		CredentialTTL:          envDurationSecondsOrDefault("FERNGEIST_GATEWAY_CREDENTIAL_TTL_SECONDS", defaultCredentialTTL),
+		CredentialGracePeriod:  credentialGracePeriodOrDefault(),
 		AllowDiagnosticsExport: envBool("FERNGEIST_GATEWAY_ALLOW_REMOTE_DIAGNOSTICS_EXPORT"),
 		AllowRuntimeRestartEnv: envBool("FERNGEIST_GATEWAY_ALLOW_REMOTE_RUNTIME_RESTART_ENV"),
 		SessionMaxDisconnected: envDurationSecondsOrDefault("FERNGEIST_GATEWAY_SESSION_MAX_DISCONNECTED_SECONDS", defaultSessionMaxDisconnected),
@@ -204,6 +209,22 @@ func envDurationSecondsOrDefault(key string, fallback time.Duration) time.Durati
 	parsed, err := strconv.Atoi(value)
 	if err != nil || parsed <= 0 {
 		return fallback
+	}
+	return time.Duration(parsed) * time.Second
+}
+
+// credentialGracePeriodOrDefault reads FERNGEIST_GATEWAY_CREDENTIAL_GRACE_SECONDS.
+// Unlike envDurationSecondsOrDefault, a value of 0 is meaningful: it disables
+// the grace window, restoring hard-delete-on-expiry. Only unset, unparsable,
+// or negative values fall back to the 90-day default.
+func credentialGracePeriodOrDefault() time.Duration {
+	value := strings.TrimSpace(os.Getenv("FERNGEIST_GATEWAY_CREDENTIAL_GRACE_SECONDS"))
+	if value == "" {
+		return defaultCredentialGracePeriod
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed < 0 {
+		return defaultCredentialGracePeriod
 	}
 	return time.Duration(parsed) * time.Second
 }

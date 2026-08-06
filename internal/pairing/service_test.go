@@ -277,9 +277,9 @@ func TestRefreshCredentialRotatesTokenAndExtendsExpiry(t *testing.T) {
 	}
 }
 
-func TestRefreshCredentialRejectsExpiredToken(t *testing.T) {
+func TestRefreshCredentialRejectsExpiredTokenWhenGraceDisabled(t *testing.T) {
 	now := time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)
-	service := NewServiceWithOptions(slog.New(slog.NewTextHandler(io.Discard, nil)), nil, Options{CredentialTTL: time.Hour})
+	service := NewServiceWithOptions(slog.New(slog.NewTextHandler(io.Discard, nil)), nil, Options{CredentialTTL: time.Hour, GracePeriod: 0})
 	service.now = func() time.Time { return now }
 
 	challenge, err := service.StartPairingWithLocalApproval()
@@ -295,5 +295,207 @@ func TestRefreshCredentialRejectsExpiredToken(t *testing.T) {
 	_, err = service.RefreshCredential(credential.Token)
 	if err != ErrCredentialExpired {
 		t.Fatalf("RefreshCredential() error = %v, want %v", err, ErrCredentialExpired)
+	}
+}
+
+func TestRefreshCredentialSucceedsWithinGraceAfterExpiry(t *testing.T) {
+	now := time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)
+	service := NewServiceWithOptions(slog.New(slog.NewTextHandler(io.Discard, nil)), nil, Options{CredentialTTL: 24 * time.Hour, GracePeriod: 90 * 24 * time.Hour})
+	service.now = func() time.Time { return now }
+
+	challenge, err := service.StartPairingWithLocalApproval()
+	if err != nil {
+		t.Fatalf("StartPairingWithLocalApproval() error = %v", err)
+	}
+	credential, err := service.CompletePairing(challenge.ID, challenge.Code, "Pixel 9")
+	if err != nil {
+		t.Fatalf("CompletePairing() error = %v", err)
+	}
+
+	// Expire it (soft).
+	service.now = func() time.Time { return now.Add(48 * time.Hour) }
+	if _, err := service.ValidateCredential(credential.Token); err != ErrCredentialExpired {
+		t.Fatalf("ValidateCredential() error = %v, want %v", err, ErrCredentialExpired)
+	}
+
+	// Refresh within grace: new token, window slides, ExpiredAt cleared.
+	refreshed, err := service.RefreshCredential(credential.Token)
+	if err != nil {
+		t.Fatalf("RefreshCredential() error = %v", err)
+	}
+	if refreshed.Token == credential.Token {
+		t.Fatal("refresh should rotate the token")
+	}
+	if refreshed.ExpiresAt != now.Add(48*time.Hour).Add(24*time.Hour) {
+		t.Fatalf("ExpiresAt = %v, want %v", refreshed.ExpiresAt, now.Add(48*time.Hour).Add(24*time.Hour))
+	}
+	if refreshed.ExpiredAt != nil {
+		t.Fatal("refresh should clear the soft-expire marker")
+	}
+	stored := service.credentials[credential.DeviceID]
+	if stored.ExpiredAt != nil {
+		t.Fatal("stored credential ExpiredAt should be cleared after refresh")
+	}
+	if _, err := service.ValidateCredential(refreshed.Token); err != nil {
+		t.Fatalf("ValidateCredential(refreshed token) error = %v", err)
+	}
+	if _, err := service.ValidateCredential(credential.Token); err != ErrCredentialInvalid {
+		t.Fatalf("ValidateCredential(old token) error = %v, want %v", err, ErrCredentialInvalid)
+	}
+}
+
+func TestRefreshCredentialRejectsPastGrace(t *testing.T) {
+	now := time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)
+	service := NewServiceWithOptions(slog.New(slog.NewTextHandler(io.Discard, nil)), nil, Options{CredentialTTL: 24 * time.Hour, GracePeriod: 24 * time.Hour})
+	service.now = func() time.Time { return now }
+
+	challenge, err := service.StartPairingWithLocalApproval()
+	if err != nil {
+		t.Fatalf("StartPairingWithLocalApproval() error = %v", err)
+	}
+	credential, err := service.CompletePairing(challenge.ID, challenge.Code, "Pixel 9")
+	if err != nil {
+		t.Fatalf("CompletePairing() error = %v", err)
+	}
+
+	service.now = func() time.Time { return now.Add(50 * time.Hour) } // 26h past expiry, grace=24h
+	_, err = service.RefreshCredential(credential.Token)
+	if err != ErrCredentialGraceExpired {
+		t.Fatalf("RefreshCredential() error = %v, want %v", err, ErrCredentialGraceExpired)
+	}
+	if _, ok := service.credentials[credential.DeviceID]; ok {
+		t.Fatal("past-grace refresh should reap the credential")
+	}
+}
+
+func TestRefreshOnOneDeviceLeavesAnotherDeviceCredentialUntouched(t *testing.T) {
+	now := time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)
+	service := NewServiceWithOptions(slog.New(slog.NewTextHandler(io.Discard, nil)), nil, Options{CredentialTTL: 24 * time.Hour, GracePeriod: 90 * 24 * time.Hour})
+	service.now = func() time.Time { return now }
+
+	pair := func(name string) Credential {
+		challenge, err := service.StartPairingWithLocalApproval()
+		if err != nil {
+			t.Fatalf("StartPairingWithLocalApproval() error = %v", err)
+		}
+		credential, err := service.CompletePairing(challenge.ID, challenge.Code, name)
+		if err != nil {
+			t.Fatalf("CompletePairing() error = %v", err)
+		}
+		return credential
+	}
+
+	deviceA := pair("Phone A")
+	deviceB := pair("Phone B")
+
+	service.now = func() time.Time { return now.Add(2 * time.Hour) }
+	refreshedA, err := service.RefreshCredential(deviceA.Token)
+	if err != nil {
+		t.Fatalf("RefreshCredential(A) error = %v", err)
+	}
+	if refreshedA.DeviceID != deviceA.DeviceID {
+		t.Fatalf("refreshed DeviceID = %q, want %q", refreshedA.DeviceID, deviceA.DeviceID)
+	}
+
+	// B's credential is completely untouched.
+	if _, err := service.ValidateCredential(deviceB.Token); err != nil {
+		t.Fatalf("ValidateCredential(B) error = %v, want nil", err)
+	}
+	validatedB, err := service.ValidateCredential(deviceB.Token)
+	if err != nil {
+		t.Fatalf("ValidateCredential(B) error = %v", err)
+	}
+	if validatedB.DeviceID != deviceB.DeviceID {
+		t.Fatalf("validated DeviceID = %q, want %q", validatedB.DeviceID, deviceB.DeviceID)
+	}
+	if validatedB.Token == "" || validatedB.Token != deviceB.Token {
+		t.Fatal("device B token should be unchanged")
+	}
+	if _, err := service.ValidateCredential(deviceA.Token); err != ErrCredentialInvalid {
+		t.Fatalf("ValidateCredential(A old token) error = %v, want %v", err, ErrCredentialInvalid)
+	}
+}
+
+func TestNewServiceWithOptionsSetsGracePeriod(t *testing.T) {
+	service := NewServiceWithOptions(slog.New(slog.NewTextHandler(io.Discard, nil)), nil, Options{
+		CredentialTTL: 24 * time.Hour,
+		GracePeriod:   90 * 24 * time.Hour,
+	})
+	if service.gracePeriod != 90*24*time.Hour {
+		t.Fatalf("gracePeriod = %v, want %v", service.gracePeriod, 90*24*time.Hour)
+	}
+}
+
+func TestNewServiceWithOptionsDefaultsGracePeriod(t *testing.T) {
+	// Only negative values coerce to the default grace period; zero disables grace.
+	service := NewServiceWithOptions(slog.New(slog.NewTextHandler(io.Discard, nil)), nil, Options{GracePeriod: -1})
+	if service.gracePeriod != defaultGracePeriod {
+		t.Fatalf("gracePeriod = %v, want default %v", service.gracePeriod, defaultGracePeriod)
+	}
+}
+
+func TestNewServiceWithOptionsZeroGracePeriodDisablesGrace(t *testing.T) {
+	service := NewServiceWithOptions(slog.New(slog.NewTextHandler(io.Discard, nil)), nil, Options{})
+	if service.gracePeriod != 0 {
+		t.Fatalf("gracePeriod = %v, want 0 (grace disabled)", service.gracePeriod)
+	}
+}
+
+func TestValidateCredentialSoftExpiresInsteadOfDeleting(t *testing.T) {
+	now := time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)
+	service := NewServiceWithOptions(slog.New(slog.NewTextHandler(io.Discard, nil)), nil, Options{CredentialTTL: time.Hour, GracePeriod: 24 * time.Hour})
+	service.now = func() time.Time { return now }
+
+	challenge, err := service.StartPairingWithLocalApproval()
+	if err != nil {
+		t.Fatalf("StartPairingWithLocalApproval() error = %v", err)
+	}
+	credential, err := service.CompletePairing(challenge.ID, challenge.Code, "Pixel 9")
+	if err != nil {
+		t.Fatalf("CompletePairing() error = %v", err)
+	}
+
+	service.now = func() time.Time { return now.Add(2 * time.Hour) }
+	_, err = service.ValidateCredential(credential.Token)
+	if err != ErrCredentialExpired {
+		t.Fatalf("ValidateCredential() error = %v, want %v", err, ErrCredentialExpired)
+	}
+	if _, ok := service.credentials[credential.DeviceID]; !ok {
+		t.Fatal("soft-expired credential should remain in memory")
+	}
+	if service.credentials[credential.DeviceID].ExpiredAt == nil {
+		t.Fatal("ExpiredAt should be set after soft-expire")
+	}
+}
+
+func TestPruneDeletesOnlyPastGrace(t *testing.T) {
+	now := time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)
+	service := NewServiceWithOptions(slog.New(slog.NewTextHandler(io.Discard, nil)), nil, Options{CredentialTTL: time.Hour, GracePeriod: 24 * time.Hour})
+	service.now = func() time.Time { return now }
+
+	challenge, err := service.StartPairingWithLocalApproval()
+	if err != nil {
+		t.Fatalf("StartPairingWithLocalApproval() error = %v", err)
+	}
+	credential, err := service.CompletePairing(challenge.ID, challenge.Code, "Pixel 9")
+	if err != nil {
+		t.Fatalf("CompletePairing() error = %v", err)
+	}
+
+	// 2h after expiry: within grace (24h) -> keep.
+	service.now = func() time.Time { return now.Add(2 * time.Hour) }
+	if _, err := service.ValidateCredential(credential.Token); err != ErrCredentialExpired {
+		t.Fatalf("ValidateCredential() error = %v, want %v", err, ErrCredentialExpired)
+	}
+	service.pruneExpiredCredentialsLocked(now.Add(2 * time.Hour))
+	if _, ok := service.credentials[credential.DeviceID]; !ok {
+		t.Fatal("credential should survive within grace window")
+	}
+
+	// 26h after pairing: 25h past expiry, past the 24h grace -> reap.
+	service.now = func() time.Time { return now.Add(26 * time.Hour) }
+	service.pruneExpiredCredentialsLocked(now.Add(26 * time.Hour))
+	if _, ok := service.credentials[credential.DeviceID]; ok {
+		t.Fatal("credential should be reaped past grace window")
 	}
 }

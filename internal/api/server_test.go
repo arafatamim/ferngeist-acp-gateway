@@ -1478,7 +1478,6 @@ func TestRuntimeLifecycleEndpoints(t *testing.T) {
 	if diagnostics.Runtime.Stopped != 1 {
 		t.Fatalf("Runtime.Stopped = %d, want 1", diagnostics.Runtime.Stopped)
 	}
-
 }
 
 func TestRuntimeRestartEndpointReturnsFreshConnectDescriptor(t *testing.T) {
@@ -1528,7 +1527,6 @@ func TestRuntimeRestartEndpointReturnsFreshConnectDescriptor(t *testing.T) {
 	if restartResponse.RuntimeID == startResponse.Runtime.ID {
 		t.Fatal("restart should hand back a new runtime id")
 	}
-
 }
 
 func TestRuntimeRestartWithEnvRequiresElevatedScopeByDefault(t *testing.T) {
@@ -1717,6 +1715,7 @@ func newConfiguredTestServer(cfg config.Config) *Server {
 		pairing.NewServiceWithOptions(logger, nil, pairing.Options{
 			ArmTTL:                 cfg.PairingArmTTL,
 			CredentialTTL:          cfg.CredentialTTL,
+			GracePeriod:            cfg.CredentialGracePeriod,
 			AllowDiagnosticsExport: cfg.AllowDiagnosticsExport,
 			AllowRuntimeRestartEnv: cfg.AllowRuntimeRestartEnv,
 		}),
@@ -1747,6 +1746,7 @@ func newConfiguredTestServerWithBaseDir(baseDir string, cfg config.Config) *Serv
 		pairing.NewServiceWithOptions(logger, nil, pairing.Options{
 			ArmTTL:                 cfg.PairingArmTTL,
 			CredentialTTL:          cfg.CredentialTTL,
+			GracePeriod:            cfg.CredentialGracePeriod,
 			AllowDiagnosticsExport: cfg.AllowDiagnosticsExport,
 			AllowRuntimeRestartEnv: cfg.AllowRuntimeRestartEnv,
 		}),
