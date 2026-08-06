@@ -51,6 +51,11 @@ Base path: `/v1`
 - `POST /v1/auth/refresh`
   - Refreshes a paired device token.
   - Invalidates the old token immediately.
+  - May be called with an expired bearer token within the configured grace
+    window (`FERNGEIST_GATEWAY_CREDENTIAL_GRACE_SECONDS`, default 90 days) as
+    long as a valid proof-of-possession is attached. A credential past its
+    grace window returns a distinct error: `gateway credential expired beyond
+    grace period` — the device must re-pair.
 
 ### Diagnostics
 

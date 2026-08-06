@@ -39,6 +39,13 @@ Notes:
 
 - Credentials can expire.
 - Credentials can be refreshed.
+- Credentials can be recovered after expiry for a grace period: an expired
+  credential that proves possession of its device key (proof-of-possession)
+  can refresh within a sliding window (`FERNGEIST_GATEWAY_CREDENTIAL_GRACE_SECONDS`,
+  default 90 days). Each refresh resets the window. Once the grace period
+  lapses, the device must re-pair.
+- Each device pairs independently with its own credential and proof key;
+  refreshing one device never affects another device's credential.
 - Revoking a device invalidates its credential.
 
 ## Proof of possession

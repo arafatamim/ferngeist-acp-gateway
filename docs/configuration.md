@@ -15,6 +15,7 @@ Ferngeist Gateway is configured through environment variables and persisted stat
 | `FERNGEIST_GATEWAY_MANAGED_BIN_DIR` | Managed binary install directory | platform default |
 | `FERNGEIST_GATEWAY_REGISTRY_URL` | ACP registry URL | ACP default |
 | `FERNGEIST_GATEWAY_CREDENTIAL_TTL_SECONDS` | Paired device token lifetime | `7 days` |
+| `FERNGEIST_GATEWAY_CREDENTIAL_GRACE_SECONDS` | How long an expired credential stays recoverable via refresh; `0` disables grace (hard-delete-on-expiry) | `90 days` |
 | `FERNGEIST_GATEWAY_REQUIRE_PROOF_OF_POSSESSION` | Require proof-of-possession pairing | `true` in public mode |
 | `FERNGEIST_GATEWAY_ALLOW_LEGACY_BEARER_CREDENTIALS` | Allow legacy bearer-only credentials | `false` in public mode |
 
