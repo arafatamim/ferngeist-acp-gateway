@@ -158,6 +158,13 @@ func NewServiceWithOptions(logger *slog.Logger, store *storage.SQLiteStore, opti
 	return service
 }
 
+// SetClockForTesting replaces the time provider. It exists so tests outside
+// the pairing package (internal/api) can drive expiry-based behavior
+// deterministically; production code never calls it.
+func (s *Service) SetClockForTesting(now func() time.Time) {
+	s.now = now
+}
+
 func (s *Service) StartPairing() (Challenge, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -427,6 +434,23 @@ func (s *Service) RefreshCredential(token string) (Credential, error) {
 	}
 
 	s.pruneExpiredCredentialsLocked(now)
+	return Credential{}, ErrCredentialInvalid
+}
+
+// LookupCredentialByToken returns the credential matching the token regardless
+// of expiry state, without mutating it. Used by the refresh endpoint to
+// authorize a proof-of-possession for a possibly-expired credential.
+func (s *Service) LookupCredentialByToken(token string) (Credential, error) {
+	if token == "" {
+		return Credential{}, ErrCredentialMissing
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, credential := range s.credentials {
+		if credentialMatchesToken(credential, token) {
+			return credential, nil
+		}
+	}
 	return Credential{}, ErrCredentialInvalid
 }
 

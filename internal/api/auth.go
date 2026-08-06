@@ -9,13 +9,26 @@ import (
 )
 
 func (s *Server) handleAuthRefresh(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireGatewayCredential(w, r); !ok {
+	rawToken := bearerToken(r)
+	credential, err := s.pairing.LookupCredentialByToken(rawToken)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, err.Error())
 		return
 	}
-	refreshed, err := s.pairing.RefreshCredential(bearerToken(r))
+	if strings.TrimSpace(credential.ProofPublicKey) == "" && !s.cfg.AllowLegacyBearerCredentials {
+		writeError(w, http.StatusUnauthorized, "legacy bearer credentials are disabled")
+		return
+	}
+	// A credential may be past its bearer-validity gate (soft-expired) and still
+	// refresh within the grace window; proof-of-possession authorizes that path.
+	if err := s.verifyCredentialProof(r, rawToken, credential); err != nil {
+		writeError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+	refreshed, err := s.pairing.RefreshCredential(rawToken)
 	if err != nil {
 		switch {
-		case errors.Is(err, pairing.ErrCredentialMissing), errors.Is(err, pairing.ErrCredentialInvalid), errors.Is(err, pairing.ErrCredentialExpired):
+		case errors.Is(err, pairing.ErrCredentialMissing), errors.Is(err, pairing.ErrCredentialInvalid), errors.Is(err, pairing.ErrCredentialExpired), errors.Is(err, pairing.ErrCredentialGraceExpired):
 			writeError(w, http.StatusUnauthorized, err.Error())
 		default:
 			writeError(w, http.StatusInternalServerError, "failed to refresh gateway credential")

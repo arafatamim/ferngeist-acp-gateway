@@ -2525,3 +2525,99 @@ func TestRuntimeConnectResilientDegradesGracefullyWithoutSessionSvc(t *testing.T
 		t.Fatalf("AttachToken = %q, want empty (no session service)", connectResp.AttachToken)
 	}
 }
+
+func TestAuthRefreshRecoversExpiredCredentialWithinGrace(t *testing.T) {
+	server := newConfiguredTestServer(config.Config{
+		ListenAddr:            "127.0.0.1:0",
+		CredentialTTL:         time.Hour,
+		CredentialGracePeriod: 24 * time.Hour,
+	})
+	credential := pairDeviceWithProof(t, server)
+
+	// Pairing happened at real time, so ExpiresAt = real + 1h (CredentialTTL).
+	// Move both clocks to 2h past expiry — within the 24h grace window.
+	recoveredAt := time.Now().UTC().Add(2 * time.Hour)
+	server.pairing.SetClockForTesting(func() time.Time { return recoveredAt })
+	server.now = func() time.Time { return recoveredAt }
+
+	// Any request now 401s (soft-expired, not deleted).
+	expiredRequest := httptest.NewRequest(http.MethodGet, "/v1/agents", nil)
+	signProofRequest(t, expiredRequest, credential, nil, recoveredAt, "nonce-expired-check")
+	expiredRecorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(expiredRecorder, expiredRequest)
+	if expiredRecorder.Code != http.StatusUnauthorized {
+		t.Fatalf("expired status code = %d, want %d", expiredRecorder.Code, http.StatusUnauthorized)
+	}
+
+	// Refresh with the old (expired) bearer + fresh proof: succeeds within grace.
+	refreshRequest := httptest.NewRequest(http.MethodPost, "/v1/auth/refresh", nil)
+	signProofRequest(t, refreshRequest, credential, nil, recoveredAt, "nonce-recover")
+	refreshRecorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(refreshRecorder, refreshRequest)
+	if refreshRecorder.Code != http.StatusOK {
+		t.Fatalf("refresh status code = %d, want %d", refreshRecorder.Code, http.StatusOK)
+	}
+
+	var refreshed pairCompleteResponse
+	if err := json.Unmarshal(refreshRecorder.Body.Bytes(), &refreshed); err != nil {
+		t.Fatalf("Unmarshal(refresh) error = %v", err)
+	}
+	if refreshed.Token == "" {
+		t.Fatal("refreshed token should not be empty")
+	}
+	if refreshed.Token == credential.token {
+		t.Fatal("refresh should rotate the token")
+	}
+	if !refreshed.ExpiresAt.After(recoveredAt) {
+		t.Fatalf("ExpiresAt = %v, want after %v", refreshed.ExpiresAt, recoveredAt)
+	}
+
+	// Old token is dead; new token works with proof.
+	oldRequest := httptest.NewRequest(http.MethodGet, "/v1/agents", nil)
+	signProofRequest(t, oldRequest, credential, nil, recoveredAt, "nonce-old")
+	oldRecorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(oldRecorder, oldRequest)
+	if oldRecorder.Code != http.StatusUnauthorized {
+		t.Fatalf("old token status code = %d, want %d", oldRecorder.Code, http.StatusUnauthorized)
+	}
+
+	credential.token = refreshed.Token
+	newRequest := httptest.NewRequest(http.MethodGet, "/v1/agents", nil)
+	signProofRequest(t, newRequest, credential, nil, recoveredAt, "nonce-new")
+	newRecorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(newRecorder, newRequest)
+	if newRecorder.Code != http.StatusOK {
+		t.Fatalf("new token status code = %d, want %d", newRecorder.Code, http.StatusOK)
+	}
+}
+
+func TestAuthRefreshRejectsPastGraceWithDistinctError(t *testing.T) {
+	server := newConfiguredTestServer(config.Config{
+		ListenAddr:            "127.0.0.1:0",
+		CredentialTTL:         time.Hour,
+		CredentialGracePeriod: time.Hour,
+	})
+	credential := pairDeviceWithProof(t, server)
+
+	// Pairing at real time -> ExpiresAt = real + 1h. Advance to 3h after pairing
+	// (2h past expiry), which is past the 1h grace window.
+	pastGrace := time.Now().UTC().Add(3 * time.Hour)
+	server.pairing.SetClockForTesting(func() time.Time { return pastGrace })
+	server.now = func() time.Time { return pastGrace }
+
+	refreshRequest := httptest.NewRequest(http.MethodPost, "/v1/auth/refresh", nil)
+	signProofRequest(t, refreshRequest, credential, nil, pastGrace, "nonce-past-grace")
+	refreshRecorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(refreshRecorder, refreshRequest)
+
+	if refreshRecorder.Code != http.StatusUnauthorized {
+		t.Fatalf("refresh status code = %d, want %d", refreshRecorder.Code, http.StatusUnauthorized)
+	}
+	var response errorResponse
+	if err := json.Unmarshal(refreshRecorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if response.Error != pairing.ErrCredentialGraceExpired.Error() {
+		t.Fatalf("error = %q, want %q", response.Error, pairing.ErrCredentialGraceExpired.Error())
+	}
+}
