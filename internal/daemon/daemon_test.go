@@ -78,7 +78,7 @@ func TestDiscoveryTXTRecords_includes_protocol_version(t *testing.T) {
 	if len(records) < 3 {
 		t.Fatal("expected at least 3 records")
 	}
-	want := "protocol_version=v1alpha1"
+	want := "protocol_version=v1"
 	if records[2] != want {
 		t.Errorf("records[2] = %q, want %q", records[2], want)
 	}

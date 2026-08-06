@@ -185,7 +185,7 @@ func DiscoveryTXTRecords(cfg config.Config, pairedDeviceCount int) []string {
 	return []string{
 		"gateway_name=" + cfg.GatewayName,
 		"gateway_version=dev",
-		"protocol_version=v1alpha1",
+		"protocol_version=" + api.ProtocolVersion,
 		fmt.Sprintf("pairing_required=%t", pairedDeviceCount == 0),
 	}
 }

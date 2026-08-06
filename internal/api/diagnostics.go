@@ -85,7 +85,7 @@ func (s *Server) handleDiagnosticsExport(w http.ResponseWriter, r *http.Request)
 			Name:            s.gatewayDisplayName(),
 			Version:         s.build.Version,
 			Build:           s.build,
-			ProtocolVersion: protocolVersion,
+			ProtocolVersion: ProtocolVersion,
 			StartedAt:       s.startedAt,
 			UptimeSeconds:   uptimeSeconds(s.startedAt, s.now()),
 			ListenAddr:      s.cfg.ListenAddr,

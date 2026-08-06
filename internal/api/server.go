@@ -66,9 +66,11 @@ type Server struct {
 	proofNonces *proofNonceTracker     // prevents replay of credential proofs
 }
 
-// protocolVersion identifies the current gateway-to-client protocol version.
-// Clients use this to detect compatibility mismatches.
-const protocolVersion = "v1alpha1"
+// ProtocolVersion identifies the current gateway-to-client protocol version.
+// Clients use this to detect compatibility mismatches. The daemon also emits it
+// in its mDNS discovery TXT records, so bump both consumers together by
+// referencing this constant.
+const ProtocolVersion = "v1"
 
 // Security and request limits.
 const (
@@ -457,7 +459,7 @@ func (s *Server) statusSnapshot(includePublicURL bool) statusResponse {
 		Name:              s.gatewayDisplayName(),
 		Version:           s.build.Version,
 		Build:             s.build,
-		ProtocolVersion:   protocolVersion,
+		ProtocolVersion:   ProtocolVersion,
 		StartedAt:         s.startedAt,
 		UptimeSeconds:     uptimeSeconds(s.startedAt, now),
 		ListenAddr:        s.cfg.ListenAddr,

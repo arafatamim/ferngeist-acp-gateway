@@ -55,8 +55,8 @@ func TestStatusIncludesProtocolVersion(t *testing.T) {
 		t.Fatalf("Unmarshal() error = %v", err)
 	}
 
-	if response.ProtocolVersion != protocolVersion {
-		t.Fatalf("ProtocolVersion = %q, want %q", response.ProtocolVersion, protocolVersion)
+	if response.ProtocolVersion != ProtocolVersion {
+		t.Fatalf("ProtocolVersion = %q, want %q", response.ProtocolVersion, ProtocolVersion)
 	}
 	if response.Version != "dev" {
 		t.Fatalf("Version = %q, want %q", response.Version, "dev")
