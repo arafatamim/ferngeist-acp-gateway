@@ -334,30 +334,19 @@ jobs:
           path: dist/${{ steps.package_android.outputs.archive }}
           retention-days: 5
 
-  publish:
-    needs: [build-linux, build-macos, build-windows, build-android]
+  # Generate the release changelog from conventional commits and upload it as a
+  # release asset. Scoped to the exact tag being released so manual dispatches
+  # and older-tag releases produce the changelog for that tag only.
+  changelog:
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.release_tag.outputs.tag }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
-
-      # Collect all build artifacts from the matrix jobs.
-      - name: Download all artifacts
-        uses: actions/download-artifact@v8
         with:
-          path: artifacts
-          pattern: ferngeist-gateway_*
-          merge-multiple: true
+          fetch-depth: 0
 
-      # Generate a checksum file for the published release assets.
-      - name: Generate SHA256 checksums
-        shell: bash
-        run: |
-          cd artifacts
-          sha256sum ferngeist-gateway_*.zip ferngeist-gateway_*.tar.gz > SHA256SUMS
-          cat SHA256SUMS
-
-      # Resolve the release tag from the event or manual input.
       - name: Resolve release tag
         id: release_tag
         shell: bash
@@ -375,11 +364,58 @@ jobs:
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
+      - name: Generate changelog
+        uses: orhun/git-cliff-action@v4
+        with:
+          config: cliff.toml
+          args: --tag ${{ steps.release_tag.outputs.tag }}
+        env:
+          OUTPUT: CHANGELOG.md
+
+      - name: Upload changelog artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: changelog
+          path: CHANGELOG.md
+          retention-days: 5
+
+  publish:
+    needs: [build-linux, build-macos, build-windows, build-android, changelog]
+    # The changelog job resolves the release tag; publish reuses it so both
+    # jobs agree on the tag being released.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      # Collect all build artifacts from the matrix jobs.
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          pattern: ferngeist-gateway_*
+          merge-multiple: true
+
+      # Collect the generated changelog and include it in the release assets.
+      - name: Download changelog
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          name: changelog
+
+      # Generate a checksum file for the published release assets.
+      - name: Generate SHA256 checksums
+        shell: bash
+        run: |
+          cd artifacts
+          sha256sum ferngeist-gateway_*.zip ferngeist-gateway_*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+
       # Upload every packaged artifact and checksum file to the release.
       - name: Upload release assets
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ steps.release_tag.outputs.tag }}
+          TAG: ${{ needs.changelog.outputs.tag }}
         shell: bash
         run: |
           for file in artifacts/*; do

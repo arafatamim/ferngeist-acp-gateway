@@ -44,6 +44,21 @@ tasks:
     cmds:
       - go test ./...
 
+  changelog:
+    desc: Generate the release changelog from conventional commits (git-cliff)
+    cmds:
+      - git-cliff -o CHANGELOG.md
+
+  changelog:unreleased:
+    desc: Preview the changelog entries for commits since the last tag
+    cmds:
+      - git-cliff --unreleased
+
+  release:
+    desc: Prepare a release (bump version, generate changelog) — tag manually with git tag vX.Y.Z
+    cmds:
+      - git-cliff --bump --unreleased --prepend CHANGELOG.md
+
   clean:
     desc: Remove build artifacts
     cmds:
