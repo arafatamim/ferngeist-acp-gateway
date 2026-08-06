@@ -1805,3 +1805,33 @@ func TestRewriteResponseIDSwapsID(t *testing.T) {
 		t.Error("expected rewriteResponseID to reject malformed cache")
 	}
 }
+
+func TestWorkingDirByRuntime(t *testing.T) {
+	rs, store, _, _, _ := setupTest(t, Config{MaxDisconnected: 5 * time.Minute})
+	defer rs.Shutdown()
+	defer store.Close()
+
+	// No sessions yet -> ErrSessionNotFound.
+	if _, err := rs.WorkingDir("rt-1"); err != ErrSessionNotFound {
+		t.Fatalf("WorkingDir(no session) error = %v, want ErrSessionNotFound", err)
+	}
+
+	// A session with no sniffed cwd -> ErrCwdUnknown.
+	pump1 := newRecoveryPump()
+	rs.mu.Lock()
+	rs.sessions["sess-1"] = &Session{ID: "sess-1", RuntimeID: "rt-1", pump: pump1}
+	rs.mu.Unlock()
+	if _, err := rs.WorkingDir("rt-1"); err != ErrCwdUnknown {
+		t.Fatalf("WorkingDir(no cwd) error = %v, want ErrCwdUnknown", err)
+	}
+
+	// After the pump captures a cwd, WorkingDir returns it.
+	pump1.snoopInboundCwd([]byte(`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/proj"}}`))
+	got, err := rs.WorkingDir("rt-1")
+	if err != nil {
+		t.Fatalf("WorkingDir(with cwd) error = %v", err)
+	}
+	if got != "/proj" {
+		t.Fatalf("WorkingDir() = %q, want /proj", got)
+	}
+}

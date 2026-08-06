@@ -2,6 +2,7 @@ package session
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"log/slog"
@@ -71,6 +72,12 @@ type StdioPump struct {
 	// (sessionID above) is a different namespace and never matches the client.
 	acpMu        sync.Mutex
 	acpSessionID string
+
+	// ACP session working directory ("/abs/project/path"), snooped from the
+	// client's session/new request params.cwd. This is the project directory the
+	// user opened in the agent — the anchor for the gateway's file/diff/status
+	// workspace endpoints. Empty until the client issues session/new.
+	acpCwd string
 
 	// Resilient re-load support. A reconnecting client re-issues session/load,
 	// but an agent that keeps the session loaded across the disconnect rejects
@@ -665,6 +672,7 @@ func verbForKind(kind string) string {
 
 func (p *StdioPump) WriteToAgent(payload []byte) error {
 	p.snoopInboundSessionID(payload)
+	p.snoopInboundCwd(payload)
 	// Record session/load requests so the pump can recover from an "already
 	// loaded" rejection by replaying buffered history (see maybeRecoverLoad).
 	p.noteOutboundLoad(payload)
@@ -699,6 +707,44 @@ func (p *StdioPump) snoopInboundSessionID(payload []byte) {
 	p.acpMu.Lock()
 	p.acpSessionID = probe.Params.SessionID
 	p.acpMu.Unlock()
+}
+
+// snoopInboundCwd captures the ACP session working directory from a
+// client->agent session/new or session/load request's params.cwd. Both methods
+// carry cwd (session/load is what Ferngeist sends when resuming a session);
+// unlike sessionId (present on every session-scoped frame), cwd is set once when
+// the client opens the project. Re-captured on each such request so a project
+// switch updates it.
+func (p *StdioPump) snoopInboundCwd(payload []byte) {
+	// Hot path: every client->agent frame passes through here, but only
+	// session/new and session/load requests carry cwd. A cheap substring scan
+	// avoids a full JSON parse per frame.
+	if !bytes.Contains(payload, []byte("session/new")) &&
+		!bytes.Contains(payload, []byte("session/load")) {
+		return
+	}
+	var probe struct {
+		Method string `json:"method"`
+		Params *struct {
+			Cwd string `json:"cwd"`
+		} `json:"params"`
+	}
+	if err := json.Unmarshal(payload, &probe); err != nil ||
+		(probe.Method != "session/new" && probe.Method != "session/load") ||
+		probe.Params == nil || probe.Params.Cwd == "" {
+		return
+	}
+	p.acpMu.Lock()
+	p.acpCwd = probe.Params.Cwd
+	p.acpMu.Unlock()
+}
+
+// AcpCwd returns the snooped ACP session working directory, or "" if the client
+// has not issued session/new yet.
+func (p *StdioPump) AcpCwd() string {
+	p.acpMu.Lock()
+	defer p.acpMu.Unlock()
+	return p.acpCwd
 }
 
 func (p *StdioPump) SetClient(conn *websocket.Conn) {

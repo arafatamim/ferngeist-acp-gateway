@@ -110,6 +110,148 @@ Base path: `/v1`
   - Requires `control` scope.
   - Runtime restart with environment overrides may be disabled by configuration.
 
+### Workspace browsing
+
+The workspace endpoints are **read-only** views into the code the agent is
+currently working on. They are anchored to the **project directory the client
+opened in the agent** — captured from the ACP `session/new` request's
+`params.cwd` as it flows through the gateway (and re-captured from
+`session/load`, which Ferngeist sends when resuming a session) — not to the
+gateway's own launch working directory. All file and git access is confined to
+that directory: any path that escapes it (absolute path, `..` traversal, or
+symlink escape) is rejected with `400`. "Not found / not known yet" cases return
+`404`, and git failures (no `git` on PATH, or the cwd is not a git repository)
+return `422`.
+
+- `GET /v1/runtimes/{runtimeId}/files?path=<rel>`
+  - Reads a file inside the runtime's project directory.
+  - Requires `read` scope.
+  - `path` is a repository-relative path (required). The filesystem root is the
+    ACP project directory from `session/new` / `session/load`.
+  - The response reuses the ACP v1 schema's resource types (see the [ACP v1
+    schema](https://agentclientprotocol.com/protocol/v1/schema)). Text files
+    return a [`TextResourceContents`](https://agentclientprotocol.com/protocol/v1/schema#textresourcecontents)
+    (`text`/`uri`/`mimeType`); binary files return a
+    [`BlobResourceContents`](https://agentclientprotocol.com/protocol/v1/schema#blobresourcecontents)
+    (`blob` base64/`uri`/`mimeType`). `size` and `truncated` are **gateway
+    extensions** (not ACP fields); `uri` carries the absolute `file://` URI.
+    The Ferngeist client can decode these with its existing SDK types
+    (`acp.TextResourceContents` / `acp.BlobResourceContents`).
+  - Text response:
+    ```json
+    {
+      "text": "…file contents…",
+      "uri": "file:///path/to/notes.txt",
+      "mimeType": "text/plain; charset=utf-8",
+      "size": 8767,
+      "truncated": false
+    }
+    ```
+  - Binary response:
+    ```json
+    {
+      "blob": "AAECAw==",
+      "uri": "file:///path/to/clip.png",
+      "mimeType": "image/png",
+      "size": 4,
+      "truncated": false
+    }
+    ```
+  - Files larger than 1 MiB are truncated; `truncated` is `true` and `size` is
+    the full on-disk file size (the payload `text`/`blob` is capped at 1 MiB).
+    Binary detection uses the same NUL-byte heuristic
+    as git. `mimeType` is a best-effort guess from the file extension and is
+    omitted when the extension is not recognized (e.g. `.go` on platforms
+    without a system mime.types database).
+  - Error responses:
+    - `400` — missing `path`, or path escapes the project directory (absolute,
+      traversal, or symlink escape)
+    - `400` — path is a directory
+    - `404` — file not found
+    - `404` — runtime has no session, or the client has not issued
+      `session/new`/`session/load` yet (so the working directory is unknown)
+
+- `GET /v1/runtimes/{runtimeId}/git/status`
+  - Returns branch, ahead/behind counts, and changed files (with per-file line
+    counts) for the runtime's project directory.
+  - Requires `read` scope.
+  - Response:
+    ```json
+    {
+      "branch": "main",
+      "ahead": 2,
+      "behind": 0,
+      "changed": [
+        { "path": "wip.txt", "status": "?", "added": 1, "removed": 0, "binary": false },
+        { "path": "edited.txt", "status": "M", "added": 1, "removed": 1, "binary": false }
+      ]
+    }
+    ```
+  - `status` is a single porcelain letter: `M` modified, `A` added, `D` deleted,
+    `R` renamed, `?` untracked, etc.
+  - `added` / `removed` are per-file line counts from `git diff HEAD --numstat`:
+    lines added / removed over the whole `HEAD` → working-tree delta (the same
+    comparison `/git/diff` reports), so partially staged files count their
+    staged and unstaged edits together. For untracked files (`?`) — which
+    `git diff` does not cover — `added` is the file's raw line count and
+    `removed` is `0`.
+  - `binary` is `true` when git reports no counts for a binary file (`added` /
+    `removed` are then `0`), and for untracked files that contain a NUL byte.
+  - **No ACP schema equivalent:** git status has no counterpart in the ACP v1
+    schema, so this shape is **gateway-defined**. `status` uses git porcelain
+    letters (`M`, `A`, `D`, `R`, `?`, ...); `added`/`removed`/`binary` are
+    line-count extensions. The Ferngeist client defines this type itself rather
+    than reusing an SDK type.
+  - Error responses:
+    - `404` — runtime has no session, or working directory unknown (see above)
+    - `422` — `git` is missing from PATH, or the directory is not a git repository
+
+- `GET /v1/runtimes/{runtimeId}/git/diff?path=<rel>`
+  - Returns the diff for a single file (`?path=`), or for the whole working tree
+    when `path` is omitted.
+  - Requires `read` scope.
+  - The response always uses the ACP v1 schema's
+    [`ToolCallContentDiff`](https://agentclientprotocol.com/protocol/v1/schema)
+    shape (`path`/`oldText`/`newText`/`type:"diff"`), so the Ferngeist client
+    can decode it with its existing `acp.ToolCallContentDiff` SDK type. With
+    `?path=` the body is a **single object**; without it, the body is a **JSON
+    array** with one object per changed file (the same file set `/git/status`
+    reports).
+  - `oldText` is the committed version of the file (`git show HEAD:<path>`);
+    it is omitted (absent from the JSON, not `null`) for new/untracked files
+    or when there is no HEAD commit. `newText` is the working-tree file content
+    (empty for deleted files). `type` is always `"diff"`.
+  - Single-file response:
+    ```json
+    {
+      "path": "edited.txt",
+      "oldText": "old\n",
+      "newText": "new\n",
+      "type": "diff"
+    }
+    ```
+  - Whole-tree response:
+    ```json
+    [
+      { "path": "edited.txt", "oldText": "old\n", "newText": "new\n", "type": "diff" },
+      { "path": "wip.txt", "newText": "wip\n", "type": "diff" }
+    ]
+    ```
+  - **Breaking change:** this endpoint previously returned a raw unified patch
+    (`{path?, diff}`). It now returns `ToolCallContentDiff` objects, so the
+    client must render from `oldText`/`newText` instead of parsing a patch.
+    The whole-tree array covers the same file set as `/git/status`: staged,
+    unstaged, and untracked files, each compared against `HEAD`. `oldText` is
+    the committed version and is present only when the file exists in `HEAD`
+    (so it is omitted for new and untracked files, and for files renamed
+    within the working tree); committed history beyond `HEAD` is not included.
+  - Both `oldText` and `newText` are truncated to 1 MiB.
+  - Error responses:
+    - `400` — `path` escapes the project directory (absolute, traversal, or
+      symlink escape)
+    - `404` — runtime has no session, or working directory unknown (see above)
+    - `422` — `git` is missing from PATH, or the directory is not a git repository
+
 ### Gateway sessions
 
 > **Terminology note:** A "gateway session" is a gateway-internal object that keeps a runtime alive across WebSocket disconnections. It manages a stdio pump (for agent stdout), an exclusive pipe lease, and push notification dispatch on notable events. It is not an ACP agent session — ACP agent sessions are negotiated between the client and agent during protocol initialization and are not tracked by this API.

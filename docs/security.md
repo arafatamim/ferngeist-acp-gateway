@@ -65,6 +65,27 @@ This helps avoid exposing logs and runtime details unless you explicitly want th
 - In public mode, proof-of-possession is required by default.
 - Legacy bearer-only credentials are disabled by default in public mode.
 
+## Workspace read surface
+
+The workspace endpoints (`/v1/runtimes/{id}/files`, `/git/status`, `/git/diff`)
+let a paired client read files and git state inside the project the agent is
+working on.
+
+- **Auth:** all three require the `read` scope (same gate as runtime logs).
+- **Read-only:** no endpoint writes — no file writes, no `git add`/`commit`.
+- **Path confinement:** file and diff access is confined to the ACP **project
+  directory** captured from the client's `session/new` (`params.cwd`, re-captured
+  from `session/load` on resume). Absolute paths, `..` traversal, and symlink
+  escapes are rejected with `400`; the root and the resolved target are both
+  symlink-checked.
+- **No git repo / no git binary:** `422` — the directory simply is not a git
+  repository or `git` is not on PATH; nothing is exposed either way.
+- **Untrusted directories:** a malicious or buggy agent project directory could
+  contain hostile files or a deliberately slow/hung git repo. File reads are
+  capped (1 MiB) and git commands run under a 15s timeout, so neither can stall
+  a handler; content is returned verbatim and clients must treat it as untrusted
+  (e.g. never render HTML from a workspace file).
+
 ## Related docs
 
 - [docs/api.md](docs/api.md)

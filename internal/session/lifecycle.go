@@ -288,6 +288,30 @@ func (rs *RuntimeSession) FindReconnectableByRuntime(runtimeID, deviceID string)
 	return "", false
 }
 
+// WorkingDir returns the ACP project directory for the session bound to the
+// given runtime, or ErrSessionNotFound if no session references that runtime,
+// or ErrCwdUnknown if the session exists but the client has not issued
+// session/new yet (so params.cwd was never captured).
+func (rs *RuntimeSession) WorkingDir(runtimeID string) (string, error) {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	for _, sess := range rs.sessions {
+		// RuntimeID is immutable after Create, but hold sess.mu for the read to
+		// match FindReconnectableByRuntime's locking discipline.
+		sess.mu.Lock()
+		match := sess.RuntimeID == runtimeID
+		sess.mu.Unlock()
+		if match {
+			cwd := sess.pump.AcpCwd()
+			if cwd == "" {
+				return "", ErrCwdUnknown
+			}
+			return cwd, nil
+		}
+	}
+	return "", ErrSessionNotFound
+}
+
 // Resume mints a new single-use attach token for reconnecting to an existing session.
 func (rs *RuntimeSession) Resume(ctx context.Context, sessionID, deviceID string) (string, error) {
 	rs.mu.Lock()

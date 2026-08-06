@@ -46,6 +46,7 @@ var (
 	ErrSessionLimitReached = errors.New("session limit for this device has been reached")
 	ErrDeviceMismatch      = errors.New("session does not belong to this device")
 	ErrRuntimeLeaseHeld    = errors.New("runtime is already leased by another session")
+	ErrCwdUnknown          = errors.New("agent working directory is not known yet")
 )
 
 // ProcessManager is the interface RuntimeSession depends on for runtime

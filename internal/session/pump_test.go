@@ -253,3 +253,37 @@ func TestMaybeNotifyProgressThrottlesAndDedupes(t *testing.T) {
 		t.Fatalf("terminal push = %v, want appends", fired)
 	}
 }
+
+func TestSnoopInboundCwd(t *testing.T) {
+	p := newRecoveryPump()
+
+	// A non-session/new frame must not set cwd.
+	p.snoopInboundCwd([]byte(`{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":{"sessionId":"s1","cwd":"/should/not/apply"}}`))
+	if got := p.AcpCwd(); got != "" {
+		t.Fatalf("AcpCwd() after session/prompt = %q, want empty", got)
+	}
+
+	// A session/new with cwd captures it.
+	p.snoopInboundCwd([]byte(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/home/user/project"}}`))
+	if got := p.AcpCwd(); got != "/home/user/project" {
+		t.Fatalf("AcpCwd() = %q, want %q", got, "/home/user/project")
+	}
+
+	// A session/load with cwd also captures it (Ferngeist sends session/load on resume).
+	p.snoopInboundCwd([]byte(`{"jsonrpc":"2.0","id":5,"method":"session/load","params":{"sessionId":"s1","cwd":"/home/user/loaded"}}`))
+	if got := p.AcpCwd(); got != "/home/user/loaded" {
+		t.Fatalf("AcpCwd() after session/load = %q, want %q", got, "/home/user/loaded")
+	}
+
+	// A project switch updates it.
+	p.snoopInboundCwd([]byte(`{"jsonrpc":"2.0","id":3,"method":"session/new","params":{"cwd":"/home/user/other"}}`))
+	if got := p.AcpCwd(); got != "/home/user/other" {
+		t.Fatalf("AcpCwd() after switch = %q, want %q", got, "/home/user/other")
+	}
+
+	// Empty cwd is ignored.
+	p.snoopInboundCwd([]byte(`{"jsonrpc":"2.0","id":4,"method":"session/new","params":{"cwd":""}}`))
+	if got := p.AcpCwd(); got != "/home/user/other" {
+		t.Fatalf("AcpCwd() after empty = %q, want unchanged", got)
+	}
+}

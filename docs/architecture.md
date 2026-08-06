@@ -128,6 +128,59 @@ under its platform key in the daemon. Neither the dispatcher nor the session lay
 changes. (FCM itself can also relay to APNs/Web Push via override blocks, so a
 single `FCMProvider` may cover multiple platforms.)
 
+## Workspace browsing
+
+The gateway exposes **read-only** views into the code the agent is working on
+(files, git status, git diff) so a phone client can inspect the project without
+an editor. The anchor is the **project directory the client opened in the
+agent**: the pump snoops the ACP `session/new` request's `params.cwd` inbound
+(and re-captures it from `session/load`, which Ferngeist sends when resuming a
+session) in `internal/session/pump.go`, holds it on the session under the same
+lock as the ACP session id, and surfaces it via
+`RuntimeSession.WorkingDir(runtimeID)` (`internal/session/lifecycle.go`). This is
+deliberately **not** the launch working directory — PATH-resolved agents run in
+the gateway's own cwd, which is not the project.
+
+The three handlers live in `internal/api/workspace.go` and are gated behind the
+same `ScopeRead` auth used by `handleRuntimeLogs`. Their payloads reuse the ACP
+**v1** schema types vendored in `github.com/coder/acp-go-sdk` (package `acp`)
+so the Ferngeist client can decode them with SDK types it already has:
+
+- `GET /v1/runtimes/{id}/files?path=<rel>` — bounded file read confined to the
+  project directory (streams through `io.LimitReader` at the 1 MiB cap, so a
+  huge file is never buffered in full; `truncated` flag). Text files return an
+  `acp.TextResourceContents` (`text`/`uri`/`mimeType`); binary files (NUL-byte
+  detection) return an `acp.BlobResourceContents` (`blob` base64/`uri`/`mimeType`).
+  `size`/`truncated` are gateway extensions (`size` is the full on-disk file
+  size); `uri` is the absolute `file://` URI.
+- `GET /v1/runtimes/{id}/git/status` — `git -C <cwd> status --porcelain=v2 --branch`,
+  enriched with per-file line counts (`git diff HEAD --numstat`, covering the
+  whole HEAD → working-tree delta so staged + unstaged edits count together;
+  a `--cached` fallback covers repos with no HEAD commit) and raw line counts
+  for untracked files. Has **no ACP equivalent**; the shape is gateway-defined
+  and documented as such.
+- `GET /v1/runtimes/{id}/git/diff?path=<rel>` — always returns
+  `acp.ToolCallContentDiff` (`path`/`oldText`/`newText`/`type:"diff"`): a single
+  object with `?path=`, otherwise a JSON array with one entry per changed file.
+  `oldText` comes from `git show HEAD:<path>`, `newText` from the working copy.
+  This replaced the old raw unified-patch shape (`{path?,diff}`) — a breaking
+  change coordinated with the client. The whole-tree array covers the same file
+  set as `/git/status` (staged, unstaged, and untracked files), each compared
+  against `HEAD`; `oldText` is present only when the file exists in `HEAD`, so
+  new/untracked files and files renamed within the working tree have it
+  omitted. Committed history beyond `HEAD` is not included.
+
+**Path confinement.** `resolveWithinRoot` rejects any path that escapes the
+project directory: absolute paths, `..` traversal, and symlink escapes (both the
+root and the resolved target are `EvalSymlinks`-checked). Rejections are `400`.
+Because runtimes are gateway-global resources (the same model as
+`handleRuntimeLogs`), there is no per-device runtime ownership on these routes.
+
+**Git.** Every invocation is `git -C <cwd> <subcommand>` under a 15-second
+context timeout (the server `WriteTimeout` is 20s), so a locked or hanging repo
+cannot stall a handler. Missing `git` or a non-repository cwd returns `422`. No
+Go git library is used; read-only only — no `add`/`commit`, no file writes.
+
 ## Inbound diagnostics
 
 Client-to-agent messages are recorded for debugging/audit. Direction is always client→agent. Never replayed. Written to SQLite `session_inbound_log` table asynchronously via a buffered channel (256 entries). Non-blocking send — if the channel is full, the frame is dropped and a counter is incremented. The hot path never blocks on I/O.
