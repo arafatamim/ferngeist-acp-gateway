@@ -66,6 +66,13 @@ not be coupled. Full release notes live in GitHub Releases.
   (`path`/`oldText`/`newText`/`type:"diff"`); single object with `?path=`,
   array otherwise. The client must render from `oldText`/`newText` instead of
   parsing a patch. (2026-08-06)
+- `[semantic]` `POST /v1/auth/refresh` — an **expired** bearer token is now
+  accepted within the configured grace window
+  (`FERNGEIST_GATEWAY_CREDENTIAL_GRACE_SECONDS`, default 90 days) as long as a
+  valid proof-of-possession is attached; previously any expired token was
+  rejected with 401. A credential past the grace window returns a distinct
+  error (`gateway credential expired beyond grace period`) and must re-pair.
+  Response shape is unchanged. (2026-08-07)
 
 ## History
 
