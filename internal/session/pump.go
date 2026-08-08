@@ -5,6 +5,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"log/slog"
 	"strings"
 	"sync"
@@ -27,6 +29,13 @@ const acpWebSocketWriteTimeout = 30 * time.Second
 // buffers for re-load recovery. A very long conversation drops its oldest
 // frames first; the recent tail (which matters most for context) is preserved.
 const maxLoadHistoryBytes = 8 << 20 // 8 MiB
+
+// maxAgentFrameBytes is the pathological-agent safety bound on a single agent
+// stdout frame. Real ACP frames are far smaller; this only guards against a
+// misbehaving agent emitting an unbounded line (which would otherwise grow the
+// accumulation buffer without limit). It is deliberately much larger than the
+// old scanner cap so legitimate large frames (chat history, tool output) pass.
+const maxAgentFrameBytes = 64 << 20 // 64 MiB
 
 // StdioPump owns the agent's stdout drain loop and provides stdin write access
 // for the session. It runs independently of any WebSocket client — agent output
@@ -56,7 +65,21 @@ type StdioPump struct {
 
 	clientMu      sync.Mutex
 	client        *websocket.Conn // current connected WebSocket, or nil
-	supportsClose atomic.Bool     // set to true when agent advertises sessionCapabilities.close
+	connGen       int64           // bumped on every Attach; fences stale Bind/Detach from evicted conns
+	supportsClose atomic.Bool     // set when agent advertises sessionCapabilities.close
+
+	// Per-client write queue. The drain loop enqueues outbound frames and
+	// returns immediately — it must never block on a client write, or a slow
+	// client would stall agent stdout draining and the session would look
+	// dead. A dedicated writer goroutine (owned by the bound client) drains
+	// the queue with per-frame timeouts. Guarded by clientMu; writerCtx is
+	// cancelled on takeover/detach to stop the goroutine, and writerDone is
+	// closed when the goroutine exits (after flushing queued frames).
+	writerCh     chan string
+	writerCtx    context.Context
+	writerCancel context.CancelFunc
+	writerDone   chan struct{}
+	closed       bool // set when the drain loop exits; no new Bind may attach
 
 	// Cached agent `initialize` response. A reconnecting client re-runs the ACP
 	// handshake, but the agent process is already initialized — forwarding a
@@ -107,6 +130,7 @@ type StdioPump struct {
 	lastProgressPush     time.Time
 	lastProgressToolCall string
 	lastProgressSummary  string
+
 }
 
 // StdoutDrainLoop continuously reads from agent stdout and forwards frames
@@ -115,91 +139,152 @@ type StdioPump struct {
 // fire on notable events regardless of whether a client is attached. The loop
 // stops when the context is cancelled.
 func (p *StdioPump) StdoutDrainLoop(ctx context.Context) {
-	scanner := bufio.NewScanner(p.pipes.Stdout)
+	// Streaming newline reader instead of bufio.Scanner. A Scanner has a hard
+	// per-line cap (default 64 KiB; 1 MiB here) and silently exits with
+	// ErrTooLong when an agent emits a larger single line — a big session/update
+	// or session/load response with chat history / tool output. That silent
+	// exit closed the client WebSocket with no log, making the agent look dead
+	// ("connection dropped while loading a session"). A Reader accumulates
+	// lines across reads, so any practical frame passes through; the only cap
+	// is a pathological-agent safety bound far above real traffic.
+	reader := bufio.NewReader(p.pipes.Stdout)
+	var line strings.Builder
+	// overCap marks that the current line exceeded the safety cap; the rest of
+	// the line is discarded until its terminating newline so an oversized line
+	// is never split into a bogus partial frame.
+	overCap := false
 
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-
-	for scanner.Scan() {
+	for {
 		select {
 		case <-ctx.Done():
 			return
 		default:
 		}
-		line := scanner.Text()
-
-		// Track when the agent last produced output, so the reaper can
-		// distinguish abandoned sessions from actively-streaming ones.
-		p.lastStdoutMu.Lock()
-		p.lastStdoutAt = time.Now()
-		p.lastStdoutMu.Unlock()
-
-		if p.appendLog != nil {
-			p.appendLog(p.runtimeID, "acp.stdout", line)
+		fragment, err := reader.ReadString('\n')
+		if fragment != "" {
+			line.WriteString(fragment)
 		}
-
-		p.snoopInitialize(line)
-		p.snoopSessionID(line)
-
-		// Fire a push on notable events regardless of client attachment — the
-		// client suppresses it when foregrounded and shows it when backgrounded
-		// or killed, which is a distinction the gateway cannot make itself.
-		p.checkAndNotify(line)
-
-		// Buffer conversation history so a reconnecting client can be re-hydrated
-		// even when the agent rejects a duplicate session/load as "already loaded".
-		p.bufferLoadHistory(line)
-
-		// Normally the frame is forwarded as-is. A rejected duplicate session/load
-		// is replaced with the buffered history followed by a synthesized success,
-		// so the client restores context instead of seeing an unrecoverable error.
-		// If the recovery multi-frame write fails partway through, the client
-		// sees history frames but no terminal success. The connection closes,
-		// triggering the detach flow; the client's reconnect logic handles it.
-		outFrames := []string{line}
-		if replacements, handled := p.maybeRecoverLoad(line); handled {
-			outFrames = replacements
-		}
-
-		p.clientMu.Lock()
-		if p.client != nil {
-			var werr error
-			for _, frame := range outFrames {
-				writeCtx, cancel := context.WithTimeout(context.Background(), acpWebSocketWriteTimeout)
-				werr = p.client.Write(writeCtx, websocket.MessageText, []byte(frame))
-				cancel()
-				if werr != nil {
-					break
-				}
+		if err != nil {
+			// io.EOF with a non-empty buffer means the agent closed stdout
+			// mid-line (or exited); process the tail as a final frame.
+			if line.Len() > 0 {
+				p.handleStdoutLine(strings.TrimSuffix(line.String(), "\n"))
+				line.Reset()
 			}
-			if werr != nil {
-				p.logger.Warn("write to client failed", "error", werr)
-				failed := p.client
-				p.client = nil
-				p.clientMu.Unlock()
-				// Close the dead conn so the handler's read loop unblocks and runs
-				// its (generation-fenced) DetachClient. Session state is owned by the
-				// handler, not the pump, so there is a single detach path.
-				failed.CloseNow()
-				continue
+			if !errors.Is(err, io.EOF) {
+				p.logger.Warn("agent stdout read failed",
+					"runtime_id", p.runtimeID, "error", err)
 			}
+			break
 		}
-		p.clientMu.Unlock()
+		if line.Len() > maxAgentFrameBytes && !overCap {
+			p.logger.Warn("agent stdout frame exceeds safety cap; dropping",
+				"runtime_id", p.runtimeID, "bytes", line.Len())
+			overCap = true
+		}
+		if strings.HasSuffix(fragment, "\n") {
+			// Strip the delimiter so frames match the old scanner's Text()
+			// semantics (no trailing newline in log/history/snoop paths).
+			frame := strings.TrimSuffix(line.String(), "\n")
+			if !overCap {
+				p.handleStdoutLine(frame)
+			}
+			line.Reset()
+			overCap = false
+		}
 	}
 
-	// After the scanner exits (ctx cancelled, agent stdout closed, or scan error),
-	// close any attached client WebSocket. This unblocks proxyWebSocketToStdio's
-	// read loop so handleSessionWebSocket can clean up the connection. Without
-	// this, a dead agent — whose stdout pipe has closed — leaves the WebSocket
-	// open and the client waiting forever.
+	// After the loop exits (ctx cancelled, agent stdout closed, or read error),
+	// stop the writer and wait for it to flush its queue, then close the
+	// attached client WebSocket. This unblocks proxyWebSocketToStdio's read
+	// loop so handleSessionWebSocket can clean up the connection. Without this,
+	// a dead agent — whose stdout pipe has closed — leaves the WebSocket open
+	// and the client waiting forever.
 	p.clientMu.Lock()
-	if p.client != nil {
-		failed := p.client
-		p.client = nil
-		p.clientMu.Unlock()
-		failed.CloseNow()
-	} else {
-		p.clientMu.Unlock()
+	conn := p.client
+	done := p.writerDone
+	p.closed = true
+	p.stopWriterLocked()
+	p.clientMu.Unlock()
+	if done != nil {
+		// Bound the wait: a stuck client must not hang shutdown, but normally
+		// the flush completes in milliseconds.
+		select {
+		case <-done:
+		case <-time.After(acpWebSocketWriteTimeout + time.Second):
+			p.logger.Warn("timed out waiting for client write flush")
+		}
 	}
+	if conn != nil {
+		conn.CloseNow()
+	}
+}
+
+func (p *StdioPump) stopWriterLocked() {
+	if p.writerCancel != nil {
+		p.writerCancel()
+		p.writerCancel = nil
+	}
+	p.writerCh = nil
+	p.writerCtx = nil
+	p.writerDone = nil
+}
+
+// handleStdoutLine processes a single complete agent stdout frame: log append,
+// session snooping, notification, history buffering, and forwarding to the
+// attached WebSocket (with load-recovery replacement).
+func (p *StdioPump) handleStdoutLine(line string) {
+	// Track when the agent last produced output, so the reaper can
+	// distinguish abandoned sessions from actively-streaming ones.
+	p.lastStdoutMu.Lock()
+	p.lastStdoutAt = time.Now()
+	p.lastStdoutMu.Unlock()
+
+	if p.appendLog != nil {
+		p.appendLog(p.runtimeID, "acp.stdout", line)
+	}
+
+	p.snoopInitialize(line)
+	p.snoopSessionID(line)
+
+	// Fire a push on notable events regardless of client attachment — the
+	// client suppresses it when foregrounded and shows it when backgrounded
+	// or killed, which is a distinction the gateway cannot make itself.
+	p.checkAndNotify(line)
+
+	// Buffer conversation history so a reconnecting client can be re-hydrated
+	// even when the agent rejects a duplicate session/load as "already loaded".
+	p.bufferLoadHistory(line)
+
+	// Normally the frame is forwarded as-is. A rejected duplicate session/load
+	// is replaced with the buffered history followed by a synthesized success,
+	// so the client restores context instead of seeing an unrecoverable error.
+	// If the recovery multi-frame write fails partway through, the client
+	// sees history frames but no terminal success. The connection closes,
+	// triggering the detach flow; the client's reconnect logic handles it.
+	outFrames := []string{line}
+	if replacements, handled := p.maybeRecoverLoad(line); handled {
+		outFrames = replacements
+	}
+
+	// Enqueue the frames to the bound client's writer goroutine and return
+	// immediately — the drain loop must never block on a client write, or a
+	// slow client would stall agent stdout draining (agent pipe fills, agent
+	// stalls, session looks dead) and takeover would be blocked. The writer
+	// goroutine applies the per-frame timeout and closes the conn on failure;
+	// if the queue is full (client far behind), frames are dropped — a slow
+	// client must not backpressure the agent.
+	p.clientMu.Lock()
+	if p.client != nil && p.writerCh != nil {
+		for _, frame := range outFrames {
+			select {
+			case p.writerCh <- frame:
+			default:
+				// Queue full: client not keeping up. Drop rather than block.
+			}
+		}
+	}
+	p.clientMu.Unlock()
 }
 
 // bufferLoadHistory appends a session/update frame to its session's replay
@@ -747,16 +832,114 @@ func (p *StdioPump) AcpCwd() string {
 	return p.acpCwd
 }
 
-func (p *StdioPump) SetClient(conn *websocket.Conn) {
+// Attach claims the pump for a new client: bumps the connection generation and
+// clears the current client so no frames are written during the WebSocket
+// upgrade. It returns the generation the caller must pass to Bind and Detach.
+// Any previously-bound connection is evicted (closed) after the lock is
+// released — once the pointer is cleared no write path can reach it, so the
+// close cannot race a live forward.
+func (p *StdioPump) Attach() int64 {
 	p.clientMu.Lock()
-	defer p.clientMu.Unlock()
-	p.client = conn
+	evict := p.client
+	p.client = nil
+	p.stopWriterLocked()
+	p.connGen++
+	gen := p.connGen
+	p.clientMu.Unlock()
+	if evict != nil {
+		evict.CloseNow()
+	}
+	return gen
 }
 
-func (p *StdioPump) ClearClient() {
+// Bind attaches conn to the pump iff gen is still the current generation and
+// the pump has not closed. It returns false when a newer Attach has superseded
+// this generation or the drain loop has exited (session closing), in which
+// case the caller must discard conn. On success it spawns the per-client
+// writer goroutine that drains outbound frames to conn.
+func (p *StdioPump) Bind(conn *websocket.Conn, gen int64) bool {
 	p.clientMu.Lock()
 	defer p.clientMu.Unlock()
+	if p.closed || p.connGen != gen {
+		return false
+	}
+	p.client = conn
+	p.startWriterLocked(conn)
+	return true
+}
+
+// Detach clears the current client iff gen is still the current generation. A
+// stale detach (from a superseded connection's handler) is a no-op and returns
+// false, so an evicted connection cannot clobber the connection that replaced
+// it. The pump keeps running regardless.
+func (p *StdioPump) Detach(gen int64) bool {
+	p.clientMu.Lock()
+	defer p.clientMu.Unlock()
+	if p.connGen != gen {
+		return false
+	}
 	p.client = nil
+	p.stopWriterLocked()
+	return true
+}
+
+// startWriterLocked spawns the writer goroutine for conn. Caller holds clientMu.
+func (p *StdioPump) startWriterLocked(conn *websocket.Conn) {
+	ctx, cancel := context.WithCancel(context.Background())
+	p.writerCtx = ctx
+	p.writerCancel = cancel
+	p.writerCh = make(chan string, 64)
+	done := make(chan struct{})
+	p.writerDone = done
+	go func() {
+		defer close(done)
+		p.clientWriterLoop(ctx, conn)
+	}()
+}
+
+// clientWriterLoop drains the outbound queue to conn. It runs for the lifetime
+// of one bound client: a write failure or a cancelled context stops it. The
+// queue is bounded, so the drain loop never blocks on it; a client that cannot
+// keep up has frames dropped (see handleStdoutLine).
+func (p *StdioPump) clientWriterLoop(ctx context.Context, conn *websocket.Conn) {
+	ch := p.writerCh // captured at start; stopWriterLocked nil's the field
+	for {
+		select {
+		case <-ctx.Done():
+			// Agent gone or client detached: flush whatever is still queued so
+			// the client receives the tail before the conn closes.
+			for {
+				select {
+				case frame := <-ch:
+					writeCtx, cancel := context.WithTimeout(context.Background(), acpWebSocketWriteTimeout)
+					_ = conn.Write(writeCtx, websocket.MessageText, []byte(frame))
+					cancel()
+				default:
+					return
+				}
+			}
+		case frame := <-ch:
+			writeCtx, cancel := context.WithTimeout(context.Background(), acpWebSocketWriteTimeout)
+			err := conn.Write(writeCtx, websocket.MessageText, []byte(frame))
+			cancel()
+			if err != nil {
+				p.logger.Warn("write to client failed", "error", err)
+				// The client is dead/slow. Clear it (only if it's still the
+				// same conn — a takeover may have replaced it) and close it so
+				// the handler's read loop unblocks and runs its
+				// (generation-fenced) DetachClient. Session state is owned by
+				// the handler, not the pump, so there is a single detach path.
+				p.clientMu.Lock()
+				if p.client == conn {
+					p.client = nil
+					p.stopWriterLocked()
+				}
+				p.clientMu.Unlock()
+				conn.CloseNow()
+				return
+			}
+		}
+	}
 }
 
 func (p *StdioPump) SupportsClose() bool {

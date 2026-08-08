@@ -25,7 +25,6 @@ import (
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/push"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/runtime"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/storage"
-	"github.com/coder/websocket"
 )
 
 const (
@@ -143,11 +142,9 @@ type Session struct {
 	leasedPipes runtime.Pipes      // exclusive stdio lease
 	cancelPump  context.CancelFunc // stops the StdoutDrainLoop on session close
 
-	currentConn *websocket.Conn // the active client conn, or nil; used to evict on takeover
-	connGen     int64           // bumped on every attach; fences stale detaches from evicted conns
-	inboundSeq  atomic.Int64    // monotonic counter for client->agent diagnostic frames
+	inboundSeq atomic.Int64 // monotonic counter for client->agent diagnostic frames
 
-	mu sync.Mutex // protects Status, DisconnectedAt, currentConn, connGen
+	mu sync.Mutex // protects Status, DisconnectedAt
 }
 
 // NewRuntimeSession creates a new session service and starts the reaper goroutine.

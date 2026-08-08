@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -916,7 +917,10 @@ func TestPumpStdoutDrainLoopWithWebSocket(t *testing.T) {
 		logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		appendLog: func(string, string, string) {},
 	}
-	pump.SetClient(sc)
+	gen := pump.Attach()
+	if !pump.Bind(sc, gen) {
+		t.Fatal("Bind after Attach should succeed")
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go pump.StdoutDrainLoop(ctx)
@@ -963,7 +967,10 @@ func TestPumpStdoutDrainLoopWebSocketWriteError(t *testing.T) {
 		runtimeID: "rt-drain-ws-err",
 		logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
-	pump.SetClient(sc)
+	gen := pump.Attach()
+	if !pump.Bind(sc, gen) {
+		t.Fatal("Bind after Attach should succeed")
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go pump.StdoutDrainLoop(ctx)
@@ -978,7 +985,100 @@ func TestPumpStdoutDrainLoopWebSocketWriteError(t *testing.T) {
 	r.Close()
 }
 
-func TestPumpSetAndClearClient(t *testing.T) {
+// TestPumpStdoutDrainLoopOversizedFrame verifies that a single agent stdout
+// line exceeding the old 1 MiB scanner cap no longer kills the drain loop or
+// closes the client WebSocket. Regression for the "connection dropped while
+// loading a session" bug: a large session/update / session/load response made
+// bufio.Scanner exit with ErrTooLong, silently closing the WS.
+func TestPumpStdoutDrainLoopOversizedFrame(t *testing.T) {
+	serverCh := make(chan *websocket.Conn, 1)
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, aErr := websocket.Accept(w, r, nil)
+		if aErr != nil {
+			return
+		}
+		serverCh <- c
+	}))
+	defer s.Close()
+
+	wsURL := "ws://" + s.Listener.Addr().String() + "/"
+	client, _, err := websocket.Dial(context.Background(), wsURL, nil)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer client.Close(websocket.StatusNormalClosure, "")
+	// The coder/websocket client-side default read limit is 32 KiB; the test
+	// receives a 2 MiB frame, so raise it.
+	client.SetReadLimit(-1) // unlimited: tests must not impose the server's limit
+
+	sc := <-serverCh
+	if sc == nil {
+		t.Fatal("server connection not established")
+	}
+
+	r, w := io.Pipe()
+	pump := &StdioPump{
+		pipes: &runtime.LeasedPipes{
+			Stdin:  nopWriteCloser{},
+			Stdout: r,
+		},
+		runtimeID: "rt-drain-ws-big",
+		logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		appendLog: func(string, string, string) {},
+	}
+	gen := pump.Attach()
+	if !pump.Bind(sc, gen) {
+		t.Fatal("Bind after Attach should succeed")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go pump.StdoutDrainLoop(ctx)
+	defer cancel()
+
+	// A single line well over the old 1 MiB scanner cap. The old Scanner would
+	// exit with ErrTooLong here and close the WS; the streaming reader must
+	// pass it through (memory-bounded) and keep draining.
+	big := strings.Repeat("x", 2*1024*1024) // 2 MiB
+	if _, err := w.Write([]byte(big)); err != nil {
+		t.Fatalf("write big frame: %v", err)
+	}
+	if _, err := w.Write([]byte("\n")); err != nil {
+		t.Fatalf("write newline: %v", err)
+	}
+	if _, err := w.Write([]byte("after\n")); err != nil {
+		t.Fatalf("write after frame: %v", err)
+	}
+	// Closing the writer makes the reader see EOF after the buffered frames,
+	// so the reads below are deterministic (no reliance on flush timing).
+	if err := w.Close(); err != nil {
+		t.Fatalf("close pipe writer: %v", err)
+	}
+
+	// The client must still receive the small frame after the oversized one,
+	// proving the drain loop survived and kept forwarding. The reader strips
+	// the newline delimiter, so the frame content matches the input exactly.
+	_, msg, err := client.Read(context.Background())
+	if err != nil {
+		t.Fatalf("client read (big frame): %v", err)
+	}
+	if string(msg) != big {
+		t.Fatalf("big frame mismatch: got %d bytes, want %d", len(msg), len(big))
+	}
+
+	// Read deadline guards against a hang if the loop died before forwarding
+	// the small frame.
+	readCtx, readCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer readCancel()
+	_, msg, err = client.Read(readCtx)
+	if err != nil {
+		t.Fatalf("client read (after frame): %v", err)
+	}
+	if string(msg) != "after" {
+		t.Fatalf("after frame = %q, want %q", string(msg), "after")
+	}
+}
+
+func TestPumpAttachBindDetach(t *testing.T) {
 	mockPM := newMockPM()
 	pi, err := mockPM.AcquireLease("pump-test", "test")
 	if err != nil {
@@ -991,20 +1091,88 @@ func TestPumpSetAndClearClient(t *testing.T) {
 		runtimeID: "pump-test",
 		logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
+	conn := newTestWSConn(t)
 
-	pump.SetClient(nil)
+	// No client initially; Attach returns gen 1 with nothing to evict.
+	gen1 := pump.Attach()
+	if gen1 != 1 {
+		t.Errorf("first Attach gen = %d, want 1", gen1)
+	}
 	pump.clientMu.Lock()
 	if pump.client != nil {
-		t.Error("expected client to be nil after SetClient(nil)")
+		t.Error("expected client to be nil after Attach")
 	}
 	pump.clientMu.Unlock()
 
-	pump.ClearClient()
+	// A stale Bind (from a superseded gen) must be rejected.
+	if pump.Bind(newTestWSConn(t), gen1-1) {
+		t.Error("Bind with stale generation should be rejected")
+	}
+
+	// A current Bind attaches.
+	if !pump.Bind(conn, gen1) {
+		t.Error("Bind with current generation should succeed")
+	}
 	pump.clientMu.Lock()
-	if pump.client != nil {
-		t.Error("expected client to be nil after ClearClient()")
+	if pump.client != conn {
+		t.Error("expected client to be bound after current Bind")
 	}
 	pump.clientMu.Unlock()
+
+	// A second Attach evicts the bound conn and bumps the generation.
+	gen2 := pump.Attach()
+	if gen2 != gen1+1 {
+		t.Errorf("second Attach gen = %d, want %d", gen2, gen1+1)
+	}
+	pump.clientMu.Lock()
+	if pump.client != nil {
+		t.Error("expected client to be nil after second Attach")
+	}
+	pump.clientMu.Unlock()
+
+	// A stale Detach must not clear a newer client.
+	if pump.Detach(gen1) {
+		t.Error("stale Detach should be a no-op")
+	}
+
+	// The current Detach clears the client and reports success.
+	if !pump.Detach(gen2) {
+		t.Error("current Detach should succeed")
+	}
+	pump.clientMu.Lock()
+	if pump.client != nil {
+		t.Error("expected client to be nil after current Detach")
+	}
+	pump.clientMu.Unlock()
+}
+
+// newTestWSConn returns a server-side WebSocket connection backed by a real
+// local upgrade (a zero-value *websocket.Conn panics in CloseNow). The client
+// side is closed in cleanup.
+func newTestWSConn(t *testing.T) *websocket.Conn {
+	t.Helper()
+	serverCh := make(chan *websocket.Conn, 1)
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		serverCh <- c
+	}))
+	t.Cleanup(s.Close)
+
+	client, _, err := websocket.Dial(context.Background(), "ws://"+s.Listener.Addr().String()+"/", nil)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	t.Cleanup(func() { client.Close(websocket.StatusNormalClosure, "") })
+
+	sc := <-serverCh
+	if sc == nil {
+		t.Fatal("server connection not established")
+	}
+	t.Cleanup(func() { sc.CloseNow() })
+	return sc
 }
 
 func TestPumpSupportsClose(t *testing.T) {
@@ -1834,4 +2002,63 @@ func TestWorkingDirByRuntime(t *testing.T) {
 	if got != "/proj" {
 		t.Fatalf("WorkingDir() = %q, want /proj", got)
 	}
+}
+
+// TestPumpAttachBindRaceFencesEvictedConn locks in the connection-takeover
+// invariant: a concurrent Attach + stale Bind must never leave the pump with
+// the evicted connection bound. Regression guard for the resurrection window
+// where the old generation check (sess.mu) and the client set (clientMu) were
+// different locks — a stale Bind could land after a newer Attach evicted the
+// conn, and the pump would then write to a closed, superseded socket.
+func TestPumpAttachBindRaceFencesEvictedConn(t *testing.T) {
+	pump := &StdioPump{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+
+	genA := pump.Attach()
+	connA := newTestWSConn(t)
+	if !pump.Bind(connA, genA) {
+		t.Fatal("initial Bind should succeed")
+	}
+
+	// A takeover supersedes connA (genB > genA, connA evicted). From here on
+	// connA's generation is permanently stale.
+	genB := pump.Attach()
+	if genB <= genA {
+		t.Fatalf("takeover Attach gen = %d, want > %d", genB, genA)
+	}
+
+	// Hammer stale Binds of the evicted conn against further takeovers. The
+	// single-lock fence means a stale Bind can never win the race and rebind
+	// the evicted connection after a takeover cleared it — the resurrection
+	// window that existed when the gen check (sess.mu) and the client set
+	// (clientMu) were different locks.
+	const iters = 200
+	var wg sync.WaitGroup
+	var staleAccepted atomic.Int64
+	for i := 0; i < iters; i++ {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			if pump.Bind(connA, genA) {
+				staleAccepted.Add(1)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			pump.Attach()
+		}()
+	}
+	wg.Wait()
+
+	if n := staleAccepted.Load(); n != 0 {
+		t.Fatalf("stale Bind accepted %d times; the generation fence is broken", n)
+	}
+
+	// The final Attach's generation owns the pump; the pump must not be bound
+	// to the long-evicted connA.
+	pump.clientMu.Lock()
+	if pump.client == connA {
+		pump.clientMu.Unlock()
+		t.Fatal("pump still holds the evicted connection after takeover race")
+	}
+	pump.clientMu.Unlock()
 }

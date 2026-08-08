@@ -375,12 +375,13 @@ func (rs *RuntimeSession) AttachClient(ctx context.Context, sessionID, attachTok
 		return "", 0, ErrSessionNotActive
 	}
 
-	// Supersede any prior connection. The live conn is set later by BindConn,
-	// once the WebSocket upgrade succeeds; until then the pump has no client.
-	oldConn := sess.currentConn
-	sess.connGen++
-	gen := sess.connGen
-	sess.currentConn = nil
+	// Claim the pump for this attach: bump the connection generation and evict
+	// any previous client. The live conn is bound later by BindConn, once the
+	// WebSocket upgrade succeeds; until then the pump has no client. The call
+	// sits under sess.mu so the generation bump and the Status transition are
+	// atomic with respect to other attach/detach calls (lock order: sess.mu →
+	// clientMu, never inverted).
+	gen := sess.pump.Attach()
 	sess.Status = StatusActive
 	sess.DisconnectedAt = nil
 	record := storage.SessionRecord{
@@ -393,16 +394,7 @@ func (rs *RuntimeSession) AttachClient(ctx context.Context, sessionID, attachTok
 		CreatedAt:   sess.CreatedAt,
 	}
 	runtimeID := sess.RuntimeID
-	pump := sess.pump
 	sess.mu.Unlock()
-
-	// Evict the superseded connection outside the lock. Closing it unblocks the
-	// old handler's read loop, whose deferred DetachClient is fenced by gen and
-	// therefore becomes a no-op.
-	if oldConn != nil {
-		oldConn.CloseNow()
-	}
-	pump.ClearClient()
 
 	now := time.Now().UTC()
 	record.LastClientConnectAt = &now
@@ -413,26 +405,24 @@ func (rs *RuntimeSession) AttachClient(ctx context.Context, sessionID, attachTok
 
 // BindConn attaches the upgraded WebSocket to the session pump for the given
 // generation. It returns false if a newer attach has already superseded this
-// generation, in which case the caller should discard the connection.
+// generation, in which case the caller should discard the connection. The
+// generation fence lives on the pump, so a stale bind can neither bind a conn
+// nor touch session status.
 func (rs *RuntimeSession) BindConn(sessionID string, conn *websocket.Conn, gen int64) bool {
 	rs.mu.Lock()
 	sess, ok := rs.sessions[sessionID]
+	var pump *StdioPump
+	if ok {
+		// sess.pump is immutable after Create; read it under the registry lock
+		// so the read is covered by the same happens-before edge as the lookup.
+		pump = sess.pump
+	}
 	rs.mu.Unlock()
 	if !ok {
 		return false
 	}
 
-	sess.mu.Lock()
-	if sess.connGen != gen {
-		sess.mu.Unlock()
-		return false
-	}
-	sess.currentConn = conn
-	pump := sess.pump
-	sess.mu.Unlock()
-
-	pump.SetClient(conn)
-	return true
+	return pump.Bind(conn, gen)
 }
 
 // DetachClient marks the session as disconnected, but only when gen still
@@ -447,17 +437,27 @@ func (rs *RuntimeSession) DetachClient(sessionID string, gen int64) error {
 		return ErrSessionNotFound
 	}
 
+	// Hold sess.mu across the pump's generation fence and the Status
+	// transition, so a stale detach cannot interleave with a concurrent
+	// AttachClient: if the pump's Detach(gen) rejects (a newer Attach bumped
+	// the generation), nothing transitions; if it accepts, the Status write
+	// happens while AttachClient's sess.mu is held, so a newer attach cannot
+	// be clobbered back to Disconnected. Lock order: sess.mu → clientMu,
+	// never inverted.
 	sess.mu.Lock()
-	if sess.connGen != gen {
-		// A newer connection owns the session now; this detach is stale.
+	pump := sess.pump
+
+	// Stale detach (from a superseded connection's handler): the pump's
+	// generation fence rejects it, so an evicted connection cannot clobber the
+	// one that replaced it. Nothing to transition.
+	if !pump.Detach(gen) {
 		sess.mu.Unlock()
 		return nil
 	}
+
 	now := time.Now().UTC()
 	sess.Status = StatusDisconnected
 	sess.DisconnectedAt = &now
-	sess.currentConn = nil
-	pump := sess.pump
 	record := storage.SessionRecord{
 		SessionID:              sess.ID,
 		RuntimeID:              sess.RuntimeID,
@@ -471,7 +471,8 @@ func (rs *RuntimeSession) DetachClient(sessionID string, gen int64) error {
 	}
 	sess.mu.Unlock()
 
-	pump.ClearClient()
+	// Persist after the critical section — the DB write must not serialize
+	// other session operations, and it is best-effort.
 	rs.store.SaveSession(context.Background(), record)
 
 	return nil
@@ -572,7 +573,9 @@ func (rs *RuntimeSession) ListByDevice(ctx context.Context, deviceID string) ([]
 	return summaries, nil
 }
 
-// GetPump returns the StdioPump for a session (used by HTTP handlers to call SetClient).
+// GetPump returns the StdioPump for a session (used by HTTP handlers to write
+// to the agent via WriteToAgent/MaybeReplayInitialize). The pump's connection
+// lifecycle is driven through RuntimeSession's AttachClient/BindConn/DetachClient.
 func (rs *RuntimeSession) GetPump(sessionID string) (*StdioPump, error) {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
