@@ -30,6 +30,13 @@ Ferngeist Gateway is configured through environment variables and persisted stat
 | `FERNGEIST_GATEWAY_PROGRESS_INTERVAL_SECONDS` | Minimum seconds between live progress pushes while the agent is mid-turn | `15` |
 | `FERNGEIST_GATEWAY_FRAME_LOG` | Toggle raw ACP JSON-RPC frame logging; when `1`, every client→agent and agent→client frame is appended to `<log dir>/<agent>-agent.log` as newline-delimited JSON, rotated by `FERNGEIST_GATEWAY_LOG_MAX_BYTES`/`FERNGEIST_GATEWAY_LOG_MAX_BACKUPS` | unset (disabled) |
 
+## Update settings
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `FERNGEIST_GATEWAY_UPDATE_CHECK_ENABLED` | Check GitHub Releases for a newer stable version at startup and on an interval; push an update-available notification to paired devices. Set to `0`/`false` to disable (package-manager builds should disable it) | `true` |
+| `FERNGEIST_GATEWAY_UPDATE_CHECK_INTERVAL_SECONDS` | Seconds between update checks | `86400` (24h) |
+
 ## Pairing controls
 
 | Variable | Purpose |

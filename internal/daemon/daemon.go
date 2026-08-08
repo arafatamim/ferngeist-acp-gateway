@@ -23,6 +23,7 @@ import (
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/session"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/storage"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/token"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/update"
 )
 
 // Run boots the full gateway daemon and blocks until the context is cancelled or
@@ -78,6 +79,16 @@ func Run(ctx context.Context, build api.BuildInfo) error {
 	gatewaySvc := gateway.New(logger, store)
 	tokenSvc := token.New(logger)
 	pushSvc := newPushService(ctx, logger, store, cfg.FCMCredentialsFile)
+
+	// Periodic update-available check: fetch the latest stable release and push
+	// a notification to paired devices when a newer version exists. Never
+	// applies the update — the user runs `ferngeist-gateway update`.
+	if cfg.UpdateCheckEnabled {
+		checker := update.NewChecker("arafatamim/ferngeist-acp-gateway")
+		notifier := update.NewNotifier(checker, pushSvc, store.GetPairedDeviceIDs)
+		notifier.Interval = cfg.UpdateCheckInterval
+		go notifier.Run(ctx, build.Version)
+	}
 	sessionSvc := session.NewRuntimeSession(logger, store, runtimeSvc, tokenSvc, session.Config{
 		MaxDisconnected:    cfg.SessionMaxDisconnected,
 		MaxPerDevice:       cfg.MaxSessionsPerDevice,

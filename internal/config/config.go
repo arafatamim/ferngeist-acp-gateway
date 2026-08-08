@@ -28,6 +28,7 @@ const (
 	defaultSessionMaxDisconnected = 15 * time.Minute
 	defaultMaxSessionsPerDevice   = 5
 	defaultProgressInterval       = 15 * time.Second
+	defaultUpdateCheckInterval    = 24 * time.Hour
 )
 
 // Config is the daemon's effective runtime configuration after environment
@@ -83,6 +84,13 @@ type Config struct {
 	// and is handed to clients at pairing so they can address this gateway and
 	// resolve its pushes for deep-linking.
 	GatewayID string
+	// UpdateCheckEnabled toggles the startup update-available check. Defaults on;
+	// package-manager-installed builds are expected to disable it via env in their
+	// service environment.
+	UpdateCheckEnabled bool
+	// UpdateCheckInterval is how often the daemon re-checks for a newer stable
+	// release. 0 means use the default (24h).
+	UpdateCheckInterval time.Duration
 }
 
 type PersistedSettings struct {
@@ -125,6 +133,12 @@ func Load() Config {
 		ProgressInterval:       envDurationSecondsOrDefault("FERNGEIST_GATEWAY_PROGRESS_INTERVAL_SECONDS", defaultProgressInterval),
 		FCMCredentialsFile:     strings.TrimSpace(os.Getenv("FERNGEIST_GATEWAY_FCM_CREDENTIALS_FILE")),
 		FrameLogEnabled:        envBool("FERNGEIST_GATEWAY_FRAME_LOG"),
+		UpdateCheckInterval:    envDurationSecondsOrDefault("FERNGEIST_GATEWAY_UPDATE_CHECK_INTERVAL_SECONDS", defaultUpdateCheckInterval),
+	}
+	// UpdateCheckEnabled defaults to true; only an explicit false/0 disables it.
+	cfg.UpdateCheckEnabled = true
+	if v, ok := os.LookupEnv("FERNGEIST_GATEWAY_UPDATE_CHECK_ENABLED"); ok {
+		cfg.UpdateCheckEnabled = strings.TrimSpace(v) != "" && v != "0" && !strings.EqualFold(v, "false")
 	}
 	return cfg.applySecurityDefaults()
 }

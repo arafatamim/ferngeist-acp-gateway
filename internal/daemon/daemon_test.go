@@ -243,6 +243,7 @@ func TestRun_shuts_down_on_context_cancellation(t *testing.T) {
 	t.Setenv("FERNGEIST_GATEWAY_LOG_DIR", t.TempDir())
 	t.Setenv("FERNGEIST_GATEWAY_MANAGED_BIN_DIR", t.TempDir())
 	t.Setenv("FERNGEIST_GATEWAY_ENABLE_LAN", "0")
+	t.Setenv("FERNGEIST_GATEWAY_UPDATE_CHECK_ENABLED", "0")
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -275,6 +276,7 @@ func TestRun_shuts_down_cleanly_with_lan_enabled(t *testing.T) {
 	t.Setenv("FERNGEIST_GATEWAY_LOG_DIR", t.TempDir())
 	t.Setenv("FERNGEIST_GATEWAY_MANAGED_BIN_DIR", t.TempDir())
 	t.Setenv("FERNGEIST_GATEWAY_ENABLE_LAN", "1")
+	t.Setenv("FERNGEIST_GATEWAY_UPDATE_CHECK_ENABLED", "0")
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -307,6 +309,7 @@ func TestRun_returns_error_when_server_listen_fails(t *testing.T) {
 	t.Setenv("FERNGEIST_GATEWAY_LOG_DIR", t.TempDir())
 	t.Setenv("FERNGEIST_GATEWAY_MANAGED_BIN_DIR", t.TempDir())
 	t.Setenv("FERNGEIST_GATEWAY_ENABLE_LAN", "0")
+	t.Setenv("FERNGEIST_GATEWAY_UPDATE_CHECK_ENABLED", "0")
 
 	ctx := context.Background()
 	err := Run(ctx, api.BuildInfo{Version: "test"})
@@ -332,6 +335,7 @@ func TestRun_returns_error_when_state_db_unavailable(t *testing.T) {
 	t.Setenv("FERNGEIST_GATEWAY_LOG_DIR", t.TempDir())
 	t.Setenv("FERNGEIST_GATEWAY_MANAGED_BIN_DIR", t.TempDir())
 	t.Setenv("FERNGEIST_GATEWAY_ENABLE_LAN", "0")
+	t.Setenv("FERNGEIST_GATEWAY_UPDATE_CHECK_ENABLED", "0")
 
 	ctx := context.Background()
 	err := Run(ctx, api.BuildInfo{Version: "test"})

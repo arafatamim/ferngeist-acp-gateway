@@ -68,6 +68,36 @@ func TestApplyPersistedSettingsKeepsExplicitEnvOverrides(t *testing.T) {
 	}
 }
 
+func TestLoadUpdateCheckDefaults(t *testing.T) {
+	cfg := Load()
+	if !cfg.UpdateCheckEnabled {
+		t.Fatal("UpdateCheckEnabled should default to true")
+	}
+	if cfg.UpdateCheckInterval != 24*time.Hour {
+		t.Fatalf("UpdateCheckInterval = %v, want 24h", cfg.UpdateCheckInterval)
+	}
+}
+
+func TestLoadUpdateCheckEnvOverrides(t *testing.T) {
+	t.Setenv("FERNGEIST_GATEWAY_UPDATE_CHECK_ENABLED", "0")
+	t.Setenv("FERNGEIST_GATEWAY_UPDATE_CHECK_INTERVAL_SECONDS", "3600")
+	cfg := Load()
+	if cfg.UpdateCheckEnabled {
+		t.Fatal("UpdateCheckEnabled should be false when env is 0")
+	}
+	if cfg.UpdateCheckInterval != time.Hour {
+		t.Fatalf("UpdateCheckInterval = %v, want 1h", cfg.UpdateCheckInterval)
+	}
+}
+
+func TestLoadUpdateCheckDisabledFalseString(t *testing.T) {
+	t.Setenv("FERNGEIST_GATEWAY_UPDATE_CHECK_ENABLED", "false")
+	cfg := Load()
+	if cfg.UpdateCheckEnabled {
+		t.Fatal("UpdateCheckEnabled should be false for 'false'")
+	}
+}
+
 func TestLoadIncludesPairingSecurityDefaults(t *testing.T) {
 	cfg := Load()
 
