@@ -2,22 +2,19 @@
 
 `Ferngeist Gateway` is a self-hosted backend service for ACP-compatible agents. Its main purpose is to expose ACP agents through a unified WebSocket API with **resilient sessions** that survive WebSocket disconnection — keeping agents alive, dispatching FCM push notifications (`end_turn`, permission requests, agent errors, agent crashes), and allowing seamless reconnection. It discovers and launches supported agents, provides one authenticated endpoint, and manages pairing and paired devices. It also powers the [Ferngeist](https://github.com/arafatamim/Ferngeist) Android app.
 
-## Quick Start
+## Install
 
-Run the daemon:
+See [docs/install.md](docs/install.md) for per-OS instructions:
+
+- **Windows:** `winget install Ferngeist.Gateway`
+- **macOS:** `brew install ferngeist-gateway` (tap `arafatamim/homebrew-ferngeist`)
+- **Linux:** apt/dnf/AUR or tarball
+
+## Run from source (development)
 
 ```powershell
 go run ./cmd/ferngeist daemon run
 ```
-
-For LAN access during development:
-
-```powershell
-go run ./cmd/ferngeist daemon run --lan
-go run ./cmd/ferngeist pair
-```
-
-Default listen address: `127.0.0.1:5788`
 
 ## Usage
 
@@ -89,6 +86,7 @@ Then pair the device and add the public URL in the Ferngeist app.
 
 ## Documentation
 
+- [docs/install.md](docs/install.md) - per-OS installation
 - [docs/architecture.md](docs/architecture.md) - system overview and components
 - [docs/usage.md](docs/usage.md) - setup, pairing, and running the daemon
 - [docs/api.md](docs/api.md) - public and admin API surface

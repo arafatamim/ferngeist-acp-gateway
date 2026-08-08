@@ -41,6 +41,19 @@ The test installs, restarts, stops, starts, reinstalls, and uninstalls the
 LaunchAgent, cleaning up after itself. It is opt-in (env-gated) so ordinary
 `go test ./...` runs stay hermetic.
 
+## Self-update in dev builds
+
+`ferngeist-gateway update` is gated on the build's `updateChannel` ldflag:
+`""`/`"self"` installs may self-update, package-manager installs refuse. Dev
+builds (`go run`) have `updateChannel` empty, so the command runs — but it
+requires an installed daemon service and a tagged release, so it will fail with
+a helpful error on a dev box (`daemon service is not installed`). To simulate a
+package-manager install while developing:
+
+```bash
+go run -ldflags "-X main.buildVersion=0.0.0-dev -X main.updateChannel=brew" ./cmd/ferngeist update
+```
+
 ## Notes
 
 - The gateway is a local backend service for ACP-compatible agents.

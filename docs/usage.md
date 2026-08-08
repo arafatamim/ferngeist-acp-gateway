@@ -1,3 +1,11 @@
+# Usage
+
+> Install the gateway first — see [docs/install.md](install.md) for per-OS
+> instructions (winget, Homebrew, apt/dnf/AUR, or manual).
+
+## Run the daemon
+
+```powershell
 go run .\cmd\ferngeist daemon run
 ```
 
