@@ -1289,6 +1289,12 @@ func TestCloseWithSupportsCloseRoutesThroughPump(t *testing.T) {
 		RuntimeID: sess.RuntimeID,
 	}
 	pump.supportsClose.Store(true)
+	// The pump snooped the agent-side ACP session id from session/new; the
+	// gateway's session/close must address the agent with it, not the
+	// gateway's own resilient id.
+	pump.acpMu.Lock()
+	pump.acpSessionID = "ses_agent_1"
+	pump.acpMu.Unlock()
 
 	if err := rs.Close(ctx, sess.ID, "dev-close-routed"); err != nil {
 		t.Fatalf("Close: %v", err)
@@ -1301,12 +1307,18 @@ func TestCloseWithSupportsCloseRoutesThroughPump(t *testing.T) {
 	}
 	var frame struct {
 		Method string `json:"method"`
+		Params struct {
+			SessionID string `json:"sessionId"`
+		} `json:"params"`
 	}
 	if err := json.Unmarshal([]byte(writes[0]), &frame); err != nil {
 		t.Fatalf("Unmarshal(session/close): %v", err)
 	}
 	if frame.Method != "session/close" {
 		t.Errorf("stdin write method = %q, want %q", frame.Method, "session/close")
+	}
+	if frame.Params.SessionID != "ses_agent_1" {
+		t.Errorf("session/close params.sessionId = %q, want the agent-side ACP id %q (got the gateway id instead?)", frame.Params.SessionID, "ses_agent_1")
 	}
 }
 

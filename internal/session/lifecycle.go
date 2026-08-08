@@ -529,7 +529,19 @@ func (rs *RuntimeSession) Close(ctx context.Context, sessionID, deviceID string)
 	// the pump (WriteSessionClose) so the frame log records the teardown
 	// handshake; the frame is gateway-originated, so it deliberately skips the
 	// client-snooping in WriteToAgent.
+	//
+	// The sessionId must be the agent-side ACP id the client negotiated via
+	// session/new (snooped by the pump) — the gateway's own resilient
+	// sessionID is a different namespace and an agent that doesn't recognize
+	// it will silently no-op the close, skipping the cancel-in-flight-work
+	// handshake before the process is killed.
 	if sess.pump.SupportsClose() {
+		acpID := sess.pump.AcpSessionID()
+		if acpID == "" {
+			// Fallback: no session/new response observed (defensive; the
+			// agent accepted initialize, so it should have one).
+			acpID = sessionID
+		}
 		closeMsg, _ := json.Marshal(struct {
 			JSONRPC string                  `json:"jsonrpc"`
 			Method  string                  `json:"method"`
@@ -539,7 +551,7 @@ func (rs *RuntimeSession) Close(ctx context.Context, sessionID, deviceID string)
 			JSONRPC: "2.0",
 			Method:  "session/close",
 			ID:      "gw-close-" + sessionID,
-			Params:  acp.CloseSessionRequest{SessionId: acp.SessionId(sessionID)},
+			Params:  acp.CloseSessionRequest{SessionId: acp.SessionId(acpID)},
 		})
 		_ = sess.pump.WriteSessionClose(closeMsg)
 	}
