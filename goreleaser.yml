@@ -1,0 +1,127 @@
+version: 2
+
+project_name: ferngeist-gateway
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: gateway
+    main: ./cmd/ferngeist
+    binary: ferngeist-gateway
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w
+      - -X main.buildVersion={{.Version}}
+      - -X main.buildCommit={{.Commit}}
+      - -X main.buildTime={{.Date}}
+      - -X main.updateChannel={{.Env.UPDATE_CHANNEL}}
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+    mod_timestamp: '{{ .CommitTimestamp }}'
+
+archives:
+  - id: default
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: '{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}'
+    files:
+      - README.md
+      - LICENSE
+
+checksum:
+  name_template: 'SHA256SUMS'
+
+snapshot:
+  version_template: '{{ incpatch .Version }}-next'
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
+
+# Homebrew tap (arafatamim/homebrew-ferngeist). Generated as a Cask in the
+# tap's Casks/ directory (homebrew_casks; brews/formulas are deprecated since
+# goreleaser v2.16). Pushed when HOMEBREW_TAP_TOKEN is set.
+homebrew_casks:
+  - name: ferngeist-gateway
+    homepage: 'https://github.com/arafatamim/ferngeist-acp-gateway'
+    description: 'Self-hosted backend service for ACP-compatible agents'
+    license: MIT
+    repository:
+      owner: arafatamim
+      name: homebrew-ferngeist
+    binaries:
+      - ferngeist-gateway
+
+# .deb (Ubuntu/Debian) and .rpm (Fedora/RHEL) packages. postinstall runs
+# `daemon install` so a per-user systemd user service is created on first
+# install. The binary is added automatically by goreleaser (bindir).
+nfpms:
+  - id: packages
+    package_name: ferngeist-gateway
+    file_name_template: '{{ .ProjectName }}_{{ .Version }}_{{ .Arch }}'
+    vendor: Ferngeist
+    homepage: 'https://github.com/arafatamim/ferngeist-acp-gateway'
+    description: 'Self-hosted backend service for ACP-compatible agents'
+    maintainer: 'Ferngeist Maintainers <maintainers@ferngeist.local>'
+    license: MIT
+    formats:
+      - deb
+      - rpm
+    bindir: /usr/bin
+    contents:
+      - src: ./README.md
+        dst: /usr/share/doc/ferngeist-gateway/README.md
+    scripts:
+      postinstall: ./packaging/postinstall.sh
+
+release:
+  github:
+    owner: arafatamim
+    name: ferngeist-acp-gateway
+
+# winget manifest for microsoft/winget-pkgs. Generated in dist/ by the build
+# job (--skip=publish); the publish job opens the PR with WINGET_TOKEN.
+winget:
+  - name: Ferngeist.Gateway
+    publisher: Ferngeist
+    homepage: 'https://github.com/arafatamim/ferngeist-acp-gateway'
+    short_description: 'Self-hosted backend service for ACP-compatible agents'
+    description: 'Self-hosted backend service for ACP-compatible agents'
+    license: MIT
+    publisher_url: 'https://github.com/arafatamim'
+    publisher_support_url: 'https://github.com/arafatamim/ferngeist-acp-gateway/issues'
+    package_identifier: Ferngeist.Gateway
+    repository:
+      owner: microsoft
+      name: winget-pkgs
+
+# AUR package (arafatamim/ferngeist-gateway-aur). Publish is gated on
+# AUR_SSH_KEY being set; the build job skips it, the publish job sets it.
+aurs:
+  - name: ferngeist-gateway-bin
+    homepage: 'https://github.com/arafatamim/ferngeist-acp-gateway'
+    description: 'Self-hosted backend service for ACP-compatible agents (prebuilt)'
+    maintainers:
+      - 'Ferngeist Maintainers <maintainers@ferngeist.local>'
+    license: MIT
+    git_url: 'ssh://aur@aur.archlinux.org/ferngeist-gateway-bin.git'
+    private_key: '{{ .Env.AUR_SSH_KEY }}'
+    package: |-
+      install -Dm755 ferngeist-gateway "${pkgdir}/usr/bin/ferngeist-gateway"

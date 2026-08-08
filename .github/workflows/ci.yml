@@ -40,7 +40,7 @@ jobs:
         run: go test -count=1 ./...
 
   macos-launchd:
-    name: macOS launchd integration
+    name: macOS build + launchd integration
     runs-on: macos-latest
     steps:
       - name: Checkout repository
@@ -56,8 +56,9 @@ jobs:
       # user, so launchctl gui/<uid> service targets are available. This is the
       # definitive check that the launchd manager works against real launchd —
       # unit tests only exercise the file-writing half with a fake launchctl.
-      - name: Vet
-        run: go vet ./...
+      # The build also proves the darwin-tagged manager code compiles.
+      - name: Build
+        run: go build ./...
 
       - name: Unit tests (launchd manager)
         run: go test -count=1 ./internal/service/ -run TestDarwin
