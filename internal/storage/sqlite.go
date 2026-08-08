@@ -211,6 +211,24 @@ func (s *SQLiteStore) ListPairings(ctx context.Context) ([]PairingRecord, error)
 	return records, rows.Err()
 }
 
+// GetPairedDeviceIDs returns the device IDs of all currently paired devices.
+func (s *SQLiteStore) GetPairedDeviceIDs(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT device_id FROM paired_devices`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 func (s *SQLiteStore) DeletePairing(ctx context.Context, deviceID string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
