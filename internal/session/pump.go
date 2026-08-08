@@ -25,11 +25,6 @@ import (
 // its own for live stdout writes).
 const acpWebSocketWriteTimeout = 30 * time.Second
 
-// maxLoadHistoryBytes bounds the per-session session/update history the pump
-// buffers for re-load recovery. A very long conversation drops its oldest
-// frames first; the recent tail (which matters most for context) is preserved.
-const maxLoadHistoryBytes = 8 << 20 // 8 MiB
-
 // maxAgentFrameBytes is the pathological-agent safety bound on a single agent
 // stdout frame. Real ACP frames are far smaller; this only guards against a
 // misbehaving agent emitting an unbounded line (which would otherwise grow the
@@ -103,21 +98,10 @@ type StdioPump struct {
 	// workspace endpoints. Empty until the client issues session/new.
 	acpCwd string
 
-	// Resilient re-load support. A reconnecting client re-issues session/load,
-	// but an agent that keeps the session loaded across the disconnect rejects
-	// the duplicate with "already loaded" and replays no history — which would
-	// strand the client with an unrecoverable error (Ferngeist keeps no local
-	// transcript). To keep re-load working for such agents, the pump buffers each
-	// session's session/update history as it streams, remembers in-flight load
-	// request ids, caches the first successful load response, and — when the
-	// agent rejects a duplicate load — replays the buffered history followed by a
-	// synthesized success in place of the error. Idempotent agents never reach
-	// the error path, so their behavior is unchanged.
-	loadMu       sync.Mutex
-	loadHistory  map[string][]string // acpSessionId -> ordered session/update frames
-	loadHistSize map[string]int      // acpSessionId -> approximate buffered bytes
-	loadResponse map[string][]byte   // acpSessionId -> first successful session/load response
-	pendingLoads map[string]string   // load request id -> acpSessionId
+	// Resilient re-load support: buffers session/update history and recovers
+	// "already loaded" rejections from agents that keep the session loaded
+	// across a disconnect. See LoadRecovery. Nil when disabled.
+	loadRecovery *LoadRecovery
 
 	lastStdoutAt time.Time // updated on each agent stdout line; used by reaper to avoid killing active agents
 	lastStdoutMu sync.Mutex
@@ -261,8 +245,6 @@ func (p *StdioPump) handleStdoutLine(line string) {
 
 	// Buffer conversation history so a reconnecting client can be re-hydrated
 	// even when the agent rejects a duplicate session/load as "already loaded".
-	p.bufferLoadHistory(line)
-
 	// Normally the frame is forwarded as-is. A rejected duplicate session/load
 	// is replaced with the buffered history followed by a synthesized success,
 	// so the client restores context instead of seeing an unrecoverable error.
@@ -270,8 +252,10 @@ func (p *StdioPump) handleStdoutLine(line string) {
 	// sees history frames but no terminal success. The connection closes,
 	// triggering the detach flow; the client's reconnect logic handles it.
 	outFrames := []string{line}
-	if replacements, handled := p.maybeRecoverLoad(line); handled {
-		outFrames = replacements
+	if p.loadRecovery != nil {
+		if replacements, handled := p.loadRecovery.OnFrame(line); handled {
+			outFrames = replacements
+		}
 	}
 
 	// Enqueue the frames to the bound client's writer goroutine and return
@@ -292,162 +276,6 @@ func (p *StdioPump) handleStdoutLine(line string) {
 		}
 	}
 	p.clientMu.Unlock()
-}
-
-// bufferLoadHistory appends a session/update frame to its session's replay
-// buffer, evicting the oldest frames once the buffer exceeds maxLoadHistoryBytes.
-// Only session/update notifications are buffered; live request/response frames
-// (permission prompts, rpc results) are not, so a reconnecting client never
-// replays a stale, since-resolved request.
-func (p *StdioPump) bufferLoadHistory(line string) {
-	var probe struct {
-		Method string `json:"method"`
-		Params *struct {
-			SessionID string `json:"sessionId"`
-		} `json:"params"`
-	}
-	if err := json.Unmarshal([]byte(line), &probe); err != nil ||
-		probe.Method != "session/update" || probe.Params == nil || probe.Params.SessionID == "" {
-		return
-	}
-	sid := probe.Params.SessionID
-
-	p.loadMu.Lock()
-	defer p.loadMu.Unlock()
-	if p.loadHistory == nil {
-		p.loadHistory = make(map[string][]string)
-		p.loadHistSize = make(map[string]int)
-	}
-	p.loadHistory[sid] = append(p.loadHistory[sid], line)
-	p.loadHistSize[sid] += len(line)
-	// Note: a single frame exceeding maxLoadHistoryBytes is never evicted
-	// (the loop requires len > 1). The effective per-session bound is
-	// max(maxLoadHistoryBytes, single-frame-size), which is acceptable
-	// because one frame is the minimum needed for replay.
-	for p.loadHistSize[sid] > maxLoadHistoryBytes && len(p.loadHistory[sid]) > 1 {
-		dropped := p.loadHistory[sid][0]
-		p.loadHistory[sid] = p.loadHistory[sid][1:]
-		p.loadHistSize[sid] -= len(dropped)
-	}
-}
-
-// maybeRecoverLoad inspects an agent->client frame correlated to an in-flight
-// session/load. On a successful response it caches the response shape (so a
-// future synthesized success can preserve the agent's modes/models) and lets the
-// frame flow unchanged. On an "already loaded" error it returns replacement
-// frames — the buffered session/update history followed by a synthesized
-// success — and reports true so the caller suppresses the original error.
-func (p *StdioPump) maybeRecoverLoad(line string) ([]string, bool) {
-	p.loadMu.Lock()
-	noPending := len(p.pendingLoads) == 0
-	p.loadMu.Unlock()
-	if noPending {
-		return nil, false
-	}
-
-	var resp struct {
-		ID    json.RawMessage `json:"id"`
-		Error *struct {
-			Message string `json:"message"`
-		} `json:"error"`
-	}
-	if err := json.Unmarshal([]byte(line), &resp); err != nil || len(resp.ID) == 0 {
-		return nil, false
-	}
-	key := idKey(resp.ID)
-
-	p.loadMu.Lock()
-	sid, pending := p.pendingLoads[key]
-	if !pending {
-		p.loadMu.Unlock()
-		return nil, false
-	}
-	delete(p.pendingLoads, key)
-	// The entry is deleted before synthesizeLoadSuccess. If synthesis fails
-	// (only possible on json.Marshal error — effectively impossible with a
-	// map of json.RawMessage), the original error passes through and tracking
-	// is silently lost. This is intentional: re-tracking a doomed entry would
-	// just delay the same failure to the next response.
-
-	// Success: remember the response shape and let it reach the client unchanged.
-	if resp.Error == nil {
-		if p.loadResponse == nil {
-			p.loadResponse = make(map[string][]byte)
-		}
-		p.loadResponse[sid] = append([]byte(nil), line...)
-		p.loadMu.Unlock()
-		return nil, false
-	}
-
-	// A load error unrelated to re-load (e.g. unknown session) is surfaced as-is.
-	if !strings.Contains(strings.ToLower(resp.Error.Message), "already loaded") {
-		p.loadMu.Unlock()
-		return nil, false
-	}
-
-	frames := append([]string(nil), p.loadHistory[sid]...)
-	cached := p.loadResponse[sid]
-	p.loadMu.Unlock()
-
-	success, ok := synthesizeLoadSuccess(cached, resp.ID)
-	if !ok {
-		return nil, false // could not build a safe success; surface the original error
-	}
-	p.logger.Info("recovered already-loaded session/load by replaying buffered history",
-		"acpSessionId", sid, "historyFrames", len(frames))
-	return append(frames, success), true
-}
-
-// noteOutboundLoad records an in-flight session/load request so the agent's
-// later response (a success to cache, or an "already loaded" error to recover
-// from) can be correlated to the session it targets. Called on the client->agent
-// path before the frame is forwarded.
-func (p *StdioPump) noteOutboundLoad(payload []byte) {
-	var req struct {
-		Method string          `json:"method"`
-		ID     json.RawMessage `json:"id"`
-		Params *struct {
-			SessionID string `json:"sessionId"`
-		} `json:"params"`
-	}
-	if err := json.Unmarshal(payload, &req); err != nil || req.Method != "session/load" {
-		return
-	}
-	if req.Params == nil || req.Params.SessionID == "" || len(req.ID) == 0 {
-		return
-	}
-	p.loadMu.Lock()
-	if p.pendingLoads == nil {
-		p.pendingLoads = make(map[string]string)
-	}
-	p.pendingLoads[idKey(req.ID)] = req.Params.SessionID
-	p.loadMu.Unlock()
-}
-
-// idKey normalizes a JSON-RPC id (number or string) into a comparable map key.
-func idKey(id json.RawMessage) string {
-	return strings.TrimSpace(string(id))
-}
-
-// synthesizeLoadSuccess builds the session/load success response a reconnecting
-// client expects. It reuses the cached first-load response when available
-// (preserving any modes/models the agent returned), rewriting only the id;
-// otherwise it falls back to a null result, which the ACP client accepts.
-func synthesizeLoadSuccess(cached []byte, id json.RawMessage) (string, bool) {
-	if len(cached) > 0 {
-		if out, ok := rewriteResponseID(cached, id); ok {
-			return string(out), true
-		}
-	}
-	out, err := json.Marshal(map[string]json.RawMessage{
-		"jsonrpc": json.RawMessage(`"2.0"`),
-		"id":      id,
-		"result":  json.RawMessage(`null`),
-	})
-	if err != nil {
-		return "", false
-	}
-	return string(out), true
 }
 
 // checkAndNotify fires a push notification when the agent emits a notable
@@ -766,8 +594,10 @@ func (p *StdioPump) WriteToAgent(payload []byte) error {
 	p.snoopInboundSessionID(payload)
 	p.snoopInboundCwd(payload)
 	// Record session/load requests so the pump can recover from an "already
-	// loaded" rejection by replaying buffered history (see maybeRecoverLoad).
-	p.noteOutboundLoad(payload)
+	// loaded" rejection by replaying buffered history (see LoadRecovery).
+	if p.loadRecovery != nil {
+		p.loadRecovery.OnOutbound(payload)
+	}
 	if p.frameLog != nil {
 		p.frameLog.append(p.agentID, p.runtimeID, p.sessionID, "in", payload)
 	}

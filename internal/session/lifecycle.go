@@ -120,6 +120,7 @@ func (rs *RuntimeSession) Create(ctx context.Context, runtimeID, deviceID, agent
 		onPushNotification: onPushNotification,
 		ProgressInterval:   rs.cfg.ProgressInterval,
 		frameLog:           rs.frameLog,
+		loadRecovery:       newLoadRecovery(rs.logger),
 	}
 
 	go pump.StdoutDrainLoop(pumpCtx)
