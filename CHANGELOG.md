@@ -2,14 +2,25 @@
 
 ### 🚀 Features
 
+- *(service)* Add launchd manager for macOS daemon install
+- *(update)* Add release checker and checksum-verified downloader
+- *(update)* Notify paired devices when a new stable release exists
+- *(daemon)* Periodic update-available check with device push
+- *(cli)* Add `ferngeist-gateway update` with SHA256SUMS verification
+- *(release)* goreleaser pipeline with Homebrew, winget, nfpm (deb/rpm), and AUR channels
 - *(session)* Emit throttled live progress push notifications
 - *(workspace)* Add read-only file/git browsing endpoints
 - *(pairing)* Add credential grace period and in-grace refresh
 - *(api)* Allow proof-validated refresh of expired credentials
 - *(api)* Export protocol version and stabilize at v1
 
+### 🧪 Testing
+
+- *(service)* launchd lifecycle integration test on macOS CI
+
 ### 📚 Documentation
 
+- Per-OS installation guide (winget, Homebrew, apt/dnf/AUR, manual)
 - Document credential grace period and expired refresh
 
 ### ⚙️ Miscellaneous Tasks
