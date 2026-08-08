@@ -39,6 +39,34 @@ jobs:
           CGO_ENABLED: "0"
         run: go test -count=1 ./...
 
+  macos-launchd:
+    name: macOS launchd integration
+    runs-on: macos-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+          cache-dependency-path: go.sum
+
+      # macos-latest runners run under a real GUI login session for the runner
+      # user, so launchctl gui/<uid> service targets are available. This is the
+      # definitive check that the launchd manager works against real launchd —
+      # unit tests only exercise the file-writing half with a fake launchctl.
+      - name: Vet
+        run: go vet ./...
+
+      - name: Unit tests (launchd manager)
+        run: go test -count=1 ./internal/service/ -run TestDarwin
+
+      - name: Launchd lifecycle integration test
+        env:
+          FERNGEIST_RUN_REAL_AGENT_TESTS: "1"
+        run: go test -count=1 ./internal/service/ -run TestLaunchdLifecycle -v
+
   race:
     name: race detector
     runs-on: ubuntu-latest
