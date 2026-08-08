@@ -21,6 +21,7 @@ type Service struct {
 	fileName   string
 	maxSize    int64
 	maxBackups int
+	fileMode   os.FileMode
 	file       *os.File
 	size       int64
 }
@@ -39,11 +40,21 @@ func New(level, dir string, maxSize int64, maxBackups int) (*slog.Logger, *Servi
 }
 
 func NewService(dir, fileName string, maxSize int64, maxBackups int) (*Service, error) {
+	return NewServiceWithMode(dir, fileName, maxSize, maxBackups, 0o644)
+}
+
+// NewServiceWithMode is like NewService but with a configurable file mode for
+// the active log (and its rotated backups). The gateway log uses the default
+// 0644; the frame log opts into 0600 because it carries raw conversation data.
+func NewServiceWithMode(dir, fileName string, maxSize int64, maxBackups int, mode os.FileMode) (*Service, error) {
 	if maxSize <= 0 {
 		maxSize = 1024 * 1024
 	}
 	if maxBackups <= 0 {
 		maxBackups = 3
+	}
+	if mode == 0 {
+		mode = 0o644
 	}
 
 	service := &Service{
@@ -51,6 +62,7 @@ func NewService(dir, fileName string, maxSize int64, maxBackups int) (*Service, 
 		fileName:   fileName,
 		maxSize:    maxSize,
 		maxBackups: maxBackups,
+		fileMode:   mode,
 	}
 	if err := service.ensureFileLocked(); err != nil {
 		return nil, err
@@ -145,7 +157,7 @@ func (s *Service) ensureFileLocked() error {
 	}
 
 	path := filepath.Join(s.dir, s.fileName)
-	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, s.fileMode)
 	if err != nil {
 		return err
 	}

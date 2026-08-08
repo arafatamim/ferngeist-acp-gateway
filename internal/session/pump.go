@@ -58,6 +58,7 @@ type StdioPump struct {
 	pipes     *runtime.LeasedPipes
 	runtimeID string
 	sessionID string
+	agentID   string
 	logger    *slog.Logger
 	appendLog func(string, string, string)
 
@@ -131,6 +132,9 @@ type StdioPump struct {
 	lastProgressToolCall string
 	lastProgressSummary  string
 
+	// frameLog optionally records every raw ACP frame (in + out) as
+	// newline-delimited JSON in per-agent files. nil when disabled.
+	frameLog *frameLogManager
 }
 
 // StdoutDrainLoop continuously reads from agent stdout and forwards frames
@@ -242,6 +246,9 @@ func (p *StdioPump) handleStdoutLine(line string) {
 
 	if p.appendLog != nil {
 		p.appendLog(p.runtimeID, "acp.stdout", line)
+	}
+	if p.frameLog != nil {
+		p.frameLog.append(p.agentID, p.runtimeID, p.sessionID, "out", []byte(line))
 	}
 
 	p.snoopInitialize(line)
@@ -761,6 +768,9 @@ func (p *StdioPump) WriteToAgent(payload []byte) error {
 	// Record session/load requests so the pump can recover from an "already
 	// loaded" rejection by replaying buffered history (see maybeRecoverLoad).
 	p.noteOutboundLoad(payload)
+	if p.frameLog != nil {
+		p.frameLog.append(p.agentID, p.runtimeID, p.sessionID, "in", payload)
+	}
 	return p.pipes.WriteToAgent(payload)
 }
 

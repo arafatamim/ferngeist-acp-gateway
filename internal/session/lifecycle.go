@@ -114,10 +114,12 @@ func (rs *RuntimeSession) Create(ctx context.Context, runtimeID, deviceID, agent
 		pipes:              lp,
 		runtimeID:          runtimeID,
 		sessionID:          sessionID,
+		agentID:            agentID,
 		logger:             rs.logger,
 		appendLog:          rs.pm.AppendLog,
 		onPushNotification: onPushNotification,
 		ProgressInterval:   rs.cfg.ProgressInterval,
+		frameLog:           rs.frameLog,
 	}
 
 	go pump.StdoutDrainLoop(pumpCtx)
@@ -698,5 +700,9 @@ func (rs *RuntimeSession) Shutdown() {
 	rs.mu.Unlock()
 	if rs.inbound != nil {
 		rs.inbound.stop()
+	}
+	if rs.frameLog != nil {
+		_ = rs.frameLog.close()
+		rs.frameLog = nil
 	}
 }

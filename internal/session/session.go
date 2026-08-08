@@ -104,6 +104,17 @@ type Config struct {
 	// GatewayID is this gateway's stable instance id, sent as the server identity
 	// in push notifications so clients can deep-link into the right chat.
 	GatewayID string
+	// FrameLogEnabled toggles a raw ACP JSON-RPC frame log. When enabled, the
+	// pump appends every client->agent and agent->client frame to
+	// <FrameLogDir>/<agent>-agent.log as newline-delimited JSON.
+	FrameLogEnabled bool
+	// FrameLogDir is the directory for frame logs (normally the daemon log
+	// directory). Ignored when FrameLogEnabled is false.
+	FrameLogDir string
+	// FrameLogMaxSize and FrameLogMaxBackups bound rotation of each agent's
+	// frame log.
+	FrameLogMaxSize    int64
+	FrameLogMaxBackups int
 }
 
 // RuntimeSession is the central session orchestrator. It owns the in-memory
@@ -121,6 +132,8 @@ type RuntimeSession struct {
 	sessions map[string]*Session // in-memory registry, keyed by session ID
 
 	inbound *inboundWriter // async diagnostic logger for client->agent messages
+
+	frameLog *frameLogManager // raw ACP frame logs; nil when disabled
 
 	cancelReaper context.CancelFunc // shuts down the reaper goroutine on Close
 }
@@ -149,6 +162,13 @@ type Session struct {
 
 // NewRuntimeSession creates a new session service and starts the reaper goroutine.
 func NewRuntimeSession(logger *slog.Logger, store *storage.SQLiteStore, pm ProcessManager, tokenSvc TokenService, cfg Config) *RuntimeSession {
+	frameLog, err := newFrameLogManager(cfg.FrameLogEnabled, cfg.FrameLogDir, cfg.FrameLogMaxSize, cfg.FrameLogMaxBackups)
+	if err != nil {
+		// A misconfigured frame log must not take down the session service;
+		// log and continue without frame capture.
+		logger.Warn("frame log disabled", "error", err)
+		frameLog = nil
+	}
 	rs := &RuntimeSession{
 		logger:   logger.With("component", "session"),
 		store:    store,
@@ -156,6 +176,7 @@ func NewRuntimeSession(logger *slog.Logger, store *storage.SQLiteStore, pm Proce
 		tokenSvc: tokenSvc,
 		cfg:      cfg,
 		sessions: make(map[string]*Session),
+		frameLog: frameLog,
 	}
 	if cfg.MaxDisconnected <= 0 {
 		rs.cfg.MaxDisconnected = defaultMaxDisconnected

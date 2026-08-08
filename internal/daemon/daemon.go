@@ -79,11 +79,15 @@ func Run(ctx context.Context, build api.BuildInfo) error {
 	tokenSvc := token.New(logger)
 	pushSvc := newPushService(ctx, logger, store, cfg.FCMCredentialsFile)
 	sessionSvc := session.NewRuntimeSession(logger, store, runtimeSvc, tokenSvc, session.Config{
-		MaxDisconnected:  cfg.SessionMaxDisconnected,
-		MaxPerDevice:     cfg.MaxSessionsPerDevice,
-		ProgressInterval: cfg.ProgressInterval,
-		PushSvc:          pushSvc,
-		GatewayID:        cfg.GatewayID,
+		MaxDisconnected:    cfg.SessionMaxDisconnected,
+		MaxPerDevice:       cfg.MaxSessionsPerDevice,
+		ProgressInterval:   cfg.ProgressInterval,
+		PushSvc:            pushSvc,
+		GatewayID:          cfg.GatewayID,
+		FrameLogEnabled:    cfg.FrameLogEnabled,
+		FrameLogDir:        cfg.LogDir,
+		FrameLogMaxSize:    cfg.LogMaxSize,
+		FrameLogMaxBackups: cfg.LogMaxBackups,
 	})
 	discoverySvc := discovery.New(logger)
 

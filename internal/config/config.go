@@ -71,6 +71,13 @@ type Config struct {
 	// authenticate FCM HTTP v1 push delivery. When empty, push notifications fall
 	// back to the log-only stub so local/dev runs work without a Firebase project.
 	FCMCredentialsFile string
+	// FrameLogEnabled toggles a raw ACP JSON-RPC frame log. When enabled, the
+	// gateway appends every client->agent and agent->client frame to
+	// <LogDir>/<agent>-agent.log as newline-delimited JSON, one line per frame,
+	// rotated with LogMaxSize/LogMaxBackups. This is a debugging aid: frames
+	// can contain project code and tool output, so treat the files as
+	// sensitive.
+	FrameLogEnabled bool
 	// GatewayID is this gateway's stable instance identifier. It is not read from
 	// the environment — the daemon populates it at boot from persisted storage —
 	// and is handed to clients at pairing so they can address this gateway and
@@ -117,6 +124,7 @@ func Load() Config {
 		MaxSessionsPerDevice:   envIntOrDefault("FERNGEIST_GATEWAY_MAX_SESSIONS_PER_DEVICE", defaultMaxSessionsPerDevice),
 		ProgressInterval:       envDurationSecondsOrDefault("FERNGEIST_GATEWAY_PROGRESS_INTERVAL_SECONDS", defaultProgressInterval),
 		FCMCredentialsFile:     strings.TrimSpace(os.Getenv("FERNGEIST_GATEWAY_FCM_CREDENTIALS_FILE")),
+		FrameLogEnabled:        envBool("FERNGEIST_GATEWAY_FRAME_LOG"),
 	}
 	return cfg.applySecurityDefaults()
 }

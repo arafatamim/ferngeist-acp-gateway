@@ -28,6 +28,7 @@ Ferngeist Gateway is configured through environment variables and persisted stat
 | `FERNGEIST_GATEWAY_MAX_SESSIONS_PER_DEVICE` | Max concurrent sessions per device | `5` |
 | `FERNGEIST_GATEWAY_SESSION_REAPER_INTERVAL_SECONDS` | Interval between reaper sweeps | `30` |
 | `FERNGEIST_GATEWAY_PROGRESS_INTERVAL_SECONDS` | Minimum seconds between live progress pushes while the agent is mid-turn | `15` |
+| `FERNGEIST_GATEWAY_FRAME_LOG` | Toggle raw ACP JSON-RPC frame logging; when `1`, every client→agent and agent→client frame is appended to `<log dir>/<agent>-agent.log` as newline-delimited JSON, rotated by `FERNGEIST_GATEWAY_LOG_MAX_BYTES`/`FERNGEIST_GATEWAY_LOG_MAX_BACKUPS` | unset (disabled) |
 
 ## Pairing controls
 
@@ -47,4 +48,5 @@ Ferngeist Gateway is configured through environment variables and persisted stat
 - `PUBLIC_BASE_URL` should match the URL clients use to reach the gateway.
 - In public mode, proof-of-possession is required unless legacy bearer credentials are explicitly enabled.
 - Push notifications are optional. With `FERNGEIST_GATEWAY_FCM_CREDENTIALS_FILE` set, the gateway delivers hybrid notification+data pushes via FCM HTTP v1; without it, notifications are logged only and the gateway runs normally. A bad or unreadable credentials file is non-fatal — the daemon logs a warning and degrades to log-only.
+- `FERNGEIST_GATEWAY_FRAME_LOG` is a debugging aid and captures **raw ACP conversation data** — including tool output, file diffs, and potentially secrets — in plaintext on disk (one file per agent, `<agent>-agent.log` in the log directory). Use it only for local debugging and do not enable it in shared deployments. Frame files are written with `0600` permissions.
 - Exact defaults can vary by platform and release build.
