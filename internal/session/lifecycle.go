@@ -133,7 +133,6 @@ func (rs *RuntimeSession) Create(ctx context.Context, runtimeID, deviceID, agent
 		Leaseholder: sessionID,
 		CreatedAt:   now,
 		pump:        pump,
-		leasedPipes: pipes,
 		cancelPump:  pumpCancel,
 	}
 	rs.sessions[sessionID] = sess
@@ -525,7 +524,10 @@ func (rs *RuntimeSession) Close(ctx context.Context, sessionID, deviceID string)
 
 	// Step 3: If the agent supports session/close, send one last ACP request
 	// so it can cancel in-progress work before the process is killed.
-	// Uses acp.CloseSessionRequest for typed param construction.
+	// Uses acp.CloseSessionRequest for typed param construction. Routed through
+	// the pump (WriteSessionClose) so the frame log records the teardown
+	// handshake; the frame is gateway-originated, so it deliberately skips the
+	// client-snooping in WriteToAgent.
 	if sess.pump.SupportsClose() {
 		closeMsg, _ := json.Marshal(struct {
 			JSONRPC string                  `json:"jsonrpc"`
@@ -538,7 +540,7 @@ func (rs *RuntimeSession) Close(ctx context.Context, sessionID, deviceID string)
 			ID:      "gw-close-" + sessionID,
 			Params:  acp.CloseSessionRequest{SessionId: acp.SessionId(sessionID)},
 		})
-		_ = sess.leasedPipes.WriteToAgent(closeMsg)
+		_ = sess.pump.WriteSessionClose(closeMsg)
 	}
 
 	delete(rs.sessions, sessionID)

@@ -151,9 +151,8 @@ type Session struct {
 	CreatedAt      time.Time
 	DisconnectedAt *time.Time // set when client detaches, nil when attached
 
-	pump        *StdioPump         // long-lived stdout drain + stdin writer
-	leasedPipes runtime.Pipes      // exclusive stdio lease
-	cancelPump  context.CancelFunc // stops the StdoutDrainLoop on session close
+	pump       *StdioPump         // long-lived stdout drain + stdin writer
+	cancelPump context.CancelFunc // stops the StdoutDrainLoop on session close
 
 	inboundSeq atomic.Int64 // monotonic counter for client->agent diagnostic frames
 

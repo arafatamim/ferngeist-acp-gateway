@@ -1265,6 +1265,95 @@ func TestCloseWithSupportsClose(t *testing.T) {
 	}
 }
 
+// TestCloseWithSupportsCloseRoutesThroughPump verifies the ACP session/close
+// frame is written via the pump (WriteSessionClose) — the only stdin writer —
+// rather than reaching the leased pipes directly, so the teardown handshake is
+// frame-logged like every other inbound frame.
+func TestCloseWithSupportsCloseRoutesThroughPump(t *testing.T) {
+	rs, store, _, _, ctx := setupTest(t, Config{})
+	defer rs.Shutdown()
+	defer store.Close()
+
+	sess, _, err := rs.Create(ctx, "rt-close-routed", "dev-close-routed", "agent-close-routed")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Install a pipe that records frames written to the agent.
+	var mu sync.Mutex
+	var writes []string
+	pump := sess.pump
+	pump.pipes = &runtime.LeasedPipes{
+		Stdin:     recordingWriteCloser{record: func(b []byte) { mu.Lock(); writes = append(writes, string(b)); mu.Unlock() }},
+		Stdout:    io.NopCloser(strings.NewReader("")),
+		RuntimeID: sess.RuntimeID,
+	}
+	pump.supportsClose.Store(true)
+
+	if err := rs.Close(ctx, sess.ID, "dev-close-routed"); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(writes) != 1 {
+		t.Fatalf("expected exactly one stdin write (session/close), got %d", len(writes))
+	}
+	var frame struct {
+		Method string `json:"method"`
+	}
+	if err := json.Unmarshal([]byte(writes[0]), &frame); err != nil {
+		t.Fatalf("Unmarshal(session/close): %v", err)
+	}
+	if frame.Method != "session/close" {
+		t.Errorf("stdin write method = %q, want %q", frame.Method, "session/close")
+	}
+}
+
+// recordingWriteCloser is an io.WriteCloser that records written bytes.
+type recordingWriteCloser struct {
+	record func([]byte)
+}
+
+func (w recordingWriteCloser) Write(p []byte) (int, error) {
+	w.record(p)
+	return len(p), nil
+}
+
+func (w recordingWriteCloser) Close() error { return nil }
+
+// TestWriteSessionCloseSkipsClientSnoop verifies that WriteSessionClose does
+// not contaminate the pump's client-derived caches: the gateway's own
+// session/close frame carries a params.sessionId that must never be captured as
+// the ACP session id (it is the resilient, non-ACP id).
+func TestWriteSessionCloseSkipsClientSnoop(t *testing.T) {
+	pump := &StdioPump{
+		pipes: &runtime.LeasedPipes{
+			Stdin:  nopWriteCloser{},
+			Stdout: io.NopCloser(strings.NewReader("")),
+		},
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	if err := pump.WriteSessionClose([]byte(`{"jsonrpc":"2.0","method":"session/close","params":{"sessionId":"gw-sess-123"}}`)); err != nil {
+		t.Fatalf("WriteSessionClose: %v", err)
+	}
+	if got := pump.AcpSessionID(); got != "" {
+		t.Errorf("AcpSessionID = %q after gateway session/close, want empty (client-derived only)", got)
+	}
+	if got := pump.AcpCwd(); got != "" {
+		t.Errorf("AcpCwd = %q after gateway session/close, want empty (client-derived only)", got)
+	}
+
+	// Sanity: WriteToAgent on the same frame WOULD capture it.
+	if err := pump.WriteToAgent([]byte(`{"jsonrpc":"2.0","method":"session/prompt","params":{"sessionId":"ses_client_1"}}`)); err != nil {
+		t.Fatalf("WriteToAgent: %v", err)
+	}
+	if got := pump.AcpSessionID(); got != "ses_client_1" {
+		t.Errorf("AcpSessionID = %q after WriteToAgent, want %q", got, "ses_client_1")
+	}
+}
+
 // --- Reaper ---
 
 func TestReaperLoopShutdown(t *testing.T) {

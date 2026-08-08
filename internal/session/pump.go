@@ -774,6 +774,19 @@ func (p *StdioPump) WriteToAgent(payload []byte) error {
 	return p.pipes.WriteToAgent(payload)
 }
 
+// WriteSessionClose sends the agent a session/close request during session
+// teardown. It is the only stdin write path that bypasses the client-snooping
+// in WriteToAgent — the frame is gateway-originated (not a client frame, so it
+// must never contaminate the acpSessionId/acpCwd caches) and it is always the
+// final frame before the process is killed. It still passes through the frame
+// log so the teardown handshake is auditable.
+func (p *StdioPump) WriteSessionClose(payload []byte) error {
+	if p.frameLog != nil {
+		p.frameLog.append(p.agentID, p.runtimeID, p.sessionID, "in", payload)
+	}
+	return p.pipes.WriteToAgent(payload)
+}
+
 // snoopInboundSessionID captures the ACP session id from a client→agent frame's
 // params.sessionId (session/prompt, session/load, session/cancel, …). The
 // outbound snoop only sees session/new responses, so on a resilient reconnect —
