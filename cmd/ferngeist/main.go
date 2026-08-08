@@ -25,6 +25,10 @@ var (
 	buildVersion = ""
 	buildCommit  = ""
 	buildTime    = ""
+	// updateChannel identifies the install channel (winget, brew, apt, rpm,
+	// aur, msi, self). "self" (or empty) installs run `ferngeist-gateway
+	// update`; package-manager installs pin the version and skip self-update.
+	updateChannel = ""
 )
 
 func requireBuildVersion() {
@@ -55,6 +59,13 @@ func main() {
 			return nil
 		},
 		Commands: []*cli.Command{
+			{
+				Name:  "update",
+				Usage: "check for and install the latest stable gateway release",
+				Action: func(_ context.Context, _ *cli.Command) error {
+					return runUpdate()
+				},
+			},
 			{
 				Name:  "daemon",
 				Usage: "run the gateway daemon",
