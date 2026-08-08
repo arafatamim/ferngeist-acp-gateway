@@ -87,19 +87,38 @@ func runUpdate() error {
 	}
 
 	fmt.Printf("Downloading %s\n", asset.BrowserDownloadURL)
-	if err := update.DownloadAndVerify(ctx, client, asset.BrowserDownloadURL, wantHex, binaryPath); err != nil {
+
+	// Stage the archive in a temporary file next to the binary path so
+	// DownloadAndVerify (which writes the raw asset and verifies its
+	// checksum) and ExtractArchive (which pulls the binary out) share the
+	// same destination directory and filesystem.
+	tmpArchive, err := os.CreateTemp(filepath.Dir(binaryPath), ".update-*")
+	if err != nil {
+		return fmt.Errorf("stage update archive: %w", err)
+	}
+	tmpArchiveName := tmpArchive.Name()
+	_ = tmpArchive.Close()
+	defer os.Remove(tmpArchiveName)
+
+	if err := update.DownloadAndVerify(ctx, client, asset.BrowserDownloadURL, wantHex, tmpArchiveName); err != nil {
 		return fmt.Errorf("download and verify update: %w", err)
 	}
 
-	// Reinstall (idempotent) so env/unit files are regenerated, then restart.
-	if err := manager.Install(service.InstallOptions{}); err != nil {
-		return fmt.Errorf("reinstall daemon service: %w", err)
+	// Stop the service before replacing the running binary. On Windows a
+	// running executable is locked and cannot be renamed over; on all
+	// platforms the process must be restarted to pick up the new binary.
+	if err := manager.Stop(); err != nil {
+		return fmt.Errorf("stop daemon service: %w", err)
 	}
+
+	if err := update.ExtractArchiveFromFile(tmpArchiveName, "ferngeist-gateway", binaryPath); err != nil {
+		return fmt.Errorf("extract update: %w", err)
+	}
+
+	fmt.Printf("Updated to %s; restarting the daemon service.\n", release.TagName)
 	if err := manager.Restart(); err != nil {
 		return fmt.Errorf("restart daemon service: %w", err)
 	}
-
-	fmt.Printf("Updated to %s and restarted the daemon service.\n", release.TagName)
 	return nil
 }
 
@@ -141,18 +160,18 @@ func parseTagParts(v string) []int {
 // mirroring the path layout in internal/service/{manager_linux,manager_darwin,
 // manager_windows}.go.
 func serviceBinaryPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve user home directory: %w", err)
+	}
 	switch runtime.GOOS {
 	case "darwin":
-		return filepath.Join(os.Getenv("HOME"), "Library", "Application Support", "Ferngeist Gateway", "bin", "ferngeist-gateway"), nil
+		return filepath.Join(home, "Library", "Application Support", "Ferngeist Gateway", "bin", "ferngeist-gateway"), nil
 	case "linux":
-		return filepath.Join(os.Getenv("HOME"), ".local", "share", "ferngeist-gateway", "bin", "ferngeist-gateway"), nil
+		return filepath.Join(home, ".local", "share", "ferngeist-gateway", "bin", "ferngeist-gateway"), nil
 	case "windows":
 		base := os.Getenv("LocalAppData")
 		if base == "" {
-			home, err := os.UserHomeDir()
-			if err != nil {
-				return "", err
-			}
 			base = filepath.Join(home, "AppData", "Local")
 		}
 		return filepath.Join(base, "FerngeistGateway", "service", "bin", "ferngeist-gateway.exe"), nil

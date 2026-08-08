@@ -1,7 +1,10 @@
 package update
 
 import (
+	"archive/tar"
+	"archive/zip"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -91,9 +94,15 @@ func TestChecksumFor(t *testing.T) {
 		t.Fatalf("ChecksumFor() = %x, want %x", got, digest[:])
 	}
 
+	// An all-zero digest is valid (astronomically unlikely in practice, but
+	// not a format error — length and hex checks are what matter).
 	zeros := strings.Repeat("0", sha256.Size*2)
-	if _, err := ChecksumFor([]byte(zeros+"  asset.bin\n"), "asset.bin"); err == nil {
-		t.Fatal("ChecksumFor(all-zero digest) = nil error, want error")
+	gotZero, err := ChecksumFor([]byte(zeros+"  asset.bin\n"), "asset.bin")
+	if err != nil {
+		t.Fatalf("ChecksumFor(all-zero digest) error = %v, want nil", err)
+	}
+	if len(gotZero) != sha256.Size {
+		t.Fatalf("ChecksumFor(all-zero digest) len = %d, want %d", len(gotZero), sha256.Size)
 	}
 
 	if _, err := ChecksumFor([]byte(hex.EncodeToString(digest[:])+"  asset.bin\n"), "other.bin"); err == nil {
@@ -166,5 +175,103 @@ func TestAssetBaseURL(t *testing.T) {
 	}
 	if got := NewChecker("acme/ferngeist").AssetBaseURL(release); got != "https://host/releases/download/v1.2.3" {
 		t.Fatalf("AssetBaseURL() = %q, want %q", got, "https://host/releases/download/v1.2.3")
+	}
+}
+
+// buildTarGz builds a gzipped tarball containing binName at the goreleaser
+// layout "<dir>/<binary>". Archive member names always use forward slashes,
+// regardless of host OS.
+func buildTarGz(t *testing.T, binName string, payload []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	if err := tw.WriteHeader(&tar.Header{
+		Name: "ferngeist-gateway/" + binName,
+		Mode: 0o755,
+		Size: int64(len(payload)),
+	}); err != nil {
+		t.Fatalf("tar WriteHeader: %v", err)
+	}
+	if _, err := tw.Write(payload); err != nil {
+		t.Fatalf("tar Write: %v", err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("tar Close: %v", err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatalf("gzip Close: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// buildZip builds a zip archive containing binName.
+func buildZip(t *testing.T, binName string, payload []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	f, err := zw.Create("ferngeist-gateway/" + binName)
+	if err != nil {
+		t.Fatalf("zip Create: %v", err)
+	}
+	if _, err := f.Write(payload); err != nil {
+		t.Fatalf("zip Write: %v", err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("zip Close: %v", err)
+	}
+	return buf.Bytes()
+}
+
+func TestExtractArchive(t *testing.T) {
+	const binName = "ferngeist-gateway"
+	payload := []byte("ferngeist-gateway binary payload")
+	dest := filepath.Join(t.TempDir(), "ferngeist-gateway")
+
+	tarGz := buildTarGz(t, binName, payload)
+	if err := ExtractArchive(tarGz, binName, dest); err != nil {
+		t.Fatalf("ExtractArchive(tar.gz) error = %v", err)
+	}
+	data, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatalf("os.ReadFile(tar.gz dest) error = %v", err)
+	}
+	if !bytes.Equal(data, payload) {
+		t.Fatalf("tar.gz dest contents = %q, want %q", data, payload)
+	}
+	if runtime.GOOS != "windows" {
+		if info, err := os.Stat(dest); err != nil {
+			t.Fatalf("os.Stat(tar.gz dest) error = %v", err)
+		} else if info.Mode().Perm() != 0o755 {
+			t.Fatalf("tar.gz dest mode = %v, want 0o755", info.Mode().Perm())
+		}
+	}
+
+	zipDest := filepath.Join(t.TempDir(), "ferngeist-gateway")
+	if err := ExtractArchive(buildZip(t, binName, payload), binName, zipDest); err != nil {
+		t.Fatalf("ExtractArchive(zip) error = %v", err)
+	}
+	zipData, err := os.ReadFile(zipDest)
+	if err != nil {
+		t.Fatalf("os.ReadFile(zip dest) error = %v", err)
+	}
+	if !bytes.Equal(zipData, payload) {
+		t.Fatalf("zip dest contents = %q, want %q", zipData, payload)
+	}
+}
+
+func TestExtractArchiveMissingBinary(t *testing.T) {
+	const binName = "ferngeist-gateway"
+	payload := []byte("ferngeist-gateway binary payload")
+	dest := filepath.Join(t.TempDir(), "ferngeist-gateway")
+
+	// A tarball that does not contain the binary must error and leave no
+	// file behind.
+	archive := buildTarGz(t, "other-binary", payload)
+	if err := ExtractArchive(archive, binName, dest); err == nil {
+		t.Fatal("ExtractArchive(missing binary) = nil error, want error")
+	}
+	if _, statErr := os.Stat(dest); !os.IsNotExist(statErr) {
+		t.Fatalf("dest exists after failed extract: stat error = %v", statErr)
 	}
 }

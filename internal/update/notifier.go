@@ -40,10 +40,10 @@ func NewNotifier(checker UpdateChecker, pushSvc push.PushService, deviceIDs func
 // configured interval. Failures are logged (best-effort) and never crash the
 // daemon.
 func (n *Notifier) Run(ctx context.Context, currentVersion string) {
-	// First check immediately (async so a slow network never blocks boot).
-	go func() {
-		_ = n.CheckAndNotify(ctx, currentVersion)
-	}()
+	// First check immediately. Run itself is expected to be launched in its
+	// own goroutine (see daemon.Run), so a slow network does not block boot
+	// and the context cancels it when the daemon shuts down.
+	_ = n.CheckAndNotify(ctx, currentVersion)
 	ticker := time.NewTicker(n.Interval)
 	defer ticker.Stop()
 	for {

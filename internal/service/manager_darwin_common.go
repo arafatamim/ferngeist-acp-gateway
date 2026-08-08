@@ -27,12 +27,10 @@ const (
 
 // darwinPlistTemplate is the launchd per-user LaunchAgent plist. It starts at
 // login (RunAtLoad), keeps the daemon alive, and carries the runtime
-// environment inline so launchd never needs editing. The trailing comment
-// records the env file path written by writeDarwinEnvFile for reference.
+// environment inline so launchd never needs editing.
 const darwinPlistTemplate = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
-<!-- Environment file: %s -->
 <dict>
 	<key>Label</key>
 	<string>%s</string>
@@ -355,7 +353,6 @@ func writeDarwinPlist(paths darwinPaths, options InstallOptions) error {
 
 	plistBody := fmt.Sprintf(
 		darwinPlistTemplate,
-		paths.envPath,
 		darwinLabel,
 		paths.binaryPath,
 		escapePlist(listenAddr),

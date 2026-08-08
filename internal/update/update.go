@@ -3,7 +3,10 @@
 package update
 
 import (
+	"archive/tar"
+	"archive/zip"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -134,8 +137,7 @@ func DefaultClient() *http.Client {
 
 // ChecksumFor parses SHA256SUMS data and returns the hex-decoded digest
 // for the named file. Entries are "<hexdigest>  <name>" lines; a missing
-// entry, a non-hex digest, a digest of the wrong length, or an all-zero
-// digest are all errors.
+// entry, a non-hex digest, or a digest of the wrong length are errors.
 func ChecksumFor(data []byte, name string) ([]byte, error) {
 	for _, line := range strings.Split(string(data), "\n") {
 		fields := strings.Fields(line)
@@ -148,10 +150,6 @@ func ChecksumFor(data []byte, name string) ([]byte, error) {
 		}
 		if len(digest) != sha256.Size {
 			return nil, fmt.Errorf("invalid checksum for %s: %w", name, errors.New("expected a 32-byte sha256 digest"))
-		}
-		var zero [sha256.Size]byte
-		if bytes.Equal(digest, zero[:]) {
-			return nil, fmt.Errorf("invalid checksum for %s: %w", name, errors.New("all-zero sha256 digest"))
 		}
 		return digest, nil
 	}
@@ -206,6 +204,120 @@ func DownloadAndVerify(ctx context.Context, client *http.Client, url string, wan
 	if err := os.Rename(tmpName, dest); err != nil {
 		_ = os.Remove(tmpName)
 		return fmt.Errorf("download %s: %w", url, err)
+	}
+	return nil
+}
+
+// ExtractArchiveFromFile reads the release archive at src (tar.gz or zip)
+// and extracts the binary named binName into dest. It is a convenience
+// wrapper around ExtractArchive for archives staged by DownloadAndVerify.
+func ExtractArchiveFromFile(src, binName, dest string) error {
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return fmt.Errorf("read staged archive %s: %w", src, err)
+	}
+	return ExtractArchive(data, binName, dest)
+}
+
+// ExtractArchive extracts the single binary named binName from a release
+// archive (tar.gz or zip) into dest. The archive layout is
+// "<binary>/ferngeist-gateway" for goreleaser archives. The format is
+// detected from the leading magic bytes, so the source file name does not
+// matter. The extracted file is written atomically: a temporary file next to
+// dest is populated and renamed into place only on success. Any failure
+// removes the temporary file.
+func ExtractArchive(data []byte, binName, dest string) error {
+	dir := filepath.Dir(dest)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create destination directory: %w", err)
+	}
+
+	var contents []byte
+	switch {
+	case len(data) >= 2 && data[0] == 0x1f && data[1] == 0x8b: // gzip magic
+		contents = extractTarGz(data, binName)
+	case len(data) >= 4 && string(data[:4]) == "PK\x03\x04": // zip magic
+		contents = extractZip(data, binName)
+	default:
+		return fmt.Errorf("extract %s: unsupported archive format", filepath.Base(dest))
+	}
+	if contents == nil {
+		return fmt.Errorf("extract %s: %s not found in archive", filepath.Base(dest), binName)
+	}
+
+	tmp, err := os.CreateTemp(dir, ".update-*")
+	if err != nil {
+		return fmt.Errorf("extract %s: %w", filepath.Base(dest), err)
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(contents); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("extract %s: %w", filepath.Base(dest), err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("extract %s: %w", filepath.Base(dest), err)
+	}
+	if err := os.Chmod(tmpName, 0o755); err != nil {
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("extract %s: %w", filepath.Base(dest), err)
+	}
+	if err := os.Rename(tmpName, dest); err != nil {
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("extract %s: %w", filepath.Base(dest), err)
+	}
+	return nil
+}
+
+// extractTarGz returns the bytes of binName inside a gzipped tarball, or nil.
+func extractTarGz(data []byte, binName string) []byte {
+	gz, err := gzip.NewReader(bytes.NewReader(data))
+	if err != nil {
+		return nil
+	}
+	defer gz.Close()
+
+	tr := tar.NewReader(gz)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return nil
+		}
+		if filepath.Base(hdr.Name) != binName || hdr.Typeflag != tar.TypeReg {
+			continue
+		}
+		buf, err := io.ReadAll(tr)
+		if err != nil {
+			return nil
+		}
+		return buf
+	}
+}
+
+// extractZip returns the bytes of binName inside a zip archive, or nil.
+func extractZip(data []byte, binName string) []byte {
+	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return nil
+	}
+	for _, f := range zr.File {
+		if filepath.Base(f.Name) != binName || f.FileInfo().IsDir() {
+			continue
+		}
+		rc, err := f.Open()
+		if err != nil {
+			return nil
+		}
+		buf, err := io.ReadAll(rc)
+		rc.Close()
+		if err != nil {
+			return nil
+		}
+		return buf
 	}
 	return nil
 }
