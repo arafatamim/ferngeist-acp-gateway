@@ -180,6 +180,11 @@ type FailureSummary struct {
 
 	// RecentLogLines contains the last few log entries before the failure for debugging.
 	RecentLogLines []LogEntry `json:"recentLogLines"`
+
+	// CleanExit marks a summary built from a clean (exit code 0) process exit
+	// record rather than a crash. Such records are persisted for diagnostics
+	// but excluded from the RecentFailures view.
+	CleanExit bool `json:"cleanExit,omitempty"`
 }
 
 // ConnectDescriptor contains the connection parameters needed to establish
@@ -839,6 +844,11 @@ func (s *Supervisor) Summary() Summary {
 			s.logger.Warn("load runtime failures failed", "error", err)
 		} else {
 			for _, record := range persistedFailures {
+				// Clean exits are diagnostics, not failures: they must not
+				// surface in the failure view.
+				if record.CleanExit {
+					continue
+				}
 				// Skip if we already have a more recent in-memory failure
 				if _, exists := failuresByRuntimeID[record.RuntimeID]; exists {
 					continue
@@ -998,6 +1008,11 @@ func (s *Supervisor) handleProcessExit(runtimeID, agentID string, handle *proces
 			exitCallback(runtimeID)
 		}
 		s.persistRuntime(runtime)
+		s.logger.Error("agent process exited unexpectedly; restart scheduled",
+			"runtime_id", runtimeID, "agent_id", agentID,
+			"error", handle.waitErr.Error(),
+			"restart_mode", handle.agent.Launch.Restart.Mode,
+			"attempt", runtime.RestartAttempts)
 		s.appendLog(runtimeID, LogEntry{
 			Timestamp: s.now().UTC(),
 			Stream:    "gateway",
@@ -1032,6 +1047,17 @@ func (s *Supervisor) handleProcessExit(runtimeID, agentID string, handle *proces
 			exitCallback(runtimeID)
 		}
 		s.persistRuntime(runtime)
+		// Log the unexpected death at ERROR so it is visible in the daemon log
+		// (not just persisted to the failure table), with the exit reason.
+		s.logger.Error("agent process exited unexpectedly",
+			"runtime_id", runtimeID, "agent_id", agentID,
+			"error", handle.waitErr.Error(),
+			"restart_mode", handle.agent.Launch.Restart.Mode, "attempts", runtime.RestartAttempts)
+		s.appendLog(runtimeID, LogEntry{
+			Timestamp: s.now().UTC(),
+			Stream:    "gateway",
+			Message:   fmt.Sprintf("agent process exited unexpectedly: %s", handle.waitErr.Error()),
+		})
 		if runtime.CircuitOpen {
 			s.appendLog(runtimeID, LogEntry{
 				Timestamp: s.now().UTC(),
@@ -1044,7 +1070,10 @@ func (s *Supervisor) handleProcessExit(runtimeID, agentID string, handle *proces
 		return
 	}
 
-	// Clean exit (no error) - mark as stopped
+	// Clean exit (no error) - mark as stopped. Persist the exit so it leaves a
+	// diagnostic trace: before this, clean agent exits (the silent-death case)
+	// produced no record at all. The persisted record is flagged clean so the
+	// failure view does not treat it as a crash.
 	runtime.Status = StatusStopped
 	runtime.PID = 0
 	runtime.StoppedAt = s.now().UTC()
@@ -1054,6 +1083,12 @@ func (s *Supervisor) handleProcessExit(runtimeID, agentID string, handle *proces
 		exitCallback(runtimeID)
 	}
 	s.persistRuntime(runtime)
+	s.persistCleanExit(runtimeID, runtime, s.recentLogs(runtimeID, 5), runtime.StoppedAt)
+	s.appendLog(runtimeID, LogEntry{
+		Timestamp: s.now().UTC(),
+		Stream:    "gateway",
+		Message:   "agent process exited cleanly (exit code 0)",
+	})
 }
 
 // pruneStoppedRuntimesLocked removes stopped runtimes after the retention
@@ -1108,6 +1143,15 @@ func (s *Supervisor) restartAfterBackoff(runtimeInfo Runtime, agent catalog.Agen
 
 	s.persistRuntime(runtimeInfo)
 	s.persistFailure(runtimeInfo.ID, runtimeInfo, s.recentLogs(runtimeInfo.ID, 5), s.now().UTC())
+	s.logger.Error("runtime restart failed",
+		"runtime_id", runtimeInfo.ID, "agent_id", runtimeInfo.AgentID,
+		"error", err.Error(),
+		"attempts", runtimeInfo.RestartAttempts)
+	s.appendLog(runtimeInfo.ID, LogEntry{
+		Timestamp: s.now().UTC(),
+		Stream:    "gateway",
+		Message:   fmt.Sprintf("runtime restart failed: %s", err.Error()),
+	})
 }
 
 // cleanupFailedLaunch removes a runtime that never reached running state and
@@ -1129,6 +1173,14 @@ func (s *Supervisor) cleanupFailedLaunch(runtimeID, agentID string, err error) {
 	runtimeInfo.PID = 0
 	s.persistRuntime(runtimeInfo)
 	s.persistFailure(runtimeID, runtimeInfo, s.recentLogs(runtimeID, 5), s.now().UTC())
+	s.logger.Error("agent process launch failed",
+		"runtime_id", runtimeID, "agent_id", agentID,
+		"error", err.Error())
+	s.appendLog(runtimeID, LogEntry{
+		Timestamp: s.now().UTC(),
+		Stream:    "gateway",
+		Message:   fmt.Sprintf("agent process launch failed: %s", err.Error()),
+	})
 }
 
 // captureLogs copies process output into the in-memory ring buffer while also
@@ -1304,6 +1356,7 @@ func failureSummaryFromRecord(record storage.RuntimeFailureRecord) FailureSummar
 		CreatedAt:      record.CreatedAt,
 		FailedAt:       record.FailedAt,
 		RecentLogLines: logLines,
+		CleanExit:      record.CleanExit,
 	}
 }
 
@@ -1333,6 +1386,37 @@ func (s *Supervisor) persistFailure(runtimeID string, runtime Runtime, logLines 
 		LogPreview: string(logPreview),
 	}); err != nil {
 		s.logger.Error("persist runtime failure failed", "runtime_id", runtimeID, "error", err)
+	}
+}
+
+// persistCleanExit records a clean (exit code 0) process exit so every agent
+// death leaves a diagnostic trace, not just crashes. The record is stored in
+// the same table as failures but flagged with CleanExit so the failure view
+// can filter it out. "Clean" here means the supervisor saw no wait error —
+// the process may still have been killed externally in a way Windows reports
+// as a normal exit.
+func (s *Supervisor) persistCleanExit(runtimeID string, runtime Runtime, logLines []LogEntry, exitedAt time.Time) {
+	if s.store == nil {
+		return
+	}
+
+	logPreview, err := json.Marshal(logLines)
+	if err != nil {
+		s.logger.Warn("serialize runtime clean exit log preview failed", "runtime_id", runtimeID, "error", err)
+		return
+	}
+
+	if err := s.store.SaveRuntimeFailure(context.Background(), storage.RuntimeFailureRecord{
+		RuntimeID:  runtimeID,
+		AgentID:    runtime.AgentID,
+		AgentName:  runtime.AgentName,
+		LastError:  "exit status 0 (clean)",
+		CreatedAt:  runtime.CreatedAt,
+		FailedAt:   exitedAt,
+		LogPreview: string(logPreview),
+		CleanExit:  true,
+	}); err != nil {
+		s.logger.Error("persist runtime clean exit failed", "runtime_id", runtimeID, "error", err)
 	}
 }
 

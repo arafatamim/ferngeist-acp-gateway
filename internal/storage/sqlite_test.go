@@ -165,6 +165,65 @@ func TestFailureRecordRoundtrip(t *testing.T) {
 	if failures[0].LastError != "process exited with status 1" {
 		t.Fatalf("failures[0].LastError = %q", failures[0].LastError)
 	}
+	if failures[0].CleanExit {
+		t.Fatal("failures[0].CleanExit = true, want false for a crash record")
+	}
+}
+
+// TestCleanExitRecordRoundtrip verifies that a clean-exit record round-trips
+// with the CleanExit flag preserved, distinct from a crash record.
+func TestCleanExitRecordRoundtrip(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "clean_exit_rt.db"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	failedAt := time.Date(2026, 3, 25, 10, 7, 0, 0, time.UTC)
+	if err := store.SaveRuntimeFailure(ctx, RuntimeFailureRecord{
+		RuntimeID:  "run-clean",
+		AgentID:    "mock-acp",
+		AgentName:  "Mock ACP",
+		LastError:  "exit status 0 (clean)",
+		CreatedAt:  time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC),
+		FailedAt:   failedAt,
+		LogPreview: "[]",
+		CleanExit:  true,
+	}); err != nil {
+		t.Fatalf("SaveRuntimeFailure() error = %v", err)
+	}
+
+	records, err := store.ListRuntimeFailureRecords(ctx, 5)
+	if err != nil {
+		t.Fatalf("ListRuntimeFailureRecords() error = %v", err)
+	}
+	found := false
+	for _, f := range records {
+		if f.RuntimeID == "run-clean" {
+			found = true
+			if !f.CleanExit {
+				t.Fatal("CleanExit = false, want true for a clean-exit record")
+			}
+			if f.LastError != "exit status 0 (clean)" {
+				t.Fatalf("LastError = %q, want %q", f.LastError, "exit status 0 (clean)")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("clean-exit record not found in persisted store")
+	}
+
+	// The failures view must exclude clean exits.
+	failures, err := store.ListRecentRuntimeFailures(ctx, 5)
+	if err != nil {
+		t.Fatalf("ListRecentRuntimeFailures() error = %v", err)
+	}
+	for _, f := range failures {
+		if f.RuntimeID == "run-clean" {
+			t.Fatal("clean-exit record surfaced in ListRecentRuntimeFailures")
+		}
+	}
 }
 
 // ==========================================================================

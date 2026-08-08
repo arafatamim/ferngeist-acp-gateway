@@ -74,7 +74,13 @@ const ProtocolVersion = "v1"
 
 // Security and request limits.
 const (
-	acpWebSocketReadLimit    = 1024 * 1024               // max ACP message size (1MB)
+	// acpWebSocketReadLimit caps a single ACP message (client->agent) at 16 MiB.
+	// ACP frames are newline-delimited JSON with no protocol-defined size bound;
+	// client frames (initialize, session/load requests, prompts) are small, so
+	// this is a DoS guard, not a functional limit. It was raised from 1 MiB
+	// because inbound frames can legitimately carry large payloads and the old
+	// value silently closed the socket (StatusMessageTooBig) with no log.
+	acpWebSocketReadLimit    = 16 * 1024 * 1024
 	acpWebSocketWriteTimeout = 30 * time.Second          // write deadline per WebSocket frame — keep in sync with session/pump.go:acpWebSocketWriteTimeout
 	jsonBodyLimit            = int64(16 * 1024)          // max JSON request body size
 	pairingMaxAttempts       = 5                         // failures before temporary lockout

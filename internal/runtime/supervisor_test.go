@@ -1872,6 +1872,134 @@ func TestPersistFailureWithStore(t *testing.T) { // TestPersistFailureWithStore 
 	}
 }
 
+func TestPersistCleanExitWithStore(t *testing.T) { // TestPersistCleanExitWithStore verifies that persistCleanExit writes a clean-flagged record to the storage backend.
+	store, err := storage.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	supervisor := NewSupervisor(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	supervisor.store = store
+	now := time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)
+	supervisor.now = func() time.Time { return now }
+
+	runtime := Runtime{
+		ID:        "run-clean",
+		AgentID:   "mock-acp",
+		AgentName: "Mock ACP",
+		Status:    StatusStopped,
+		CreatedAt: now,
+	}
+	supervisor.runtimes[runtime.ID] = runtime
+
+	supervisor.persistCleanExit(runtime.ID, runtime, []LogEntry{
+		{Timestamp: now, Stream: "stderr", Message: "bye"},
+	}, now)
+
+	records, err := store.ListRuntimeFailureRecords(context.Background(), 5)
+	if err != nil {
+		t.Fatalf("ListRuntimeFailureRecords() error = %v", err)
+	}
+	found := false
+	for _, f := range records {
+		if f.RuntimeID == runtime.ID {
+			found = true
+			if !f.CleanExit {
+				t.Fatalf("CleanExit = false, want true for %q", f.RuntimeID)
+			}
+			if f.LastError != "exit status 0 (clean)" {
+				t.Fatalf("LastError = %q, want %q", f.LastError, "exit status 0 (clean)")
+			}
+			break
+		}
+	}
+	if !found {
+		t.Fatal("clean-exit record not found in persisted store")
+	}
+}
+
+func TestHandleProcessExitCleanExitPersistsRecord(t *testing.T) { // TestHandleProcessExitCleanExitPersistsRecord verifies that a clean process exit writes a clean-flagged record via handleProcessExit.
+	store, err := storage.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	supervisor := NewSupervisor(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	supervisor.store = store
+	now := time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)
+	supervisor.now = func() time.Time { return now }
+
+	done := make(chan struct{})
+	close(done)
+	handle := &processHandle{
+		done:    done,
+		waitErr: nil,
+		agent: catalog.Agent{
+			Launch: catalog.LaunchConfig{
+				Restart: catalog.RestartConfig{Mode: "never"},
+			},
+		},
+	}
+
+	supervisor.runtimes["test-id"] = Runtime{
+		ID: "test-id", AgentID: "test", AgentName: "Test", Status: StatusRunning, CreatedAt: now,
+	}
+	supervisor.runtimeByAgent["test"] = "test-id"
+	supervisor.logs["test-id"] = []LogEntry{}
+
+	supervisor.handleProcessExit("test-id", "test", handle)
+
+	records, err := store.ListRuntimeFailureRecords(context.Background(), 5)
+	if err != nil {
+		t.Fatalf("ListRuntimeFailureRecords() error = %v", err)
+	}
+	found := false
+	for _, f := range records {
+		if f.RuntimeID == "test-id" {
+			found = true
+			if !f.CleanExit {
+				t.Fatal("CleanExit = false, want true for clean exit")
+			}
+			break
+		}
+	}
+	if !found {
+		t.Fatal("clean-exit record not found after handleProcessExit")
+	}
+}
+
+func TestSummaryExcludesCleanExitRecords(t *testing.T) { // TestSummaryExcludesCleanExitRecords verifies that Summary.RecentFailures does not surface clean-exit records.
+	store, err := storage.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	now := time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)
+	if err := store.SaveRuntimeFailure(context.Background(), storage.RuntimeFailureRecord{
+		RuntimeID:  "run-clean",
+		AgentID:    "mock-acp",
+		AgentName:  "Mock ACP",
+		LastError:  "exit status 0 (clean)",
+		CreatedAt:  now,
+		FailedAt:   now,
+		LogPreview: "[]",
+		CleanExit:  true,
+	}); err != nil {
+		t.Fatalf("SaveRuntimeFailure() error = %v", err)
+	}
+
+	supervisor := NewSupervisorWithBaseDir(slog.New(slog.NewTextHandler(io.Discard, nil)), t.TempDir(), store)
+	supervisor.now = func() time.Time { return now }
+
+	summary := supervisor.Summary()
+	if len(summary.RecentFailures) != 0 {
+		t.Fatalf("len(RecentFailures) = %d, want 0 (clean exits must not surface as failures)", len(summary.RecentFailures))
+	}
+}
+
 // --- restartAfterBackoff ---
 
 func TestRestartAfterBackoffLaunchFails(t *testing.T) { // TestRestartAfterBackoffLaunchFails verifies that restartAfterBackoff marks the runtime as failed when the launch itself fails.

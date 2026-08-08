@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/session"
@@ -177,5 +178,18 @@ func (s *Server) handleSessionWebSocket(w http.ResponseWriter, r *http.Request, 
 			s.sessionSvc.LogInbound(sessionID, string(payload))
 		}, done)
 
-	<-done
+	// Log why the socket ended. Before this, every non-normal closure was
+	// silent: a read-limit hit (StatusMessageTooBig), a write failure, or a
+	// half-open peer looked identical to an agent death in the logs.
+	err = <-done
+	if err != nil && !errors.Is(err, io.EOF) {
+		if closeStatus := websocket.CloseStatus(err); closeStatus == websocket.StatusMessageTooBig {
+			s.logger.Warn("acp websocket closed: inbound message exceeds read limit",
+				"session_id", sessionID, "runtime_id", runtimeID,
+				"read_limit_bytes", acpWebSocketReadLimit, "close_status", closeStatus)
+		} else {
+			s.logger.Warn("acp websocket closed with error",
+				"session_id", sessionID, "runtime_id", runtimeID, "error", err)
+		}
+	}
 }
