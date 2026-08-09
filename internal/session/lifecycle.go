@@ -473,9 +473,21 @@ func (rs *RuntimeSession) DetachClient(sessionID string, gen int64) error {
 	}
 	sess.mu.Unlock()
 
-	// Persist after the critical section — the DB write must not serialize
-	// other session operations, and it is best-effort.
-	rs.store.SaveSession(context.Background(), record)
+	// Persist while holding rs.mu so a concurrent crash reclamation
+	// (handleProcessExit, which deletes the session and its store record under
+	// rs.mu) cannot interleave: if the session has been reclaimed, the
+	// membership check fails and we skip the save instead of resurrecting a
+	// deleted session with a stale "disconnected" record. Bound the write so a
+	// slow store cannot stall session operations indefinitely.
+	rs.mu.Lock()
+	if _, ok := rs.sessions[sessionID]; !ok {
+		rs.mu.Unlock()
+		return ErrSessionNotFound
+	}
+	saveCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	rs.store.SaveSession(saveCtx, record)
+	cancel()
+	rs.mu.Unlock()
 
 	return nil
 }

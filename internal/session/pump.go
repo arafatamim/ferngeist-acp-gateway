@@ -755,7 +755,14 @@ func (p *StdioPump) startWriterLocked(conn *websocket.Conn) {
 // queue is bounded, so the drain loop never blocks on it; a client that cannot
 // keep up has frames dropped (see handleStdoutLine).
 func (p *StdioPump) clientWriterLoop(ctx context.Context, conn *websocket.Conn) {
-	ch := p.writerCh // captured at start; stopWriterLocked nil's the field
+	// Capture the queue under clientMu: startWriterLocked sets writerCh while
+	// holding the lock, and stopWriterLocked nils it under the same lock (on
+	// Attach/Detach/drain-loop exit). Reading it here without the lock would
+	// race those writers. The captured channel stays valid for this
+	// goroutine's lifetime — the writer only ever reads from it.
+	p.clientMu.Lock()
+	ch := p.writerCh
+	p.clientMu.Unlock()
 	for {
 		select {
 		case <-ctx.Done():

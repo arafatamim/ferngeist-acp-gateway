@@ -88,9 +88,14 @@ func TestDarwinInstallWritesPlist(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(plist)
-	for _, want := range []string{"RunAtLoad", "KeepAlive", "ProgramArguments", paths.binaryPath, paths.envPath} {
+	for _, want := range []string{"RunAtLoad", "KeepAlive", "ProgramArguments", "EnvironmentVariables", paths.binaryPath} {
 		if !strings.Contains(text, want) {
 			t.Errorf("plist missing %q; full plist:\n%s", want, text)
 		}
+	}
+	// The env is carried inline (launchd never reads the env file), so the
+	// plist must not reference the env path.
+	if strings.Contains(text, paths.envPath) {
+		t.Errorf("plist unexpectedly references env file %q; env must be inline", paths.envPath)
 	}
 }

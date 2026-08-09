@@ -844,7 +844,7 @@ func TestProtectedEndpointRequiresCredential(t *testing.T) {
 }
 
 func TestAgentsEndpointIncludesRuntimeState(t *testing.T) {
-	baseDir := t.TempDir()
+	baseDir := newHarnessBaseDir(t)
 	buildMockAgent(t, baseDir)
 
 	server := newTestServerWithBaseDir(baseDir)
@@ -1210,7 +1210,7 @@ func TestDiagnosticsSummaryIncludesPersistedFailures(t *testing.T) {
 }
 
 func TestDiagnosticsExportIncludesGatewayLogsAndRuntimeLogs(t *testing.T) {
-	baseDir := t.TempDir()
+	baseDir := newHarnessBaseDir(t)
 	buildMockAgent(t, baseDir)
 
 	logSvc, err := gatewaylogging.NewService(filepath.Join(baseDir, "logs"), "gateway.log", 1024*1024, 2)
@@ -1327,7 +1327,7 @@ func TestDiagnosticsExportRequiresElevatedScopeByDefault(t *testing.T) {
 }
 
 func TestRuntimeLifecycleEndpoints(t *testing.T) {
-	baseDir := t.TempDir()
+	baseDir := newHarnessBaseDir(t)
 	buildMockAgent(t, baseDir)
 
 	server := newTestServerWithBaseDir(baseDir)
@@ -1481,7 +1481,7 @@ func TestRuntimeLifecycleEndpoints(t *testing.T) {
 }
 
 func TestRuntimeRestartEndpointReturnsFreshConnectDescriptor(t *testing.T) {
-	baseDir := t.TempDir()
+	baseDir := newHarnessBaseDir(t)
 	buildMockAgent(t, baseDir)
 
 	server := newConfiguredTestServerWithBaseDir(baseDir, config.Config{ListenAddr: "127.0.0.1:0", AllowRuntimeRestartEnv: true})
@@ -1530,7 +1530,7 @@ func TestRuntimeRestartEndpointReturnsFreshConnectDescriptor(t *testing.T) {
 }
 
 func TestRuntimeRestartWithEnvRequiresElevatedScopeByDefault(t *testing.T) {
-	baseDir := t.TempDir()
+	baseDir := newHarnessBaseDir(t)
 	buildMockAgent(t, baseDir)
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -1589,7 +1589,7 @@ func TestRuntimeRestartWithEnvRequiresElevatedScopeByDefault(t *testing.T) {
 }
 
 func TestExternalStdioRuntimeLifecycleEndpoints(t *testing.T) {
-	baseDir := t.TempDir()
+	baseDir := newHarnessBaseDir(t)
 	binDir := filepath.Join(baseDir, "bin")
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll() error = %v", err)
@@ -2030,10 +2030,38 @@ type sessionTestHarness struct {
 	tokenSvc  *token.Service
 }
 
+// newHarnessBaseDir creates a temp dir for test harnesses whose cleanup is
+// tolerant of transient RemoveAll failures.
+//
+// On Linux CI runners /tmp is an overlayfs, where os.RemoveAll can transiently
+// fail with "directory not empty" (ENOTEMPTY) if a concurrent process creates
+// an entry in the tree mid-walk — Go's built-in single retry is not always
+// enough under heavy parallel load. t.TempDir() has no retry, so a flaky CI
+// fails on cleanup of the mock-agent tree. This helper retries the removal.
+func newHarnessBaseDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "ferngeist-harness-*")
+	if err != nil {
+		t.Fatalf("MkdirTemp() error = %v", err)
+	}
+	t.Cleanup(func() {
+		for attempt := 0; attempt < 5; attempt++ {
+			if err := os.RemoveAll(dir); err == nil {
+				return
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		if err := os.RemoveAll(dir); err != nil {
+			t.Logf("cleanup: RemoveAll(%s) error = %v", dir, err)
+		}
+	})
+	return dir
+}
+
 func newSessionTestHarness(t *testing.T) *sessionTestHarness {
 	t.Helper()
 
-	baseDir := t.TempDir()
+	baseDir := newHarnessBaseDir(t)
 	buildMockAgent(t, baseDir)
 
 	store, err := storage.Open(filepath.Join(baseDir, "test.db"))
@@ -2114,11 +2142,13 @@ func newSessionTestHarness(t *testing.T) *sessionTestHarness {
 		t.Fatalf("Unmarshal(start) error = %v", err)
 	}
 
+	// Stop the agent runtime directly and synchronously so the process is
+	// guaranteed dead before t.TempDir() removal runs. See
+	// newResilientTestHarness for why the HTTP stop is not used here.
 	t.Cleanup(func() {
-		stopReq := httptest.NewRequest(http.MethodPost, "/v1/agents/mock-acp/stop", nil)
-		stopReq.Header.Set("Authorization", "Bearer "+completeResp.Token)
-		stopRec := httptest.NewRecorder()
-		server.Handler().ServeHTTP(stopRec, stopReq)
+		if _, err := server.runtime.StopByRuntimeID(startRuntimeResp.Runtime.ID); err != nil {
+			t.Logf("cleanup stop runtime: %v", err)
+		}
 	})
 
 	return &sessionTestHarness{
@@ -2415,7 +2445,7 @@ func TestSessionWebSocketReconnect(t *testing.T) {
 }
 
 func TestRuntimeConnectResilientReturnsSessionIDAndAttachToken(t *testing.T) {
-	baseDir := t.TempDir()
+	baseDir := newHarnessBaseDir(t)
 	buildMockAgent(t, baseDir)
 
 	store, err := storage.Open(filepath.Join(baseDir, "test.db"))
@@ -2478,7 +2508,7 @@ func TestRuntimeConnectResilientReturnsSessionIDAndAttachToken(t *testing.T) {
 }
 
 func TestRuntimeConnectResilientDegradesGracefullyWithoutSessionSvc(t *testing.T) {
-	baseDir := t.TempDir()
+	baseDir := newHarnessBaseDir(t)
 	buildMockAgent(t, baseDir)
 
 	server := newTestServerWithBaseDir(baseDir)
