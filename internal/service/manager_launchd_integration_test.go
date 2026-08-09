@@ -4,7 +4,9 @@ package service
 
 import (
 	"os"
+	"strings"
 	"testing"
+	"time"
 )
 
 // TestLaunchdLifecycle is an opt-in integration test (FERNGEIST_RUN_REAL_AGENT_TESTS=1)
@@ -59,9 +61,17 @@ func TestLaunchdLifecycle(t *testing.T) {
 		t.Fatalf("Restart() error = %v", err)
 	}
 
-	// Stop: agent should be stopped (launchctl kill SIGTERM).
-	if err := m.Stop(); err != nil {
-		t.Fatalf("Stop() error = %v", err)
+	// Stop: agent should be stopped (launchctl kill SIGTERM). Right after a
+	// kickstart restart, launchd may not have finished re-registering the
+	// service, so "kill" can transiently report "No process to signal".
+	// Retry only that condition briefly; any other error is a real failure.
+	stopErr := m.Stop()
+	for attempt := 0; stopErr != nil && strings.Contains(stopErr.Error(), "No process to signal") && attempt < 5; attempt++ {
+		time.Sleep(200 * time.Millisecond)
+		stopErr = m.Stop()
+	}
+	if stopErr != nil {
+		t.Fatalf("Stop() error = %v", stopErr)
 	}
 
 	// Start: agent should come back.
