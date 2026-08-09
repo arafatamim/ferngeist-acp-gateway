@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env pwsh
+#!/usr/bin/env pwsh
 # Universal installer for the Ferngeist Gateway (Windows).
 # Downloads the latest release zip, verifies its SHA-256 against SHA256SUMS,
 # installs the daemon as a per-user scheduled task, and adds the CLI to the
