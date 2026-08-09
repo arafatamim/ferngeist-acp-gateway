@@ -81,7 +81,7 @@ type connectResilientResponse struct {
 func newResilientTestHarness(t *testing.T) *resilientTestHarness {
 	t.Helper()
 
-	baseDir := t.TempDir()
+	baseDir := newHarnessBaseDir(t)
 	buildMockAgent(t, baseDir)
 
 	store, err := storage.Open(filepath.Join(baseDir, "test.db"))
