@@ -5,11 +5,11 @@ Priority: optional
 Maintainer: Ferngeist Maintainers <maintainers@ferngeist.local>
 Installed-Size: 15051
 Filename: pool/main/f/ferngeist-gateway/ferngeist-gateway_0.8.0_amd64.deb
-Size: 6406532
-MD5sum: 26aa343924ed657bfbe78ca4d078e409
-SHA1: b692c5cc98aaa92c61c0f2aeedf421f34d2f1343
-SHA256: 4f524792f57160a84c992c1bac1f2a3af387398d74c4e6263f747381a3002656
-SHA512: 7b8e87dd9c4d2e6ec207faa69438686714f643332b577fc2634e4742d4b8d023296d38f8cea5dd7f16e424afd25f71ec9da626bb80a5622050dae572747f3809
+Size: 6406566
+MD5sum: 30c7d344d1b150d85c272677bd042760
+SHA1: d23ee2797a439eb224adf100c5e85d3114116306
+SHA256: d3020d25e5e41c6f72fb859b412791b6eec252d4009804274af6a5cc10e999ca
+SHA512: 1b304ccfaf943b0a3d9c34a3feecc56bb488a90dc88d2e107815157ef94539c4396a34a045a7b22b4d27aec9a0ff2a88d2012c511719fe8b0743751ac943b128
 Homepage: https://github.com/arafatamim/ferngeist-acp-gateway
 Description: Self-hosted backend service for ACP-compatible agents
 Architecture-Variant: amd64v1
@@ -21,11 +21,11 @@ Priority: optional
 Maintainer: Ferngeist Maintainers <maintainers@ferngeist.local>
 Installed-Size: 14147
 Filename: pool/main/f/ferngeist-gateway/ferngeist-gateway_0.8.0_arm64.deb
-Size: 5888182
-MD5sum: 406afd0731379066fea572d8a16401f2
-SHA1: 94c7b82136e804c84badb5c0bc4aec67e0352c7d
-SHA256: 1d8b3652c83184693e87ab1204a4b792627084e538505979b5704d54f14f02a3
-SHA512: 76efe4bd2728373b056584cae4cde128b1f3691ea256eb3485583b96947d7797424a7e626c6893defc992b219dc7af412a18b7d5f2913814569272377802094d
+Size: 5888184
+MD5sum: 3024873989044b691f710805c7229150
+SHA1: b627dbebc6c103d7cecdffa5a582ee89ddc4ff5a
+SHA256: 05f3d4d9e6eb77ff90f7956daaa244e6a186da63c95f4240ab94202f356d611b
+SHA512: 693e57e0864b5be7c26b69a890245c1ddc92f32090c27d83f324479dfe31da39ad84d9bbac181150ea43eca408769ab5e1b0feef886a34e498bf19f1d4502125
 Homepage: https://github.com/arafatamim/ferngeist-acp-gateway
 Description: Self-hosted backend service for ACP-compatible agents
 
