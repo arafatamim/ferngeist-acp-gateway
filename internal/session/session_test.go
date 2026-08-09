@@ -1274,19 +1274,23 @@ func TestCloseWithSupportsCloseRoutesThroughPump(t *testing.T) {
 	defer rs.Shutdown()
 	defer store.Close()
 
-	sess, _, err := rs.Create(ctx, "rt-close-routed", "dev-close-routed", "agent-close-routed")
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-
-	// Install a pipe that records frames written to the agent.
+	// Create a pump whose pipes are set before any drain-loop goroutine starts,
+	// so the recording stdin is used for the whole session (mutating pump.pipes
+	// after Create would race the already-running StdoutDrainLoop).
 	var mu sync.Mutex
 	var writes []string
-	pump := sess.pump
-	pump.pipes = &runtime.LeasedPipes{
-		Stdin:     recordingWriteCloser{record: func(b []byte) { mu.Lock(); writes = append(writes, string(b)); mu.Unlock() }},
-		Stdout:    io.NopCloser(strings.NewReader("")),
-		RuntimeID: sess.RuntimeID,
+	pump := &StdioPump{
+		pipes: &runtime.LeasedPipes{
+			Stdin:     recordingWriteCloser{record: func(b []byte) { mu.Lock(); writes = append(writes, string(b)); mu.Unlock() }},
+			Stdout:    io.NopCloser(strings.NewReader("")),
+			RuntimeID: "rt-close-routed",
+		},
+		runtimeID:    "rt-close-routed",
+		sessionID:    "sess-close-routed",
+		agentID:      "agent-close-routed",
+		logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		appendLog:    rs.pm.AppendLog,
+		loadRecovery: newLoadRecovery(rs.logger),
 	}
 	pump.supportsClose.Store(true)
 	// The pump snooped the agent-side ACP session id from session/new; the
@@ -1295,6 +1299,20 @@ func TestCloseWithSupportsCloseRoutesThroughPump(t *testing.T) {
 	pump.acpMu.Lock()
 	pump.acpSessionID = "ses_agent_1"
 	pump.acpMu.Unlock()
+
+	sess := &Session{
+		ID:          "sess-close-routed",
+		RuntimeID:   "rt-close-routed",
+		DeviceID:    "dev-close-routed",
+		AgentID:     "agent-close-routed",
+		Status:      StatusActive,
+		Leaseholder: "sess-close-routed",
+		CreatedAt:   time.Now().UTC(),
+		pump:        pump,
+	}
+	rs.mu.Lock()
+	rs.sessions[sess.ID] = sess
+	rs.mu.Unlock()
 
 	if err := rs.Close(ctx, sess.ID, "dev-close-routed"); err != nil {
 		t.Fatalf("Close: %v", err)
@@ -1453,6 +1471,7 @@ func TestPumpStdoutDrainLoop(t *testing.T) {
 func TestPumpStdoutDrainLoopWithFramesAndAppendLog(t *testing.T) {
 	r, w := io.Pipe()
 
+	var loggedMu sync.Mutex
 	var logged bool
 	pump := &StdioPump{
 		pipes: &runtime.LeasedPipes{
@@ -1462,7 +1481,9 @@ func TestPumpStdoutDrainLoopWithFramesAndAppendLog(t *testing.T) {
 		runtimeID: "rt-drain-log",
 		logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		appendLog: func(rid, stream, msg string) {
+			loggedMu.Lock()
 			logged = true
+			loggedMu.Unlock()
 		},
 	}
 
@@ -1480,7 +1501,10 @@ func TestPumpStdoutDrainLoopWithFramesAndAppendLog(t *testing.T) {
 	r.Close()
 	time.Sleep(10 * time.Millisecond)
 
-	if !logged {
+	loggedMu.Lock()
+	gotLogged := logged
+	loggedMu.Unlock()
+	if !gotLogged {
 		t.Error("expected appendLog to be called")
 	}
 }

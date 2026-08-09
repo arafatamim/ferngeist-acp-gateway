@@ -2114,11 +2114,13 @@ func newSessionTestHarness(t *testing.T) *sessionTestHarness {
 		t.Fatalf("Unmarshal(start) error = %v", err)
 	}
 
+	// Stop the agent runtime directly and synchronously so the process is
+	// guaranteed dead before t.TempDir() removal runs. See
+	// newResilientTestHarness for why the HTTP stop is not used here.
 	t.Cleanup(func() {
-		stopReq := httptest.NewRequest(http.MethodPost, "/v1/agents/mock-acp/stop", nil)
-		stopReq.Header.Set("Authorization", "Bearer "+completeResp.Token)
-		stopRec := httptest.NewRecorder()
-		server.Handler().ServeHTTP(stopRec, stopReq)
+		if _, err := server.runtime.StopByRuntimeID(startRuntimeResp.Runtime.ID); err != nil {
+			t.Logf("cleanup stop runtime: %v", err)
+		}
 	})
 
 	return &sessionTestHarness{

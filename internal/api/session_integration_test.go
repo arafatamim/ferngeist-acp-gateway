@@ -118,11 +118,15 @@ func newResilientTestHarness(t *testing.T) *resilientTestHarness {
 		t.Fatalf("Unmarshal(start) error = %v", err)
 	}
 
+	// Stop the agent runtime directly and synchronously so the process is
+	// guaranteed dead before t.TempDir() removal runs. An HTTP stop request
+	// would be fire-and-forget here and could leave the mock agent (whose
+	// working directory is the temp dir) alive long enough for RemoveAll to
+	// fail with "directory not empty" on a loaded CI runner.
 	t.Cleanup(func() {
-		stopReq := httptest.NewRequest(http.MethodPost, "/v1/agents/mock-acp/stop", nil)
-		stopReq.Header.Set("Authorization", "Bearer "+bearerToken)
-		stopRec := httptest.NewRecorder()
-		server.Handler().ServeHTTP(stopRec, stopReq)
+		if _, err := server.runtime.StopByRuntimeID(startResp.Runtime.ID); err != nil {
+			t.Logf("cleanup stop runtime: %v", err)
+		}
 	})
 
 	httpSrv := httptest.NewServer(server.Handler())

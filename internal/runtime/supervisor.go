@@ -631,7 +631,10 @@ func (s *Supervisor) StopByAgentID(agentID string) (Runtime, error) {
 	s.mu.Unlock()
 	s.persistRuntime(runtime)
 
-	// Stop the process outside the lock - this may involve I/O and timeouts
+	// Stop the process outside the lock - this may involve I/O and timeouts.
+	// stopProcess (via stopProcessWithContext) only guarantees the process has
+	// exited: it blocks on handle.done until graceful termination completes or
+	// the timeout forces SIGKILL.
 	if err := s.stopProcess(process, 2*time.Second); err != nil {
 		s.logger.Warn("runtime stop required forced termination", "runtime_id", runtimeID, "error", err)
 	}
