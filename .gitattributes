@@ -5,3 +5,4 @@
 # workflow; treat them as binary (no EOL normalization).
 deb/** -text
 rpm/** -text
+arch/** -text
