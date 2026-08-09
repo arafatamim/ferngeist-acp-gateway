@@ -19,6 +19,16 @@ func runUpdate() error {
 	if updateChannel != "" && updateChannel != "self" {
 		return fmt.Errorf("this build was installed via %s; update it with your package manager instead", updateChannel)
 	}
+	// Package-manager installs set FERNGEIST_GATEWAY_UPDATE_CHECK_ENABLED=0 in
+	// the service environment (see packaging/postinstall.sh); the update
+	// command honors the same gate so apt/dnf/AUR installs refuse to
+	// self-update even though the binary's updateChannel ldflag is "self".
+	if v, ok := os.LookupEnv("FERNGEIST_GATEWAY_UPDATE_CHECK_ENABLED"); ok {
+		disabled := strings.TrimSpace(v) == "" || v == "0" || strings.EqualFold(v, "false")
+		if disabled {
+			return fmt.Errorf("this build is managed by a package manager; update it with your package manager instead")
+		}
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

@@ -14,6 +14,11 @@
 - *(api)* Allow proof-validated refresh of expired credentials
 - *(api)* Export protocol version and stabilize at v1
 
+### 🐛 Bug Fixes
+
+- *(update)* Extract binary from release archive before swapping; stop service before replace
+- *(update)* Honor package-manager env gate in `ferngeist-gateway update`
+
 ### 🧪 Testing
 
 - *(service)* launchd lifecycle integration test on macOS CI
