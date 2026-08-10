@@ -209,6 +209,11 @@ func (m *darwinManager) Status() (Status, error) {
 		SubState:    "running",
 		ActiveState: "active",
 	}
+	// launchctl print contains multiple "state =" lines: the job state at the
+	// top and the spawned process's state inside its own block. Only the
+	// FIRST one (the job state) determines whether the service is active;
+	// the process state may legitimately differ (exited, waiting) between
+	// KeepAlive restarts.
 	for line := range strings.SplitSeq(out, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "state =") {
@@ -219,6 +224,7 @@ func (m *darwinManager) Status() (Status, error) {
 			} else {
 				status.ActiveState = "inactive"
 			}
+			break
 		}
 	}
 	status.UnitFileState = paths.plistPath
@@ -305,10 +311,16 @@ func resolveDarwinPaths() (darwinPaths, error) {
 	}, nil
 }
 
+// copyCurrentBinarySource is the path copied into the service bin dir on
+// Install. Defaults to the running executable; the launchd integration test
+// overrides it with a real gateway binary (the test binary itself has no
+// buildVersion and would exit immediately under launchd).
+var copyCurrentBinarySource = func() (string, error) { return os.Executable() }
+
 // copyCurrentBinaryDarwin mirrors copyCurrentBinary in manager_linux.go, which
 // is hidden from darwin builds by its //go:build linux tag.
 func copyCurrentBinaryDarwin(targetPath string) error {
-	currentBinaryPath, err := os.Executable()
+	currentBinaryPath, err := copyCurrentBinarySource()
 	if err != nil {
 		return fmt.Errorf("resolve current binary: %w", err)
 	}
