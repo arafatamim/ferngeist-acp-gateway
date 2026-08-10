@@ -19,7 +19,7 @@
 - *(update)* Notify paired devices when a new stable release exists
 - *(daemon)* Periodic update-available check with device push
 - *(cli)* Add ferngeist-gateway update command
-- *(release)* Goreleaser pipeline with brew, winget, nfpm, AUR channels
+- *(release)* Goreleaser pipeline with brew, winget, nfpm channels
 - *(release)* Publish signed apt repository to gh-pages-deb
 
 ### 🐛 Bug Fixes

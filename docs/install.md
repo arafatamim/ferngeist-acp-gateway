@@ -5,7 +5,7 @@ Pick the channel for your OS; all channels install the daemon as a per-user
 service that starts at login and stays running.
 
 > **Channel availability:** the package channels below (winget, Homebrew tap,
-> apt/dnf, AUR) are published by the goreleaser release pipeline on the next
+> apt/dnf, pacman) are published by the goreleaser release pipeline on the next
 > tagged release. Until then, use the manual channel for your OS.
 
 ## Windows
@@ -108,10 +108,29 @@ EOF
 sudo dnf install ferngeist-gateway
 ```
 
-### Arch (AUR)
+### Arch Linux
+
+Add the signed pacman repository and install (updates included):
 
 ```bash
-paru -S ferngeist-gateway-bin
+# One-time setup: trusts the repo signing key, adds the repo section,
+# installs. Requires root.
+curl -fsSL https://arafatamim.github.io/ferngeist-acp-gateway/arch/setup.sh | sudo sh
+```
+
+Manual equivalent (e.g. to audit the key):
+
+```bash
+curl -fsSL https://arafatamim.github.io/ferngeist-acp-gateway/arch/key.asc | sudo pacman-key --add -
+sudo pacman-key --lsign-key <fingerprint-from-key.asc>
+sudo tee -a /etc/pacman.conf >/dev/null <<'EOF'
+
+[ferngeist-gateway]
+SigLevel = Required
+Server = https://arafatamim.github.io/ferngeist-acp-gateway/arch/$arch
+EOF
+sudo pacman -Syu
+sudo pacman -S ferngeist-gateway
 ```
 
 ### Manual (tarball)
@@ -127,7 +146,7 @@ tar -xzf ferngeist-gateway_<ver>_linux_amd64.tar.gz
 - **Homebrew:** `brew upgrade ferngeist-gateway`
 - **apt:** `sudo apt update && sudo apt upgrade ferngeist-gateway`
 - **dnf/yum:** `sudo dnf upgrade ferngeist-gateway` (repo installs only)
-- **AUR:** your package manager's normal upgrade
+- **pacman:** `sudo pacman -Syu` (repo installs only)
 - **Manual installs:** `ferngeist-gateway update` (verifies against the release
   SHA256SUMS before swapping the binary). Package-manager installs refuse to
   self-update; use the package manager instead.

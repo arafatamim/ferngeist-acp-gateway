@@ -26,7 +26,7 @@ var (
 	buildCommit  = ""
 	buildTime    = ""
 	// updateChannel identifies the install channel (winget, brew, apt, rpm,
-	// aur, msi, self). "self" (or empty) installs run `ferngeist-gateway
+	// pacman, msi, self). "self" (or empty) installs run `ferngeist-gateway
 	// update`; package-manager installs pin the version and skip self-update.
 	updateChannel = ""
 )

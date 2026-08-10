@@ -21,7 +21,7 @@ func runUpdate() error {
 	}
 	// Package-manager installs set FERNGEIST_GATEWAY_UPDATE_CHECK_ENABLED=0 in
 	// the service environment (see packaging/postinstall.sh); the update
-	// command honors the same gate so apt/dnf/AUR installs refuse to
+	// command honors the same gate so apt/dnf/pacman installs refuse to
 	// self-update even though the binary's updateChannel ldflag is "self".
 	if v, ok := os.LookupEnv("FERNGEIST_GATEWAY_UPDATE_CHECK_ENABLED"); ok {
 		disabled := strings.TrimSpace(v) == "" || v == "0" || strings.EqualFold(v, "false")

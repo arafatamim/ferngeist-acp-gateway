@@ -2,7 +2,7 @@ name: Publish Gateway Release
 
 # Triggered when a release is published or when manually dispatched.
 # Builds all platform binaries + packages with goreleaser and uploads them to
-# the GitHub release. Optional publish channels (Homebrew tap, winget PR, AUR)
+# the GitHub release. Optional publish channels (Homebrew tap, winget PR)
 # activate when their secrets are configured.
 
 on:
@@ -68,13 +68,11 @@ jobs:
         env:
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
-          AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
         shell: bash
         run: |
           SKIP=""
           [ -z "$HOMEBREW_TAP_TOKEN" ] && SKIP="${SKIP:+$SKIP,}homebrew"
           [ -z "$WINGET_TOKEN" ] && SKIP="${SKIP:+$SKIP,}winget"
-          [ -z "$AUR_SSH_KEY" ] && SKIP="${SKIP:+$SKIP,}aur"
           echo "skip=$SKIP" >> "$GITHUB_OUTPUT"
 
       - name: Run goreleaser
@@ -85,17 +83,16 @@ jobs:
           # Skip external publish channels whose secrets are not configured.
           # Goreleaser attempts them with the (empty) token and fails the
           # release otherwise. Builds, archives, checksums, and nfpm packages
-          # always run; only the tap/winget/AUR pushes are skipped.
+          # always run; only the tap/winget pushes are skipped.
           args: release --clean --skip=${{ steps.channels.outputs.skip }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Self-managed installs may run `ferngeist-gateway update`; package
-          # channels (brew/winget/apt/AUR) pin versions and do not self-update.
+          # channels (brew/winget/apt/pacman) pin versions and do not self-update.
           UPDATE_CHANNEL: self
           # Optional external publish channels — activate by setting the secret.
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
-          AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
 
       - name: Upload changelog to release
         env:
@@ -125,7 +122,16 @@ jobs:
           path: dist/*.rpm
           if-no-files-found: error
 
-  # Builds a signed apt repository on the gh-pages-deb branch, served via
+      # Publish the built .pkg.tar.zst files so publish-arch-repo can assemble
+      # the pacman repo from the same release.
+      - name: Upload .pkg.tar.zst artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: archpkgs
+          path: dist/*.pkg.tar.zst
+          if-no-files-found: error
+
+  # Builds a signed apt repository on the gh-pages branch, served via
   # GitHub Pages. The repo is signed with a self-generated PGP key (the
   # private key is stored as APT_GPG_KEY; the public key is committed to the
   # repo). Users add a [signed-by=...] sources line to install/upgrade via apt.
@@ -151,15 +157,15 @@ jobs:
           name: debs
           path: debs
 
-      # Fetch the existing gh-pages-deb branch (create it if this is the
+      # Fetch the existing gh-pages branch (create it if this is the
       # first release). GitHub Pages needs a branch to serve.
       - name: Fetch apt repo branch
         run: |
-          if git ls-remote --heads origin gh-pages-deb | grep -q gh-pages-deb; then
-            git fetch origin gh-pages-deb
-            git worktree add apt-repo gh-pages-deb
+          if git ls-remote --heads origin gh-pages | grep -q gh-pages; then
+            git fetch origin gh-pages
+            git worktree add apt-repo gh-pages
           else
-            git worktree add -b gh-pages-deb apt-repo
+            git worktree add -b gh-pages apt-repo
           fi
 
       # Import the signing key (self-generated, stored as a secret). The
@@ -247,9 +253,9 @@ jobs:
             exit 0
           fi
           git commit -m "apt: publish release packages"
-          git push origin HEAD:gh-pages-deb
+          git push origin HEAD:gh-pages
 
-  # Builds a signed dnf/yum repository on the SAME gh-pages-deb branch (Pages
+  # Builds a signed dnf/yum repository on the SAME gh-pages branch (Pages
   # serves it; rpm/ lives next to deb/). Serialized after publish-deb-repo so
   # the two jobs never race the worktree push. Packages are signed with the
   # same key as the apt repo (APT_GPG_KEY) — rpm verifies package headers via
@@ -282,11 +288,11 @@ jobs:
 
       - name: Fetch repo branch
         run: |
-          if git ls-remote --heads origin gh-pages-deb | grep -q gh-pages-deb; then
-            git fetch origin gh-pages-deb
-            git worktree add rpm-repo gh-pages-deb
+          if git ls-remote --heads origin gh-pages | grep -q gh-pages; then
+            git fetch origin gh-pages
+            git worktree add rpm-repo gh-pages
           else
-            git worktree add -b gh-pages-deb rpm-repo
+            git worktree add -b gh-pages rpm-repo
           fi
 
       # Import the signing key (same key as the apt repo).
@@ -364,4 +370,123 @@ jobs:
             exit 0
           fi
           git commit -m "rpm: publish release packages"
-          git push origin HEAD:gh-pages-deb
+          git push origin HEAD:gh-pages
+
+  # Builds a signed pacman repository on the SAME gh-pages branch (arch/
+  # next to deb/ and rpm/). repo-add ships with pacman, which only exists on
+  # Arch — hence the archlinux container. Serialized after publish-rpm-repo
+  # so the two jobs never race the worktree push. Packages + repo db are
+  # signed with the same key as apt/rpm (APT_GPG_KEY).
+  publish-arch-repo:
+    needs:
+      - release
+      - publish-rpm-repo
+    if: needs.release.result == 'success'
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    permissions:
+      contents: write
+    steps:
+      # git (checkout/commit) and gnupg (signing) are not in the archlinux
+      # base image; repo-add/pacman already are.
+      - name: Install tooling
+        run: pacman -Syu --noconfirm --needed git gnupg
+
+      # The container runs as root but the checkout dir is owned by the
+      # runner's UID; without this git refuses to touch it (dubious
+      # ownership). Safe because every path is this job's own worktree.
+      - name: Mark checkout dir safe
+        run: git config --global --add safe.directory '*'
+
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Download .pkg.tar.zst artifacts
+        uses: actions/download-artifact@v7
+        with:
+          name: archpkgs
+          path: archpkgs
+
+      - name: Fetch repo branch
+        run: |
+          if git ls-remote --heads origin gh-pages | grep -q gh-pages; then
+            git fetch origin gh-pages
+            git worktree add arch-repo gh-pages
+          else
+            git worktree add -b gh-pages arch-repo
+          fi
+
+      # Import the signing key (same key as the apt repo).
+      - name: Import signing key
+        env:
+          APT_GPG_KEY: ${{ secrets.APT_GPG_KEY }}
+        run: |
+          if [ -z "$APT_GPG_KEY" ]; then
+            echo "APT_GPG_KEY not set — repo will be unsigned."
+            exit 0
+          fi
+          echo "$APT_GPG_KEY" | gpg --batch --import
+
+      - name: Assemble + sign arch repo
+        run: |
+          cd arch-repo
+          mkdir -p arch
+          # One-liner setup script for end users (keyring + repo section + install).
+          cp "$GITHUB_WORKSPACE/packaging/arch-setup.sh" arch/setup.sh
+          chmod +x arch/setup.sh
+          # Generated artifacts must stay byte-identical across checkouts
+          # (same CRLF-corruption class that broke the rpm repomd signature).
+          grep -q '^arch/\*\* -text' .gitattributes 2>/dev/null || echo 'arch/** -text' >> .gitattributes
+          for pkg in ../archpkgs/*.pkg.tar.zst; do
+            base="$(basename "$pkg")"
+            case "$base" in
+              *_linux_amd64.pkg.tar.zst) arch=x86_64 ;;
+              *_linux_arm64.pkg.tar.zst) arch=aarch64 ;;
+              *) echo "WARN: unknown arch for $base"; continue ;;
+            esac
+            mkdir -p "arch/$arch"
+            cp "$pkg" "arch/$arch/"
+          done
+          if gpg --list-secret-keys 2>/dev/null | grep -q sec; then
+            SIGNER="$(gpg --list-secret-keys --with-colons 2>/dev/null | awk -F: '$1=="sec" {print $5; exit}')"
+            for arch in x86_64 aarch64; do
+              if ls "arch/$arch"/*.pkg.tar.zst >/dev/null 2>&1; then
+                # Sign each package (pacman SigLevel=Required checks these).
+                for pkg in "arch/$arch"/*.pkg.tar.zst; do
+                  echo "signing $pkg"
+                  gpg --batch --yes --pinentry-mode loopback --passphrase '' -absb -o "$pkg.sig" "$pkg"
+                done
+                # Build the repo db. repo-add creates *.db.tar.gz + a *.db
+                # pointer. On a fresh checkout (no prior .db) that pointer is
+                # a regular file, but once one exists it becomes a symlink;
+                # GitHub Pages does not reliably follow symlinks, so replace a
+                # symlink with the real file. Same for .files. || true: the
+                # [ -L ] test is false on a fresh repo and must not trip -e.
+                (cd "arch/$arch" && repo-add ferngeist-gateway.db.tar.gz *.pkg.tar.zst)
+                { [ -L "arch/$arch/ferngeist-gateway.db" ] && cp "arch/$arch/ferngeist-gateway.db.tar.gz" "arch/$arch/ferngeist-gateway.db"; } || true
+                { [ -L "arch/$arch/ferngeist-gateway.files" ] && cp "arch/$arch/ferngeist-gateway.files.tar.gz" "arch/$arch/ferngeist-gateway.files"; } || true
+                # Sign the db (pacman verifies <repo>.db.tar.gz.sig).
+                gpg --batch --yes --pinentry-mode loopback --passphrase '' -absb -o "arch/$arch/ferngeist-gateway.db.tar.gz.sig" "arch/$arch/ferngeist-gateway.db.tar.gz"
+              fi
+            done
+            # Public key for pacman-key --add (same as deb/rpm).
+            gpg --export --armor "$SIGNER" > arch/key.asc
+          else
+            echo "No key — skipping signatures."
+            rm -f arch/key.asc
+          fi
+
+      - name: Commit + push arch repo
+        run: |
+          cd arch-repo
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes to arch repo"
+            exit 0
+          fi
+          git commit -m "arch: publish release packages"
+          git push origin HEAD:gh-pages

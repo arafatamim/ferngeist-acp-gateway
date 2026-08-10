@@ -51,10 +51,31 @@ builds:
       - arm64
     mod_timestamp: '{{ .CommitTimestamp }}'
 
+  # Arch Linux package build carries updateChannel=pacman so the binary
+  # refuses self-update with "installed via pacman" (distinct from deb/rpm's
+  # "apt" so the message names the right package manager).
+  - id: gateway-arch
+    main: ./cmd/ferngeist
+    binary: ferngeist-gateway
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w
+      - -X main.buildVersion={{.Version}}
+      - -X main.buildCommit={{.Commit}}
+      - -X main.buildTime={{.Date}}
+      - -X main.updateChannel=pacman
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    mod_timestamp: '{{ .CommitTimestamp }}'
+
 archives:
   - id: default
-    # Only the self-update-capable build goes into archives; gateway-pkg is
-    # used solely for nfpm packages.
+    # Only the self-update-capable build goes into archives; gateway-pkg and
+    # gateway-arch are used solely for nfpm packages.
     ids:
       - gateway
     formats: [tar.gz]
@@ -119,6 +140,28 @@ nfpms:
     scripts:
       postinstall: ./packaging/postinstall.sh
 
+  # Arch Linux binary package (ferngeist-gateway-<ver>-1-<arch>.pkg.tar.zst).
+  # Built from the pacman-channel binary; postinstall registers the daemon
+  # exactly like deb/rpm. The repo database is assembled by the
+  # publish-arch-repo workflow job (repo-add lives in pacman, not nfpm).
+  - id: arch
+    package_name: ferngeist-gateway
+    ids:
+      - gateway-arch
+    vendor: Ferngeist
+    homepage: 'https://github.com/arafatamim/ferngeist-acp-gateway'
+    description: 'Self-hosted backend service for ACP-compatible agents'
+    maintainer: 'Ferngeist Maintainers <maintainers@ferngeist.local>'
+    license: MIT
+    formats:
+      - archlinux
+    bindir: /usr/bin
+    contents:
+      - src: ./README.md
+        dst: /usr/share/doc/ferngeist-gateway/README.md
+    scripts:
+      postinstall: ./packaging/postinstall.sh
+
 release:
   github:
     owner: arafatamim
@@ -139,17 +182,3 @@ winget:
     repository:
       owner: microsoft
       name: winget-pkgs
-
-# AUR package (arafatamim/ferngeist-gateway-aur). Publish is gated on
-# AUR_SSH_KEY being set; the build job skips it, the publish job sets it.
-aurs:
-  - name: ferngeist-gateway-bin
-    homepage: 'https://github.com/arafatamim/ferngeist-acp-gateway'
-    description: 'Self-hosted backend service for ACP-compatible agents (prebuilt)'
-    maintainers:
-      - 'Ferngeist Maintainers <maintainers@ferngeist.local>'
-    license: MIT
-    git_url: 'ssh://aur@aur.archlinux.org/ferngeist-gateway-bin.git'
-    private_key: '{{ .Env.AUR_SSH_KEY }}'
-    package: |-
-      install -Dm755 ferngeist-gateway "${pkgdir}/usr/bin/ferngeist-gateway"

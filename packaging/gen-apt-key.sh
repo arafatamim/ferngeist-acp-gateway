@@ -1,7 +1,7 @@
 #!/bin/sh
 # Generates the PGP key used to sign the apt repository, and prints the
 # private key to add as the APT_GPG_KEY GitHub secret. The public key is
-# committed to the gh-pages-deb branch by the release workflow (key.asc).
+# committed to the gh-pages branch by the release workflow (key.asc).
 #
 # Usage:
 #   ./packaging/gen-apt-key.sh

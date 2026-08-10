@@ -9,7 +9,7 @@ import (
 // with updateChannel != "self" (set via ldflags by goreleaser for deb/rpm
 // packages) refuses to self-update before any network work.
 func TestRunUpdateRefusesPackageChannel(t *testing.T) {
-	for _, ch := range []string{"apt", "deb", "rpm", "brew", "winget", "aur", "msi"} {
+	for _, ch := range []string{"apt", "deb", "rpm", "brew", "winget", "pacman", "msi"} {
 		t.Run(ch, func(t *testing.T) {
 			old := updateChannel
 			updateChannel = ch

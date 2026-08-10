@@ -1,7 +1,7 @@
 # Usage
 
 > Install the gateway first — see [docs/install.md](install.md) for per-OS
-> instructions (winget, Homebrew, apt/dnf/AUR, or manual).
+> instructions (winget, Homebrew, apt/dnf, pacman, or manual).
 
 ## Run the daemon
 
