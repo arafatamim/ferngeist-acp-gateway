@@ -103,6 +103,15 @@ case "$OS" in
     *) die "unsupported operating system: $OS (expected Linux or Darwin)" ;;
 esac
 
+# Termux (Android userspace) is a Debian-like userland but has no systemd,
+# no sudo by default, and installs per-user into $PREFIX. It has apt-get and
+# dpkg, so plain channel detection would pick apt and fail. Force the
+# user-level binary install instead.
+IS_TERMUX=0
+if [ "$PLATFORM" = linux ] && [ -n "${PREFIX:-}" ] && [ "$(uname -o 2>/dev/null)" = "Android" ]; then
+    IS_TERMUX=1
+fi
+
 ARCH="$(uname -m)"
 case "$ARCH" in
     x86_64|amd64) GOARCH=amd64 ;;
@@ -137,10 +146,20 @@ channel_available() {
 pick_channel() {
     if [ -n "$FORCE_CHANNEL" ]; then
         if channel_available "$FORCE_CHANNEL"; then
+            if [ "$IS_TERMUX" = 1 ] && [ "$FORCE_CHANNEL" != binary ]; then
+                warn "Termux has no systemd/sudo; forcing the binary install (--channel $FORCE_CHANNEL ignored)"
+                CHANNEL=binary
+                return 0
+            fi
             CHANNEL="$FORCE_CHANNEL"
             return 0
         fi
         die "requested channel '$FORCE_CHANNEL' is not available on $OS/$ARCH"
+    fi
+    if [ "$IS_TERMUX" = 1 ]; then
+        step "Termux detected (no systemd/sudo); using the user-level binary install"
+        CHANNEL=binary
+        return 0
     fi
     for c in apt pacman rpm brew binary; do
         if channel_available "$c"; then
@@ -290,7 +309,13 @@ install_via_binary() {
     # usable, so warn instead of aborting the install.
     step "Installing + starting the daemon (per-user service, $([ -z "$DAEMON_FLAGS" ] && echo 'localhost only' || echo 'LAN enabled'))"
     if ! "$BIN" daemon install $DAEMON_FLAGS; then
-        warn "daemon install failed; the binary is at $BIN — run 'ferngeist-gateway daemon install' once you have a desktop session"
+        if [ "$IS_TERMUX" = 1 ]; then
+            warn "daemon install failed (Termux has no systemd). Run it as a foreground daemon or a runit service:"
+            warn "  $BIN daemon run $DAEMON_FLAGS"
+            warn "  # or, for a supervised service: pkg install termux-services && sv-enable ferngeist-gateway (with a run script)"
+        else
+            warn "daemon install failed; the binary is at $BIN — run 'ferngeist-gateway daemon install' once you have a desktop session"
+        fi
     fi
 
     # Symlink the CLI into a user bin dir so `ferngeist-gateway` is on PATH.
