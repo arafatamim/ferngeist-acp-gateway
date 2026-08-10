@@ -280,7 +280,15 @@ install_via_binary() {
     LATEST_JSON="$(curl -fsSL "$API_BASE/releases/latest")"
     TAG="$(printf '%s' "$LATEST_JSON" | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p')"
     [ -n "$TAG" ] || die "could not resolve the latest release tag"
-    ASSET="ferngeist-gateway_${TAG#v}_${PLATFORM}_${GOARCH}.tar.gz"
+    # Termux runs Android's bionic libc, whose linker64 rejects the static
+    # ET_EXEC linux build ("unexpected e_type"); the android build is a PIE
+    # that bionic accepts. Fetch the android asset on Termux, linux elsewhere.
+    if [ "$IS_TERMUX" = 1 ]; then
+        ASSET_OS=android
+    else
+        ASSET_OS="$PLATFORM"
+    fi
+    ASSET="ferngeist-gateway_${TAG#v}_${ASSET_OS}_${GOARCH}.tar.gz"
     step "Latest release: $TAG (asset $ASSET)"
 
     TMPDIR_BIN="$(mktemp -d)"
