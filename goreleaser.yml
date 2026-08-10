@@ -247,6 +247,10 @@ release:
   github:
     owner: arafatamim
     name: ferngeist-acp-gateway
+  # Re-running a release (e.g. after a tag repoint) must overwrite the
+  # existing assets — GitHub returns 422 on duplicate uploads, and goreleaser
+  # only deletes + re-uploads when this is set.
+  replace_existing_artifacts: true
 
 # winget manifest for microsoft/winget-pkgs. Generated in dist/ by the build
 # job (--skip=publish); the publish job opens the PR with WINGET_TOKEN.
