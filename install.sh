@@ -303,19 +303,30 @@ install_via_binary() {
     BIN="$TMPDIR_BIN/ferngeist-gateway"
     [ -x "$BIN" ] || die "binary not found in $ASSET"
 
+    if [ "$IS_TERMUX" = 1 ]; then
+        # Termux has no systemd, so `daemon install` cannot register a
+        # service. Persist the binary ourselves into ~/.local/bin (the temp
+        # dir is deleted on exit) and hand the user the runit recipe.
+        BIN_DIR="$HOME/.local/bin"
+        mkdir -p "$BIN_DIR"
+        cp "$BIN" "$BIN_DIR/ferngeist-gateway"
+        chmod +x "$BIN_DIR/ferngeist-gateway"
+        step "Installed the binary at $BIN_DIR/ferngeist-gateway"
+        warn "add $BIN_DIR to your PATH to use 'ferngeist-gateway' from a terminal:"
+        warn "  echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.bashrc"
+        step "Termux has no systemd; run the gateway as a foreground daemon or a runit service:"
+        step "  $BIN_DIR/ferngeist-gateway daemon run $DAEMON_FLAGS"
+        step "  # or, for a supervised service: pkg install termux-services && sv-enable ferngeist-gateway (with a run script)"
+        return 0
+    fi
+
     # `daemon install` copies the running binary into the service bin dir
     # and registers + starts the per-user service. It can fail on headless
     # boxes (no systemd user session / no launchd) — the binary is still
     # usable, so warn instead of aborting the install.
     step "Installing + starting the daemon (per-user service, $([ -z "$DAEMON_FLAGS" ] && echo 'localhost only' || echo 'LAN enabled'))"
     if ! "$BIN" daemon install $DAEMON_FLAGS; then
-        if [ "$IS_TERMUX" = 1 ]; then
-            warn "daemon install failed (Termux has no systemd). Run it as a foreground daemon or a runit service:"
-            warn "  $BIN daemon run $DAEMON_FLAGS"
-            warn "  # or, for a supervised service: pkg install termux-services && sv-enable ferngeist-gateway (with a run script)"
-        else
-            warn "daemon install failed; the binary is at $BIN — run 'ferngeist-gateway daemon install' once you have a desktop session"
-        fi
+        warn "daemon install failed; the binary is at $BIN — run 'ferngeist-gateway daemon install' once you have a desktop session"
     fi
 
     # Symlink the CLI into a user bin dir so `ferngeist-gateway` is on PATH.
