@@ -116,6 +116,15 @@ jobs:
           path: dist/*.deb
           if-no-files-found: error
 
+      # Publish the built .rpm files so publish-rpm-repo can assemble the
+      # dnf/yum repo from the same release.
+      - name: Upload .rpm artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: rpms
+          path: dist/*.rpm
+          if-no-files-found: error
+
   # Builds a signed apt repository on the gh-pages-deb branch, served via
   # GitHub Pages. The repo is signed with a self-generated PGP key (the
   # private key is stored as APT_GPG_KEY; the public key is committed to the
@@ -238,4 +247,121 @@ jobs:
             exit 0
           fi
           git commit -m "apt: publish release packages"
+          git push origin HEAD:gh-pages-deb
+
+  # Builds a signed dnf/yum repository on the SAME gh-pages-deb branch (Pages
+  # serves it; rpm/ lives next to deb/). Serialized after publish-deb-repo so
+  # the two jobs never race the worktree push. Packages are signed with the
+  # same key as the apt repo (APT_GPG_KEY) — rpm verifies package headers via
+  # gpgcheck, and repomd.xml.asc covers repo_gpgcheck.
+  publish-rpm-repo:
+    # Serialized after publish-deb-repo (same branch, no push race); also
+    # depends on release so needs.release.result is valid.
+    needs:
+      - release
+      - publish-deb-repo
+    if: needs.release.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      # createrepo_c and rpm/rpmsign are needed to assemble and sign the repo.
+      - name: Install rpm tooling
+        run: sudo apt-get update && sudo apt-get install -y createrepo-c rpm
+
+      - name: Download .rpm artifacts
+        uses: actions/download-artifact@v7
+        with:
+          name: rpms
+          path: rpms
+
+      - name: Fetch repo branch
+        run: |
+          if git ls-remote --heads origin gh-pages-deb | grep -q gh-pages-deb; then
+            git fetch origin gh-pages-deb
+            git worktree add rpm-repo gh-pages-deb
+          else
+            git worktree add -b gh-pages-deb rpm-repo
+          fi
+
+      # Import the signing key (same key as the apt repo).
+      - name: Import signing key
+        env:
+          APT_GPG_KEY: ${{ secrets.APT_GPG_KEY }}
+        run: |
+          if [ -z "$APT_GPG_KEY" ]; then
+            echo "APT_GPG_KEY not set — repo will be unsigned."
+            exit 0
+          fi
+          echo "$APT_GPG_KEY" | gpg --batch --import
+
+      # Sign each rpm's header (gpgcheck=1) and lay out x86_64/ + aarch64/.
+      - name: Sign + assemble rpm repo
+        run: |
+          cd rpm-repo
+          mkdir -p rpm
+          # One-liner setup script for end users (key import + repo file + install).
+          cp "$GITHUB_WORKSPACE/packaging/rpm-setup.sh" rpm/setup.sh
+          chmod +x rpm/setup.sh
+          if gpg --list-secret-keys 2>/dev/null | grep -q sec; then
+            SIGNER="$(gpg --list-secret-keys --with-colons 2>/dev/null | awk -F: '$1=="sec" {print $5; exit}')"
+            for rpm in ../rpms/*.rpm; do
+              echo "signing $rpm"
+              # _gpg_name is the portable rpmsign key selector (fingerprint).
+              rpmsign --addsign --define "_gpg_name $SIGNER" "$rpm" >/dev/null 2>&1 || echo "WARN: rpmsign failed for $rpm"
+            done
+          else
+            echo "No key — skipping package signatures."
+          fi
+          for rpm in ../rpms/*.rpm; do
+            base="$(basename "$rpm")"
+            case "$base" in
+              *amd64*) arch=x86_64 ;;
+              *arm64*) arch=aarch64 ;;
+              *) echo "WARN: unknown arch for $base"; continue ;;
+            esac
+            mkdir -p "rpm/$arch"
+            cp "$rpm" "rpm/$arch/"
+          done
+
+      # Generate repodata/ (createrepo_c) + detached repomd.xml signature.
+      - name: Generate + sign rpm metadata
+        run: |
+          cd rpm-repo
+          for arch in x86_64 aarch64; do
+            if [ -d "rpm/$arch" ] && ls "rpm/$arch"/*.rpm >/dev/null 2>&1; then
+              createrepo_c "rpm/$arch"
+            fi
+          done
+          if gpg --list-secret-keys 2>/dev/null | grep -q sec; then
+            for arch in x86_64 aarch64; do
+              if [ -f "rpm/$arch/repodata/repomd.xml" ]; then
+                gpg --batch --yes --pinentry-mode loopback --passphrase '' -absb -o "rpm/$arch/repodata/repomd.xml.asc" "rpm/$arch/repodata/repomd.xml"
+              fi
+            done
+          fi
+          # Public key for gpgcheck (import with: rpm --import key.asc)
+          if gpg --list-secret-keys 2>/dev/null | grep -q sec; then
+            SIGNER="$(gpg --list-secret-keys --with-colons 2>/dev/null | awk -F: '$1=="sec" {print $5; exit}')"
+            gpg --export --armor "$SIGNER" > rpm/key.asc
+          else
+            rm -f rpm/key.asc
+          fi
+
+      - name: Commit + push rpm repo
+        run: |
+          cd rpm-repo
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes to rpm repo"
+            exit 0
+          fi
+          git commit -m "rpm: publish release packages"
           git push origin HEAD:gh-pages-deb

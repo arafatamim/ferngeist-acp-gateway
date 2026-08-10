@@ -85,8 +85,27 @@ reachable from other devices on your network, run
 
 ### Fedora / RHEL
 
+Add the signed dnf/yum repository and install (updates included):
+
 ```bash
-sudo dnf install ferngeist-gateway_<ver>_x86_64.rpm
+# One-time setup: imports the signing key, adds the repo file, installs.
+curl -fsSL https://arafatamim.github.io/ferngeist-acp-gateway/rpm/setup.sh | sudo sh
+```
+
+Manual equivalent (e.g. to pin the key):
+
+```bash
+sudo rpm --import https://arafatamim.github.io/ferngeist-acp-gateway/rpm/key.asc
+sudo tee /etc/yum.repos.d/ferngeist-gateway.repo >/dev/null <<'EOF'
+[ferngeist-gateway]
+name=Ferngeist Gateway
+baseurl=https://arafatamim.github.io/ferngeist-acp-gateway/rpm/$basearch
+enabled=1
+gpgcheck=1
+repo_gpgcheck=1
+gpgkey=https://arafatamim.github.io/ferngeist-acp-gateway/rpm/key.asc
+EOF
+sudo dnf install ferngeist-gateway
 ```
 
 ### Arch (AUR)
@@ -107,7 +126,8 @@ tar -xzf ferngeist-gateway_<ver>_linux_amd64.tar.gz
 - **winget:** `winget upgrade Ferngeist.Gateway`
 - **Homebrew:** `brew upgrade ferngeist-gateway`
 - **apt:** `sudo apt update && sudo apt upgrade ferngeist-gateway`
-- **dnf/AUR:** your package manager's normal upgrade
+- **dnf/yum:** `sudo dnf upgrade ferngeist-gateway` (repo installs only)
+- **AUR:** your package manager's normal upgrade
 - **Manual installs:** `ferngeist-gateway update` (verifies against the release
   SHA256SUMS before swapping the binary). Package-manager installs refuse to
   self-update; use the package manager instead.
