@@ -22,12 +22,20 @@ builds:
       - linux
       - darwin
       - windows
+      # Android (arm64) — pure-Go static PIE that runs on Termux (Android's
+      # bionic linker rejects the static ET_EXEC linux build). This is the
+      # artifact the Termux installer downloads.
+      - android
     goarch:
       - amd64
       - arm64
     ignore:
       - goos: windows
         goarch: arm64
+      # android/arm (armv7) forces cgo (needs the NDK clang); skip it —
+      # arm64 covers modern Android/Termux devices.
+      - goos: android
+        goarch: arm
     mod_timestamp: '{{ .CommitTimestamp }}'
 
   # Package builds (deb/rpm) carry updateChannel=apt in the binary itself so
