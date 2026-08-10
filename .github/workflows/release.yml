@@ -66,12 +66,10 @@ jobs:
       - name: Determine publish channels
         id: channels
         env:
-          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
         shell: bash
         run: |
           SKIP=""
-          [ -z "$HOMEBREW_TAP_TOKEN" ] && SKIP="${SKIP:+$SKIP,}homebrew"
           [ -z "$WINGET_TOKEN" ] && SKIP="${SKIP:+$SKIP,}winget"
           echo "skip=$SKIP" >> "$GITHUB_OUTPUT"
 
@@ -83,7 +81,10 @@ jobs:
           # Skip external publish channels whose secrets are not configured.
           # Goreleaser attempts them with the (empty) token and fails the
           # release otherwise. Builds, archives, checksums, and nfpm packages
-          # always run; only the tap/winget pushes are skipped.
+          # always run; the Homebrew formula is generated here (the push to
+          # main is a separate signed git push below, since the main ruleset
+          # requires verified signatures), and the winget push is skipped
+          # when WINGET_TOKEN is unset.
           args: release --clean --skip=${{ steps.channels.outputs.skip }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -91,7 +92,6 @@ jobs:
           # channels (brew/winget/apt/pacman) pin versions and do not self-update.
           UPDATE_CHANNEL: self
           # Optional external publish channels — activate by setting the secret.
-          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
 
       - name: Upload changelog to release
@@ -102,6 +102,49 @@ jobs:
         shell: bash
         run: |
           gh release upload "$TAG" "$CHANGELOG" --clobber
+
+      # Publish the Homebrew formula to main with a SIGNED commit. The
+      # repo's "Protect main" ruleset requires verified signatures; the
+      # goreleaser formula pipes (REST API, and git-upload without an SSH
+      # key) cannot produce them, so goreleaser only generates the formula
+      # and this step pushes it. Idempotent: skips when main already has
+      # this exact content (brew upgrade picks up the same formula).
+      - name: Publish Homebrew formula to main
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APT_GPG_KEY: ${{ secrets.APT_GPG_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f dist/homebrew/Formula/ferngeist-gateway.rb ]; then
+            echo "no formula generated; skipping"
+            exit 0
+          fi
+          if [ -z "$APT_GPG_KEY" ]; then
+            echo "APT_GPG_KEY not set — cannot sign the formula commit; skipping"
+            exit 0
+          fi
+          echo "$APT_GPG_KEY" | gpg --batch --import
+          SIGNER="$(gpg --list-secret-keys --with-colons 2>/dev/null | awk -F: '$1=="sec" {print $5; exit}')"
+          echo "signing with $SIGNER"
+          git config --global user.name "Ferngeist Gateway"
+          git config --global user.email "31634638+arafatamim@users.noreply.github.com"
+          git config --global user.signingkey "$SIGNER"
+          git config --global commit.gpgsign true
+          git config --global gpg.program gpg
+          git fetch origin main
+          git checkout -b brew-formula-push FETCH_HEAD
+          mkdir -p Formula
+          cp dist/homebrew/Formula/ferngeist-gateway.rb Formula/ferngeist-gateway.rb
+          # git diff (worktree vs HEAD) is empty for an UNTRACKED file, so
+          # stage first and compare the index against HEAD.
+          git add Formula/ferngeist-gateway.rb
+          if git diff --cached --quiet HEAD -- Formula/ferngeist-gateway.rb; then
+            echo "formula unchanged on main; skipping"
+            exit 0
+          fi
+          git -c commit.gpgsign=true commit -m "homebrew: update ferngeist-gateway formula to ${{ steps.release_tag.outputs.tag }}"
+          git push "https://x-access-token:${GITHUB_TOKEN}@github.com/arafatamim/ferngeist-acp-gateway.git" HEAD:main
 
       # Publish the built .deb files as a workflow artifact so the
       # publish-deb-repo job can assemble the apt repo without racing the

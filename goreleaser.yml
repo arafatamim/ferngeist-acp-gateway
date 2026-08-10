@@ -72,6 +72,29 @@ builds:
       - arm64
     mod_timestamp: '{{ .CommitTimestamp }}'
 
+  # Homebrew/Linuxbrew formula build carries updateChannel=brew so
+  # brew-installed binaries refuse self-update with "installed via brew".
+  # Covers darwin + linux (Linuxbrew). Selected by the brew archive set; not
+  # part of the default archives or any nfpm package.
+  - id: gateway-brew
+    main: ./cmd/ferngeist
+    binary: ferngeist-gateway
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w
+      - -X main.buildVersion={{.Version}}
+      - -X main.buildCommit={{.Commit}}
+      - -X main.buildTime={{.Date}}
+      - -X main.updateChannel=brew
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    mod_timestamp: '{{ .CommitTimestamp }}'
+
 archives:
   - id: default
     # Only the self-update-capable build goes into archives; gateway-pkg and
@@ -83,6 +106,20 @@ archives:
       - goos: windows
         formats: [zip]
     name_template: '{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}'
+    files:
+      - README.md
+      - LICENSE
+
+  # Homebrew/Linuxbrew archive set: same per-OS/arch layout as default, but
+  # built from gateway-brew (updateChannel=brew) so brew-installed binaries
+  # refuse self-update. The _brew suffix keeps the 4 filenames distinct from
+  # the default set (the brew pipe requires exactly one archive per OS/arch).
+  # Selected by brews.ids below; not listed in the manual-download docs.
+  - id: brew
+    ids:
+      - gateway-brew
+    formats: [tar.gz]
+    name_template: '{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}_brew'
     files:
       - README.md
       - LICENSE
@@ -101,19 +138,55 @@ changelog:
       - '^test:'
       - '^chore:'
 
-# Homebrew tap (arafatamim/homebrew-ferngeist). Generated as a Cask in the
-# tap's Casks/ directory (homebrew_casks; brews/formulas are deprecated since
-# goreleaser v2.16). Pushed when HOMEBREW_TAP_TOKEN is set.
-homebrew_casks:
+# Homebrew formula (macOS + Linuxbrew). Deliberately uses the deprecated
+# `brews` pipe: `homebrew_casks` generates casks, which are macOS-centric and
+# only partially supported on Linuxbrew; a formula is the correct artifact
+# for a CLI binary on both. The formula lives on the default branch (main) —
+# brew tap can only resolve the default branch of a repo, and the two-arg
+# `brew tap arafatamim/ferngeist-acp-gateway <url>` form is required because
+# a one-arg tap maps to the nonexistent homebrew-ferngeist-acp-gateway.
+brews:
   - name: ferngeist-gateway
     homepage: 'https://github.com/arafatamim/ferngeist-acp-gateway'
     description: 'Self-hosted backend service for ACP-compatible agents'
     license: MIT
     repository:
       owner: arafatamim
-      name: homebrew-ferngeist
-    binaries:
-      - ferngeist-gateway
+      name: ferngeist-acp-gateway
+      # main is the default branch — the only branch brew tap can resolve.
+      # The formula push itself is done by the release workflow (signed
+      # git push to main, since the repo ruleset requires verified
+      # signatures and goreleaser's REST/git-upload paths can't do that
+      # without an SSH key). goreleaser only generates the formula here.
+      branch: main
+    directory: Formula
+    # goreleaser only GENERATES the formula (dist/homebrew/Formula/...).
+    # The push to main is a separate signed git commit by the release
+    # workflow: the "Protect main" ruleset requires verified signatures,
+    # which goreleaser's REST/git-upload formula pushes cannot produce.
+    skip_upload: true
+    ids:
+      - brew
+    post_install: |
+      system "ferngeist-gateway", "daemon", "install", "--lan"
+      # Silence the periodic update-available notification: brew-managed
+      # installs update via `brew upgrade`, never self-update. Mirror
+      # packaging/postinstall.sh's env append (runs as the invoking user,
+      # so the env file is user-writable). Wrapped so a path/parse hiccup
+      # never fails the formula install (post_install failures abort).
+      begin
+        linux_env = File.expand_path("~/.local/share/ferngeist-gateway/config/daemon.env")
+        mac_env = File.expand_path("~/Library/Application Support/Ferngeist Gateway/config/daemon.plist.env")
+        env = File.file?(linux_env) ? linux_env : mac_env
+        if File.file?(env)
+          content = File.read(env)
+          unless content.include?("FERNGEIST_GATEWAY_UPDATE_CHECK_ENABLED=")
+            File.open(env, "a") { |f| f.puts "FERNGEIST_GATEWAY_UPDATE_CHECK_ENABLED=0" }
+          end
+        end
+      rescue StandardError
+        nil
+      end
 
 # .deb (Ubuntu/Debian) and .rpm (Fedora/RHEL) packages. postinstall runs
 # `daemon install` so a per-user systemd user service is created on first

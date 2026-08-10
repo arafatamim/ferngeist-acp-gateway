@@ -32,16 +32,19 @@ The first run shows a SmartScreen prompt because the build is unsigned; choose
 
 ## macOS
 
-### Homebrew (recommended)
+### Homebrew / Linuxbrew (recommended)
 
 ```bash
-brew tap arafatamim/homebrew-ferngeist
+brew tap arafatamim/ferngeist-acp-gateway https://github.com/arafatamim/ferngeist-acp-gateway
 brew install ferngeist-gateway
-ferngeist-gateway daemon install
 ```
 
-Homebrew installs never trigger Gatekeeper, so no warnings appear. The daemon
-runs as a per-user LaunchAgent (starts at login, keeps running).
+The formula installs the binary and runs the daemon install (`daemon install --lan`)
+as a per-user service — same as the Linux packages. On macOS it is a LaunchAgent;
+on Linux (Linuxbrew) a systemd user unit. Updates: `brew upgrade ferngeist-gateway`.
+
+Homebrew installs never trigger Gatekeeper, so no warnings appear. To make the
+gateway reachable only on localhost, re-run `ferngeist-gateway daemon install`.
 
 ### Manual (tarball)
 

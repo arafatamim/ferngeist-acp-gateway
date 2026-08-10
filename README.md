@@ -7,7 +7,7 @@
 See [docs/install.md](docs/install.md) for per-OS instructions:
 
 - **Windows:** `winget install Ferngeist.Gateway`
-- **macOS:** `brew install ferngeist-gateway` (tap `arafatamim/homebrew-ferngeist`)
+- **macOS:** `brew install ferngeist-gateway` (tap `arafatamim/ferngeist-acp-gateway`, see [docs/install.md](docs/install.md))
 - **Linux:** apt/dnf, pacman, or tarball
 
 ## Run from source (development)
