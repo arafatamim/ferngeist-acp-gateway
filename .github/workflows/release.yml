@@ -57,22 +57,42 @@ jobs:
           config: cliff.toml
           args: --tag ${{ steps.release_tag.outputs.tag }}
         env:
-          OUTPUT: CHANGELOG.md
+          # Write to a temp path so the tracked CHANGELOG.md is not modified.
+          # goreleaser requires a clean working tree; a dirty CHANGELOG.md
+          # would abort the release with "git is in a dirty state".
+          OUTPUT: ${{ runner.temp }}/CHANGELOG.md
+          OUTPUT_STEPS: ${{ runner.temp }}/CHANGELOG_STEPS.md
+
+      - name: Determine publish channels
+        id: channels
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+          AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
+        shell: bash
+        run: |
+          SKIP=""
+          [ -z "$HOMEBREW_TAP_TOKEN" ] && SKIP="${SKIP:+$SKIP,}homebrew"
+          [ -z "$WINGET_TOKEN" ] && SKIP="${SKIP:+$SKIP,}winget"
+          [ -z "$AUR_SSH_KEY" ] && SKIP="${SKIP:+$SKIP,}aur"
+          echo "skip=$SKIP" >> "$GITHUB_OUTPUT"
 
       - name: Run goreleaser
         uses: goreleaser/goreleaser-action@v6
         with:
           distribution: goreleaser
           version: latest
-          args: release --clean
+          # Skip external publish channels whose secrets are not configured.
+          # Goreleaser attempts them with the (empty) token and fails the
+          # release otherwise. Builds, archives, checksums, and nfpm packages
+          # always run; only the tap/winget/AUR pushes are skipped.
+          args: release --clean --skip=${{ steps.channels.outputs.skip }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Self-managed installs may run `ferngeist-gateway update`; package
           # channels (brew/winget/apt/AUR) pin versions and do not self-update.
           UPDATE_CHANNEL: self
           # Optional external publish channels — activate by setting the secret.
-          # Without them goreleaser still builds every artifact; only the
-          # tap/winget/AUR pushes are skipped.
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
           AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
@@ -81,6 +101,141 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.release_tag.outputs.tag }}
+          CHANGELOG: ${{ runner.temp }}/CHANGELOG.md
         shell: bash
         run: |
-          gh release upload "$TAG" CHANGELOG.md --clobber
+          gh release upload "$TAG" "$CHANGELOG" --clobber
+
+      # Publish the built .deb files as a workflow artifact so the
+      # publish-deb-repo job can assemble the apt repo without racing the
+      # release upload.
+      - name: Upload .deb artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: debs
+          path: dist/*.deb
+          if-no-files-found: error
+
+  # Builds a signed apt repository on the gh-pages-deb branch, served via
+  # GitHub Pages. The repo is signed with a self-generated PGP key (the
+  # private key is stored as APT_GPG_KEY; the public key is committed to the
+  # repo). Users add a [signed-by=...] sources line to install/upgrade via apt.
+  publish-deb-repo:
+    needs: release
+    # Run whenever the release job succeeds — both from a published release
+    # and from a manual workflow_dispatch (which is how releases are tested).
+    if: needs.release.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      # The debs are built by the release job's goreleaser step. Upload them
+      # as a workflow artifact so this job doesn't race the release upload.
+      - name: Download .deb artifacts
+        uses: actions/download-artifact@v7
+        with:
+          name: debs
+          path: debs
+
+      # Fetch the existing gh-pages-deb branch (create it if this is the
+      # first release). GitHub Pages needs a branch to serve.
+      - name: Fetch apt repo branch
+        run: |
+          if git ls-remote --heads origin gh-pages-deb | grep -q gh-pages-deb; then
+            git fetch origin gh-pages-deb
+            git worktree add apt-repo gh-pages-deb
+          else
+            git worktree add -b gh-pages-deb apt-repo
+          fi
+
+      # Import the signing key (self-generated, stored as a secret). The
+      # public key is committed so users can pin it via signed-by=.
+      - name: Import signing key
+        env:
+          APT_GPG_KEY: ${{ secrets.APT_GPG_KEY }}
+        run: |
+          if [ -z "$APT_GPG_KEY" ]; then
+            echo "APT_GPG_KEY not set — repo will be unsigned. Set it to sign."
+            exit 0
+          fi
+          echo "$APT_GPG_KEY" | gpg --batch --import
+
+      # Assemble the pool/ tree under deb/ so the repo is served at
+      # https://arafatamim.github.io/ferngeist-acp-gateway/deb/ (matching the
+      # sources line in docs/install.md).
+      - name: Assemble apt repo
+        run: |
+          cd apt-repo
+          mkdir -p deb
+          # One-liner setup script for end users (keyring + sources + install).
+          cp "$GITHUB_WORKSPACE/packaging/apt-setup.sh" deb/setup.sh
+          chmod +x deb/setup.sh
+          for deb in ../debs/*.deb; do
+            arch="$(dpkg-deb -f "$deb" Architecture)"
+            mkdir -p "deb/dists/stable/main/binary-$arch"
+            mkdir -p "deb/pool/main/f/ferngeist-gateway"
+            cp "$deb" "deb/pool/main/f/ferngeist-gateway/"
+          done
+
+      # Generate the Packages/Release metadata + sign it (if key present).
+      - name: Generate + sign apt metadata
+        run: |
+          cd apt-repo/deb
+          for dir in dists/stable/main/binary-*; do
+            arch="${dir##*-}"
+            # Scan the pool (deb/pool) and emit relative pool/... paths into
+            # Packages so apt can resolve the .deb. Run from deb/ so the scan
+            # root is a direct child — running from binary-<arch> would leak
+            # ../../../../ into the Filename. Path="pool" + recursion-relative
+            # "main/f/..." = "pool/main/f/...".
+            apt-ftparchive packages -o APT::FTPArchive::Packages::Path="pool" pool > "$dir/Packages"
+            gzip -kf "$dir/Packages"
+          done
+          apt-ftparchive \
+            -o APT::FTPArchive::Release::Origin=Ferngeist \
+            -o APT::FTPArchive::Release::Label=Ferngeist \
+            -o APT::FTPArchive::Release::Suite=stable \
+            -o APT::FTPArchive::Release::Codename=stable \
+            -o APT::FTPArchive::Release::Architectures="amd64 arm64" \
+            -o APT::FTPArchive::Release::Components=main \
+            release dists/stable > dists/stable/Release
+          if gpg --list-secret-keys 2>/dev/null | grep -q sec; then
+            # InRelease must be CLEARSIGNED (apt validates it with gpgv).
+            # A detached armored signature (-absb) is only valid as Release.gpg.
+            # --pinentry-mode loopback: never prompt for a passphrase on a
+            # headless runner (works for passphrase-less signing keys).
+            gpg --batch --yes --pinentry-mode loopback --passphrase '' --clearsign -o dists/stable/InRelease dists/stable/Release
+            gpg --batch --yes --pinentry-mode loopback --passphrase '' -absb -o dists/stable/Release.gpg dists/stable/Release
+          fi
+          # Commit the public key so users can pin it via signed-by=. Export
+          # the key that signed the Release (the primary [SC] key) so the
+          # pinned key always matches the InRelease signature.
+          if gpg --list-secret-keys 2>/dev/null | grep -q sec; then
+            SIGNER="$(gpg --list-secret-keys --with-colons 2>/dev/null | awk -F: '$1=="sec" {print $5; exit}')"
+            if [ -n "$SIGNER" ]; then
+              gpg --export --armor "$SIGNER" > key.asc
+            else
+              gpg --export --armor > key.asc
+            fi
+          else
+            echo "No key to export — repo unsigned."
+            rm -f key.asc
+          fi
+
+      - name: Commit + push apt repo
+        run: |
+          cd apt-repo
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes to apt repo"
+            exit 0
+          fi
+          git commit -m "apt: publish release packages"
+          git push origin HEAD:gh-pages-deb

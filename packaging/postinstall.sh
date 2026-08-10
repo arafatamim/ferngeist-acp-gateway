@@ -15,7 +15,10 @@ else
 fi
 
 if [ -n "$GATEWAY_BIN" ]; then
-    "$GATEWAY_BIN" daemon install || true
+    # Package installs target non-technical users who want the gateway
+    # reachable from their phone/other devices: listen on 0.0.0.0 with LAN
+    # enabled. Manual `daemon install` keeps the localhost-only default.
+    "$GATEWAY_BIN" daemon install --lan || true
 fi
 
 # Package-manager builds must not self-update. The daemon env file is

@@ -52,6 +52,8 @@ Ferngeist Gateway is configured through environment variables and persisted stat
 ## Notes
 
 - `daemon install` registers the extracted binary as a background service.
+- `daemon install --lan` listens on `0.0.0.0` and enables LAN access (default is
+  localhost-only). `--host 0.0.0.0` is the explicit equivalent.
 - `PUBLIC_BASE_URL` should match the URL clients use to reach the gateway.
 - In public mode, proof-of-possession is required unless legacy bearer credentials are explicitly enabled.
 - Push notifications are optional. With `FERNGEIST_GATEWAY_FCM_CREDENTIALS_FILE` set, the gateway delivers hybrid notification+data pushes via FCM HTTP v1; without it, notifications are logged only and the gateway runs normally. A bad or unreadable credentials file is non-fatal — the daemon logs a warning and degrades to log-only.

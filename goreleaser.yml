@@ -30,8 +30,33 @@ builds:
         goarch: arm64
     mod_timestamp: '{{ .CommitTimestamp }}'
 
+  # Package builds (deb/rpm) carry updateChannel=apt in the binary itself so
+  # `ferngeist-gateway update` refuses to self-update at the binary level —
+  # no reliance on the service env file. Only Linux (packages are linux-only).
+  - id: gateway-pkg
+    main: ./cmd/ferngeist
+    binary: ferngeist-gateway
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w
+      - -X main.buildVersion={{.Version}}
+      - -X main.buildCommit={{.Commit}}
+      - -X main.buildTime={{.Date}}
+      - -X main.updateChannel=apt
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    mod_timestamp: '{{ .CommitTimestamp }}'
+
 archives:
   - id: default
+    # Only the self-update-capable build goes into archives; gateway-pkg is
+    # used solely for nfpm packages.
+    ids:
+      - gateway
     formats: [tar.gz]
     format_overrides:
       - goos: windows
@@ -75,6 +100,9 @@ homebrew_casks:
 nfpms:
   - id: packages
     package_name: ferngeist-gateway
+    # Package only the apt-channel binary (self-update refused at binary level).
+    ids:
+      - gateway-pkg
     file_name_template: '{{ .ProjectName }}_{{ .Version }}_{{ .Arch }}'
     vendor: Ferngeist
     homepage: 'https://github.com/arafatamim/ferngeist-acp-gateway'

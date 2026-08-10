@@ -99,6 +99,10 @@ func main() {
 						Name:  "install",
 						Usage: "install and start the daemon as a user service",
 						Flags: []cli.Flag{
+							&cli.BoolFlag{
+								Name:  "lan",
+								Usage: "listen on 0.0.0.0 and enable LAN access (defaults to localhost-only)",
+							},
 							&cli.StringFlag{
 								Name:  "host",
 								Usage: "host interface for daemon listen address (optional, defaults to 127.0.0.1)",
@@ -114,8 +118,14 @@ func main() {
 							},
 						},
 						Action: func(_ context.Context, cmd *cli.Command) error {
+							host := cmd.String("host")
+							if cmd.Bool("lan") && host == "" {
+								// --lan implies 0.0.0.0 so the service is reachable
+								// from other devices on the network.
+								host = "0.0.0.0"
+							}
 							return runDaemonInstall(service.InstallOptions{
-								Host:      cmd.String("host"),
+								Host:      host,
 								Port:      cmd.Int("port"),
 								PublicURL: cmd.String("public-url"),
 							})

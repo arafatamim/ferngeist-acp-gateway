@@ -54,13 +54,34 @@ runs as a per-user LaunchAgent (starts at login, keeps running).
 
 ### Ubuntu / Debian
 
+Install the package directly (manual):
+
 ```bash
 sudo dpkg -i ferngeist-gateway_<ver>_amd64.deb
-# or, when the apt repo is live:
+```
+
+Or add the signed apt repository and install via apt (updates included):
+
+```bash
+# One-time setup: trusts the repo signing key, adds the sources line,
+# and installs the package. Requires sudo.
+curl -fsSL https://arafatamim.github.io/ferngeist-acp-gateway/deb/setup.sh | sudo sh
+```
+
+Prefer to add the repo by hand (e.g. to pin the keyring or audit the steps)?
+
+```bash
+# One-time: add the repo signing key, then the sources line.
+curl -fsSL https://arafatamim.github.io/ferngeist-acp-gateway/deb/key.asc | sudo gpg --dearmor -o /usr/share/keyrings/ferngeist-gateway.gpg
+echo "deb [signed-by=/usr/share/keyrings/ferngeist-gateway.gpg] https://arafatamim.github.io/ferngeist-acp-gateway/deb/ stable main" | sudo tee /etc/apt/sources.list.d/ferngeist-gateway.list
+sudo apt update
 sudo apt install ferngeist-gateway
 ```
 
-The package postinstall runs `daemon install` for the invoking user.
+The package postinstall runs `daemon install` for the invoking user. By default
+the service listens on `127.0.0.1` (localhost only). To make the gateway
+reachable from other devices on your network, run
+`ferngeist-gateway daemon install --lan` (equivalent to `--host 0.0.0.0`).
 
 ### Fedora / RHEL
 
@@ -85,7 +106,8 @@ tar -xzf ferngeist-gateway_<ver>_linux_amd64.tar.gz
 
 - **winget:** `winget upgrade Ferngeist.Gateway`
 - **Homebrew:** `brew upgrade ferngeist-gateway`
-- **apt/dnf/AUR:** your package manager's normal upgrade
+- **apt:** `sudo apt update && sudo apt upgrade ferngeist-gateway`
+- **dnf/AUR:** your package manager's normal upgrade
 - **Manual installs:** `ferngeist-gateway update` (verifies against the release
   SHA256SUMS before swapping the binary). Package-manager installs refuse to
   self-update; use the package manager instead.
