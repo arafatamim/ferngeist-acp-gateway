@@ -6,9 +6,9 @@
 
 See [docs/install.md](docs/install.md) for per-OS instructions:
 
+- **macOS + Linux (one command):** `curl -fsSL https://arafatamim.github.io/ferngeist-acp-gateway/install.sh | sh`
 - **Windows:** `winget install Ferngeist.Gateway`
-- **macOS:** `brew install ferngeist-gateway` (tap `arafatamim/ferngeist-acp-gateway`, see [docs/install.md](docs/install.md))
-- **Linux:** apt/dnf, pacman, or tarball
+- **Linux packages:** apt/dnf, pacman, or tarball (the one-liner picks the right one)
 
 ## Run from source (development)
 

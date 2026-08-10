@@ -24,12 +24,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v7
         with:
           go-version: "1.26"
           cache-dependency-path: go.sum
@@ -74,7 +74,7 @@ jobs:
           echo "skip=$SKIP" >> "$GITHUB_OUTPUT"
 
       - name: Run goreleaser
-        uses: goreleaser/goreleaser-action@v6
+        uses: goreleaser/goreleaser-action@v7
         with:
           distribution: goreleaser
           version: latest
@@ -188,14 +188,14 @@ jobs:
       contents: write
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
       # The debs are built by the release job's goreleaser step. Upload them
       # as a workflow artifact so this job doesn't race the release upload.
       - name: Download .deb artifacts
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: debs
           path: debs
@@ -230,15 +230,34 @@ jobs:
         run: |
           cd apt-repo
           mkdir -p deb
-          # One-liner setup script for end users (keyring + sources + install).
-          cp "$GITHUB_WORKSPACE/packaging/apt-setup.sh" deb/setup.sh
-          chmod +x deb/setup.sh
           for deb in ../debs/*.deb; do
             arch="$(dpkg-deb -f "$deb" Architecture)"
             mkdir -p "deb/dists/stable/main/binary-$arch"
             mkdir -p "deb/pool/main/f/ferngeist-gateway"
             cp "$deb" "deb/pool/main/f/ferngeist-gateway/"
           done
+
+      # The universal installer lives at the Pages root so the one-liner
+      # curl -fsSL https://arafatamim.github.io/ferngeist-acp-gateway/install.sh | sh
+      # works on macOS + Linux (tries apt/pacman/rpm/brew, falls back to a
+      # user-level binary install). Deployed by the first repo job so the
+      # later jobs never race it.
+      - name: Deploy universal installer
+        run: |
+          cd apt-repo
+          cp "$GITHUB_WORKSPACE/packaging/install.sh" install.sh
+          chmod +x install.sh
+
+      # The Windows PowerShell installer lives at the Pages root so the
+      # one-liner irm https://arafatamim.github.io/ferngeist-acp-gateway/install.ps1 | iex
+      # works on Windows (downloads the release zip, verifies the checksum,
+      # installs the per-user scheduled task). Deployed by the first repo job
+      # so the later jobs never race it.
+      - name: Deploy Windows installer
+        run: |
+          cd apt-repo
+          cp "$GITHUB_WORKSPACE/packaging/install.ps1" install.ps1
+          chmod +x install.ps1
 
       # Generate the Packages/Release metadata + sign it (if key present).
       - name: Generate + sign apt metadata
@@ -315,7 +334,7 @@ jobs:
       contents: write
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -324,7 +343,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y createrepo-c rpm
 
       - name: Download .rpm artifacts
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: rpms
           path: rpms
@@ -354,9 +373,6 @@ jobs:
         run: |
           cd rpm-repo
           mkdir -p rpm
-          # One-liner setup script for end users (key import + repo file + install).
-          cp "$GITHUB_WORKSPACE/packaging/rpm-setup.sh" rpm/setup.sh
-          chmod +x rpm/setup.sh
           if gpg --list-secret-keys 2>/dev/null | grep -q sec; then
             SIGNER="$(gpg --list-secret-keys --with-colons 2>/dev/null | awk -F: '$1=="sec" {print $5; exit}')"
             for rpm in ../rpms/*.rpm; do
@@ -442,12 +458,12 @@ jobs:
         run: git config --global --add safe.directory '*'
 
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
       - name: Download .pkg.tar.zst artifacts
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: archpkgs
           path: archpkgs
@@ -476,9 +492,6 @@ jobs:
         run: |
           cd arch-repo
           mkdir -p arch
-          # One-liner setup script for end users (keyring + repo section + install).
-          cp "$GITHUB_WORKSPACE/packaging/arch-setup.sh" arch/setup.sh
-          chmod +x arch/setup.sh
           # Generated artifacts must stay byte-identical across checkouts
           # (same CRLF-corruption class that broke the rpm repomd signature).
           grep -q '^arch/\*\* -text' .gitattributes 2>/dev/null || echo 'arch/** -text' >> .gitattributes

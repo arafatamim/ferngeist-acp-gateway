@@ -8,9 +8,58 @@ service that starts at login and stays running.
 > apt/dnf, pacman) are published by the goreleaser release pipeline on the next
 > tagged release. Until then, use the manual channel for your OS.
 
+## One-command install (macOS + Linux)
+
+```bash
+curl -fsSL https://arafatamim.github.io/ferngeist-acp-gateway/install.sh | sh
+```
+
+The script detects your platform and tries the package managers in order —
+**apt** (Debian/Ubuntu), **pacman** (Arch), **rpm/dnf** (Fedora/RHEL), then
+**Homebrew/Linuxbrew** — falling back to a user-level binary install if none
+apply. It prints what it is about to do and asks for confirmation at each step.
+
+Options (pass after `sh -s --`):
+
+```bash
+# Non-interactive (skip prompts)
+curl -fsSL https://arafatamim.github.io/ferngeist-acp-gateway/install.sh | sh -s -- --yes
+# Force a specific channel
+curl -fsSL https://arafatamim.github.io/ferngeist-acp-gateway/install.sh | sh -s -- --channel brew
+# Force the user-level binary install
+curl -fsSL https://arafatamim.github.io/ferngeist-acp-gateway/install.sh | sh -s -- --binary
+# Listen on localhost only (default is LAN-enabled)
+curl -fsSL https://arafatamim.github.io/ferngeist-acp-gateway/install.sh | sh -s -- --localhost
+```
+
+The detailed per-OS instructions below remain valid; the one-liner is a
+convenience wrapper that picks the right one for you.
+
 ## Windows
 
-### winget (recommended)
+### PowerShell installer (recommended)
+
+One command, no admin needed, installs per-user:
+
+```powershell
+irm https://arafatamim.github.io/ferngeist-acp-gateway/install.ps1 | iex
+```
+
+Or download and run it directly (needed to pass flags):
+
+```powershell
+curl.exe -fsSL https://arafatamim.github.io/ferngeist-acp-gateway/install.ps1 -o install.ps1
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+It fetches the latest release zip, verifies its checksum, installs the daemon as
+a per-user scheduled task (one UAC prompt to create the task), and adds the CLI
+to your user PATH. Pass `-Lan` to expose the gateway on your network (default is
+localhost-only), `-Yes` to skip the install prompt, `-KeepDownloads` to keep the
+downloaded zip. Updates are manual: run `ferngeist-gateway update` when a new
+release is announced.
+
+### winget
 
 ```powershell
 winget install Ferngeist.Gateway
@@ -33,6 +82,14 @@ The first run shows a SmartScreen prompt because the build is unsigned; choose
 ## macOS
 
 ### Homebrew / Linuxbrew (recommended)
+
+Install via the one-command installer (tries brew):
+
+```bash
+curl -fsSL https://arafatamim.github.io/ferngeist-acp-gateway/install.sh | sh
+```
+
+Or tap + install manually:
 
 ```bash
 brew tap arafatamim/ferngeist-acp-gateway https://github.com/arafatamim/ferngeist-acp-gateway
@@ -57,18 +114,10 @@ gateway reachable only on localhost, re-run `ferngeist-gateway daemon install`.
 
 ### Ubuntu / Debian
 
-Install the package directly (manual):
+Install via the one-command installer (tries apt first):
 
 ```bash
-sudo dpkg -i ferngeist-gateway_<ver>_amd64.deb
-```
-
-Or add the signed apt repository and install via apt (updates included):
-
-```bash
-# One-time setup: trusts the repo signing key, adds the sources line,
-# and installs the package. Requires sudo.
-curl -fsSL https://arafatamim.github.io/ferngeist-acp-gateway/deb/setup.sh | sudo sh
+curl -fsSL https://arafatamim.github.io/ferngeist-acp-gateway/install.sh | sh
 ```
 
 Prefer to add the repo by hand (e.g. to pin the keyring or audit the steps)?
@@ -88,11 +137,10 @@ reachable from other devices on your network, run
 
 ### Fedora / RHEL
 
-Add the signed dnf/yum repository and install (updates included):
+Install via the one-command installer (tries rpm/dnf):
 
 ```bash
-# One-time setup: imports the signing key, adds the repo file, installs.
-curl -fsSL https://arafatamim.github.io/ferngeist-acp-gateway/rpm/setup.sh | sudo sh
+curl -fsSL https://arafatamim.github.io/ferngeist-acp-gateway/install.sh | sh
 ```
 
 Manual equivalent (e.g. to pin the key):
@@ -113,12 +161,10 @@ sudo dnf install ferngeist-gateway
 
 ### Arch Linux
 
-Add the signed pacman repository and install (updates included):
+Install via the one-command installer (tries pacman):
 
 ```bash
-# One-time setup: trusts the repo signing key, adds the repo section,
-# installs. Requires root.
-curl -fsSL https://arafatamim.github.io/ferngeist-acp-gateway/arch/setup.sh | sudo sh
+curl -fsSL https://arafatamim.github.io/ferngeist-acp-gateway/install.sh | sh
 ```
 
 Manual equivalent (e.g. to audit the key):

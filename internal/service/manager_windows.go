@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 const (
@@ -79,37 +80,69 @@ func (m *windowsManager) Install(options InstallOptions) error {
 }
 
 func (m *windowsManager) Uninstall(purge bool) error {
-	if err := m.ensureTaskSchedulerAvailable(); err != nil {
-		return err
-	}
-
 	paths, err := resolveWindowsPaths()
 	if err != nil {
 		return err
 	}
 
-	if err := m.schtasks("/End", "/TN", windowsTaskName); err != nil {
-		if !isTaskNotFound(err) && !isTaskNotRunning(err) {
-			return err
-		}
-	}
-	if err := m.schtasks("/Delete", "/TN", windowsTaskName, "/F"); err != nil {
-		if !isTaskNotFound(err) {
-			return err
-		}
+	// Stop the running daemon process FIRST: a running exe is locked on
+	// Windows and cannot be deleted. taskkill on the same-user process needs
+	// no elevation. The scheduled task is best-effort: deleting it from a
+	// UAC-filtered admin token may be denied, but the files must still go.
+	if err := killFerngeistProcess(); err != nil {
+		return err
 	}
 
-	if err := os.RemoveAll(paths.serviceDir); err != nil {
+	// Best-effort scheduled-task removal. Deleting the task from a
+	// UAC-filtered admin token may be denied; the files must still go, so
+	// don't let task-removal failures block the uninstall.
+	_ = m.schtasks("/End", "/TN", windowsTaskName)
+	_ = m.schtasks("/Delete", "/TN", windowsTaskName, "/F")
+
+	// The binary may still be briefly locked after the process exits; retry
+	// a few times before giving up.
+	if err := removeAllWithRetry(paths.serviceDir); err != nil {
 		return fmt.Errorf("remove daemon service files: %w", err)
 	}
 
 	if purge {
-		if err := os.RemoveAll(paths.rootDir); err != nil {
+		if err := removeAllWithRetry(paths.rootDir); err != nil {
 			return fmt.Errorf("purge daemon service data: %w", err)
 		}
 	}
 
 	return nil
+}
+
+// killFerngeistProcess terminates any running ferngeist-gateway.exe owned by
+// this user. Uses taskkill (same-user, no elevation needed). No error if none
+// is running.
+func killFerngeistProcess() error {
+	cmd := exec.Command("taskkill", "/IM", "ferngeist-gateway.exe", "/T", "/F")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		msg := strings.ToLower(strings.TrimSpace(string(out)))
+		if strings.Contains(msg, "not found") || strings.Contains(msg, "no tasks") {
+			return nil
+		}
+		return fmt.Errorf("stop daemon process: %s", strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// removeAllWithRetry removes path, retrying briefly for transient lock
+// release after a process exit. Windows reports a held-open file with
+// sharing-violation / access-denied variants, so retry on any error.
+func removeAllWithRetry(path string) error {
+	var lastErr error
+	for range 5 {
+		if err := os.RemoveAll(path); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	return lastErr
 }
 
 func (m *windowsManager) Start() error {
