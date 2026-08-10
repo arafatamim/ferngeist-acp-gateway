@@ -7,13 +7,23 @@
 See [docs/install.md](docs/install.md) for per-OS instructions:
 
 - **macOS + Linux (one command):** `curl -fsSL https://arafatamim.github.io/ferngeist-acp-gateway/install.sh | sh`
-- **Windows:** `winget install Ferngeist.Gateway`
+- **Windows:** `irm https://arafatamim.github.io/ferngeist-acp-gateway/install.ps1 | iex`
 - **Linux packages:** apt/dnf, pacman, or tarball (the one-liner picks the right one)
 
-## Run from source (development)
+## Building from source
 
-```powershell
-go run ./cmd/ferngeist daemon run
+```bash
+go build -ldflags "-X main.buildVersion=$(git describe --tags --always --dirty 2>/dev/null || echo dev) -X main.buildCommit=$(git rev-parse --short HEAD 2>/dev/null || echo none)" -o ferngeist-gateway ./cmd/ferngeist
+```
+
+This builds the `ferngeist-gateway` binary into the current directory (the
+`buildVersion` ldflag is required — the CLI refuses to start without it).
+Requires Go.
+
+To run the daemon from source without building:
+
+```bash
+go run -ldflags "-X main.buildVersion=dev" ./cmd/ferngeist daemon run
 ```
 
 ## Usage
@@ -23,7 +33,7 @@ go run ./cmd/ferngeist daemon run
 Run the daemon on the machine hosting the agents:
 
 ```powershell
-go run ./cmd/ferngeist daemon run
+ferngeist-gateway daemon run --lan
 ```
 
 ### Pair a device
@@ -31,22 +41,23 @@ go run ./cmd/ferngeist daemon run
 Pair from the machine running the daemon:
 
 ```powershell
-go run ./cmd/ferngeist pair
+ferngeist-gateway pair
 ```
 
 ### Run as a service
 
 Register the extracted binary as a background service.
 
-> NOTE: Installing the service on Windows requires administrator privileges.
+> NOTE: On Windows, creating the scheduled task shows one UAC prompt
+> (the installer handles it via `Start-Process -Verb RunAs`).
 
 ```powershell
-go run ./cmd/ferngeist daemon install
+ferngeist-gateway daemon install
 ```
 
 Check status:
 ```powershell
-go run ./cmd/ferngeist daemon status
+ferngeist-gateway daemon status
 ```
 
 ### Expose remotely
@@ -57,20 +68,20 @@ Use a tunnel or reverse proxy if the client is not on the same network.
 
 ```powershell
 ngrok http 5788
-.\ferngeist-gateway.exe daemon install --public-url https://xxxx.ngrok.io
+ferngeist-gateway daemon install --public-url https://xxxx.ngrok.io
 ```
 
 **Cloudflare Tunnel**
 
 ```powershell
 cloudflared tunnel --url http://localhost:5788
-.\ferngeist-gateway.exe daemon install --public-url https://xxxx.trycloudflare.com
+ferngeist-gateway daemon install --public-url https://xxxx.trycloudflare.com
 ```
 
 **Reverse proxy**
 
 ```powershell
-.\ferngeist-gateway.exe daemon install --public-url https://your.domain.example
+ferngeist-gateway daemon install --public-url https://your.domain.example
 ```
 
 Then pair the device and add the public URL in the Ferngeist app.
@@ -82,7 +93,7 @@ Then pair the device and add the public URL in the Ferngeist app.
 - handles pairing and paired device credentials
 - supports **resilient sessions** that survive WebSocket disconnection with push notification wake-up (FCM, with a pluggable provider seam for other platforms) and seamless reconnection
 - supports local and LAN-based access
-- stores gateway state in SQLite
+- **workspace browsing:** read-only file view (`GET /v1/runtimes/{id}/files`) and git inspection (`git/status`, `git/diff`) so a paired client can see what the agent is working on
 
 ## Documentation
 

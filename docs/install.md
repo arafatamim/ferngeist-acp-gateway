@@ -4,9 +4,10 @@ Ferngeist Gateway is a self-hosted backend service for ACP-compatible agents.
 Pick the channel for your OS; all channels install the daemon as a per-user
 service that starts at login and stays running.
 
-> **Channel availability:** the package channels below (winget, Homebrew tap,
-> apt/dnf, pacman) are published by the goreleaser release pipeline on the next
-> tagged release. Until then, use the manual channel for your OS.
+> **Channel availability:** the package channels below (Homebrew tap, apt/dnf,
+> pacman) are published by the goreleaser release pipeline on the next tagged
+> release. Until the channels you want exist, use the one-command installer or
+> the manual channel for your OS.
 
 ## One-command install (macOS + Linux)
 
@@ -58,15 +59,6 @@ to your user PATH. Pass `-Lan` to expose the gateway on your network (default is
 localhost-only), `-Yes` to skip the install prompt, `-KeepDownloads` to keep the
 downloaded zip. Updates are manual: run `ferngeist-gateway update` when a new
 release is announced.
-
-### winget
-
-```powershell
-winget install Ferngeist.Gateway
-```
-
-The first run shows a SmartScreen prompt because the build is unsigned; choose
-"More info" → "Run anyway". The daemon installs and starts automatically.
 
 ### Manual (portable zip)
 
@@ -191,7 +183,6 @@ tar -xzf ferngeist-gateway_<ver>_linux_amd64.tar.gz
 
 ## Updating
 
-- **winget:** `winget upgrade Ferngeist.Gateway`
 - **Homebrew:** `brew upgrade ferngeist-gateway`
 - **apt:** `sudo apt update && sudo apt upgrade ferngeist-gateway`
 - **dnf/yum:** `sudo dnf upgrade ferngeist-gateway` (repo installs only)

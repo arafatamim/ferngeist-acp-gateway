@@ -1,10 +1,5 @@
 ## [0.8.0] - 2026-08-09
 
-### 📚 Documentation
-
-- Update changelog for v0.8.0
-## [0.8.0] - 2026-08-09
-
 ### 🚀 Features
 
 - *(session)* Emit throttled live progress push notifications

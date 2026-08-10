@@ -42,7 +42,7 @@ Format:
 
 The **build** version (the daemon binary's `--version` and the mDNS
 `gateway_version` TXT record) is separate from the **contract** version above.
-Releases are tagged with semver (`v0.6.0` … `v0.7.3` so far); the Taskfile
+Releases are tagged with semver (`v0.6.0` … `v0.8.0` so far); the Taskfile
 derives the build version from `git describe`. They are independent and should
 not be coupled. Full release notes live in GitHub Releases.
 
@@ -76,7 +76,10 @@ not be coupled. Full release notes live in GitHub Releases.
 
 ## History
 
-- `v0.7.3` (latest tagged release) — resilient sessions and push
+- `v0.8.0` (latest tagged release) — self-hosted signed apt/rpm/pacman repos,
+  Homebrew/Linuxbrew formula, universal installer for macOS/Linux/Windows, and
+  the Windows PowerShell installer. Protocol version remains `v1`.
+- `v0.7.3` — resilient sessions and push
   notifications. Gateway protocol version was `v1alpha1`; the workspace
   surfaces did not exist yet.
 - `v0.6.0` — earliest tagged release in this history.
