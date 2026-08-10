@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -81,14 +82,20 @@ func runUpdate() error {
 		return err
 	}
 
-	// Resolve the installed service binary path so the verified binary can be
+	// Resolve the installed binary path so the verified binary can be
 	// swapped in place. Status.UnitPath is the unit/task path, not the binary.
+	// On android (Termux) there is no service manager (no systemd/launchd);
+	// update swaps the binary directly and the user restarts it.
 	manager := service.NewManager()
+	serviceManaged := true
 	status, err := manager.Status()
 	if err != nil {
-		return fmt.Errorf("read service status: %w", err)
-	}
-	if !status.Installed {
+		if errors.Is(err, service.ErrServiceUnsupportedOS) {
+			serviceManaged = false
+		} else {
+			return fmt.Errorf("read service status: %w", err)
+		}
+	} else if !status.Installed {
 		return fmt.Errorf("daemon service is not installed; run `ferngeist-gateway daemon install` first")
 	}
 	binaryPath, err := serviceBinaryPath()
@@ -117,17 +124,23 @@ func runUpdate() error {
 	// Stop the service before replacing the running binary. On Windows a
 	// running executable is locked and cannot be renamed over; on all
 	// platforms the process must be restarted to pick up the new binary.
-	if err := manager.Stop(); err != nil {
-		return fmt.Errorf("stop daemon service: %w", err)
+	if serviceManaged {
+		if err := manager.Stop(); err != nil {
+			return fmt.Errorf("stop daemon service: %w", err)
+		}
 	}
 
 	if err := update.ExtractArchiveFromFile(tmpArchiveName, "ferngeist-gateway", binaryPath); err != nil {
 		return fmt.Errorf("extract update: %w", err)
 	}
 
-	fmt.Printf("Updated to %s; restarting the daemon service.\n", release.TagName)
-	if err := manager.Restart(); err != nil {
-		return fmt.Errorf("restart daemon service: %w", err)
+	if serviceManaged {
+		fmt.Printf("Updated to %s; restarting the daemon service.\n", release.TagName)
+		if err := manager.Restart(); err != nil {
+			return fmt.Errorf("restart daemon service: %w", err)
+		}
+	} else {
+		fmt.Printf("Updated to %s at %s. Restart the daemon to pick it up.\n", release.TagName, binaryPath)
 	}
 	return nil
 }
@@ -185,6 +198,9 @@ func serviceBinaryPath() (string, error) {
 			base = filepath.Join(home, "AppData", "Local")
 		}
 		return filepath.Join(base, "FerngeistGateway", "service", "bin", "ferngeist-gateway.exe"), nil
+	case "android":
+		// Termux: the installer persists the binary to ~/.local/bin.
+		return filepath.Join(home, ".local", "bin", "ferngeist-gateway"), nil
 	default:
 		return "", fmt.Errorf("unsupported platform: %s", runtime.GOOS)
 	}

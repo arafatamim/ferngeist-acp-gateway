@@ -40,6 +40,15 @@ func requireBuildVersion() {
 
 func main() {
 	requireBuildVersion()
+	// Termux (Google Play build) prepends the binary's own path to os.Args
+	// via termux-exec's LD_PRELOAD shim (the SELinux workaround); os.Args
+	// arrives as [prog, prog, args...], which breaks subcommand dispatch in
+	// urfave/cli. Strip the duplicate so `daemon run` etc. resolve normally.
+	// See termux/termux-app#4630. The check is conservative: only strip when
+	// the first two entries are identical and TERMUX_VERSION is present.
+	if goruntime.GOOS == "android" && os.Getenv("TERMUX_VERSION") != "" && len(os.Args) > 1 && os.Args[1] == os.Args[0] {
+		os.Args = os.Args[1:]
+	}
 	command := &cli.Command{
 		Name:  "ferngeist-gateway",
 		Usage: "manage the Ferngeist gateway daemon",

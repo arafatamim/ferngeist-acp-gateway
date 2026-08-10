@@ -22,23 +22,12 @@ builds:
       - linux
       - darwin
       - windows
-      # Android (arm64) — pure-Go static PIE that runs on Termux (Android's
-      # bionic linker rejects the static ET_EXEC linux build). This is the
-      # artifact the Termux installer downloads.
-      - android
     goarch:
       - amd64
       - arm64
     ignore:
       - goos: windows
         goarch: arm64
-      # android/arm (armv7) and android/amd64 force cgo (needs the NDK
-      # clang); only android/arm64 is pure Go. Keep arm64 — it covers modern
-      # Android/Termux devices.
-      - goos: android
-        goarch: arm
-      - goos: android
-        goarch: amd64
     mod_timestamp: '{{ .CommitTimestamp }}'
 
   # Package builds (deb/rpm) carry updateChannel=apt in the binary itself so
@@ -106,12 +95,38 @@ builds:
       - arm64
     mod_timestamp: '{{ .CommitTimestamp }}'
 
+  # Android (Termux) build. MUST use cgo + the NDK clang: Go's pure-Go DNS
+  # resolver (CGO_ENABLED=0) reads /etc/resolv.conf, which Android/Termux
+  # doesn't have, so it falls back to ::1:53 and all DNS fails. cgo uses
+  # bionic's system resolver (Android's real DNS). The runner has the NDK
+  # preinstalled (ANDROID_NDK_HOME). arm64 only — android/arm and android/amd64
+  # also force cgo but target obsolete/rare devices.
+  - id: gateway-android
+    main: ./cmd/ferngeist
+    binary: ferngeist-gateway
+    env:
+      - CGO_ENABLED=1
+      - CC=${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang
+    ldflags:
+      - -s -w
+      - -X main.buildVersion={{.Version}}
+      - -X main.buildCommit={{.Commit}}
+      - -X main.buildTime={{.Date}}
+      - -X main.updateChannel={{.Env.UPDATE_CHANNEL}}
+    goos:
+      - android
+    goarch:
+      - arm64
+    mod_timestamp: '{{ .CommitTimestamp }}'
+
 archives:
   - id: default
     # Only the self-update-capable build goes into archives; gateway-pkg and
-    # gateway-arch are used solely for nfpm packages.
+    # gateway-arch are used solely for nfpm packages. gateway-android is the
+    # Termux artifact (cgo+NDK build, android_arm64).
     ids:
       - gateway
+      - gateway-android
     formats: [tar.gz]
     format_overrides:
       - goos: windows
