@@ -103,6 +103,15 @@ case "$OS" in
     *) die "unsupported operating system: $OS (expected Linux or Darwin)" ;;
 esac
 
+# Termux (Android userspace) is a Debian-like userland but has no systemd,
+# no sudo by default, and installs per-user into $PREFIX. It has apt-get and
+# dpkg, so plain channel detection would pick apt and fail. Force the
+# user-level binary install instead.
+IS_TERMUX=0
+if [ "$PLATFORM" = linux ] && [ -n "${PREFIX:-}" ] && [ "$(uname -o 2>/dev/null)" = "Android" ]; then
+    IS_TERMUX=1
+fi
+
 ARCH="$(uname -m)"
 case "$ARCH" in
     x86_64|amd64) GOARCH=amd64 ;;
@@ -137,10 +146,20 @@ channel_available() {
 pick_channel() {
     if [ -n "$FORCE_CHANNEL" ]; then
         if channel_available "$FORCE_CHANNEL"; then
+            if [ "$IS_TERMUX" = 1 ] && [ "$FORCE_CHANNEL" != binary ]; then
+                warn "Termux has no systemd/sudo; forcing the binary install (--channel $FORCE_CHANNEL ignored)"
+                CHANNEL=binary
+                return 0
+            fi
             CHANNEL="$FORCE_CHANNEL"
             return 0
         fi
         die "requested channel '$FORCE_CHANNEL' is not available on $OS/$ARCH"
+    fi
+    if [ "$IS_TERMUX" = 1 ]; then
+        step "Termux detected (no systemd/sudo); using the user-level binary install"
+        CHANNEL=binary
+        return 0
     fi
     for c in apt pacman rpm brew binary; do
         if channel_available "$c"; then
@@ -283,6 +302,23 @@ install_via_binary() {
     tar -xzf "$ARCHIVE" -C "$TMPDIR_BIN"
     BIN="$TMPDIR_BIN/ferngeist-gateway"
     [ -x "$BIN" ] || die "binary not found in $ASSET"
+
+    if [ "$IS_TERMUX" = 1 ]; then
+        # Termux has no systemd, so `daemon install` cannot register a
+        # service. Persist the binary ourselves into ~/.local/bin (the temp
+        # dir is deleted on exit) and hand the user the runit recipe.
+        BIN_DIR="$HOME/.local/bin"
+        mkdir -p "$BIN_DIR"
+        cp "$BIN" "$BIN_DIR/ferngeist-gateway"
+        chmod +x "$BIN_DIR/ferngeist-gateway"
+        step "Installed the binary at $BIN_DIR/ferngeist-gateway"
+        warn "add $BIN_DIR to your PATH to use 'ferngeist-gateway' from a terminal:"
+        warn "  echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.bashrc"
+        step "Termux has no systemd; run the gateway as a foreground daemon or a runit service:"
+        step "  $BIN_DIR/ferngeist-gateway daemon run $DAEMON_FLAGS"
+        step "  # or, for a supervised service: pkg install termux-services && sv-enable ferngeist-gateway (with a run script)"
+        return 0
+    fi
 
     # `daemon install` copies the running binary into the service bin dir
     # and registers + starts the per-user service. It can fail on headless
