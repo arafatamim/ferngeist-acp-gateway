@@ -32,10 +32,13 @@ builds:
     ignore:
       - goos: windows
         goarch: arm64
-      # android/arm (armv7) forces cgo (needs the NDK clang); skip it —
-      # arm64 covers modern Android/Termux devices.
+      # android/arm (armv7) and android/amd64 force cgo (needs the NDK
+      # clang); only android/arm64 is pure Go. Keep arm64 — it covers modern
+      # Android/Termux devices.
       - goos: android
         goarch: arm
+      - goos: android
+        goarch: amd64
     mod_timestamp: '{{ .CommitTimestamp }}'
 
   # Package builds (deb/rpm) carry updateChannel=apt in the binary itself so
