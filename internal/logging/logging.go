@@ -34,7 +34,12 @@ func New(level, dir string, maxSize int64, maxBackups int) (*slog.Logger, *Servi
 		return nil, nil, err
 	}
 
-	return slog.New(slog.NewJSONHandler(io.MultiWriter(os.Stdout, service), &slog.HandlerOptions{
+	// The rolling file writer goes FIRST so gateway.log is always written even
+	// when stdout is unavailable (e.g. the daemon is spawned without a console
+	// and its std handles are invalid, or the parent that owns the stdout pipe
+	// died). Writing stdout first would drop the file log on any stdout error,
+	// because io.MultiWriter stops at the first failing writer.
+	return slog.New(slog.NewJSONHandler(io.MultiWriter(service, os.Stdout), &slog.HandlerOptions{
 		Level: parseLevel(level),
 	})), service, nil
 }

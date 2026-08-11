@@ -181,6 +181,42 @@ tar -xzf ferngeist-gateway_<ver>_linux_amd64.tar.gz
 ./ferngeist-gateway daemon install
 ```
 
+## Uninstalling
+
+`ferngeist-gateway daemon uninstall` stops the daemon and removes the
+background-service registration. Run it from the same binary you installed
+(or any copy), elevated:
+
+```powershell
+ferngeist-gateway daemon uninstall
+```
+
+Erase user data too (pairings, settings, logs, cached agent runtimes):
+
+```powershell
+ferngeist-gateway daemon uninstall --purge
+```
+
+All platforms share the same contract:
+
+| | default `uninstall` | `--purge` |
+|---|---|---|
+| Windows (scheduled task) | task + daemon stopped — binary, wrapper, config, data stay | full install dir (binary, config, data) |
+| macOS (LaunchAgent) | LaunchAgent plist + daemon stopped — binary, config, data stay | full install dir |
+| Linux (systemd user unit) | unit file + daemon stopped — binary, config, data stay | full install dir |
+
+Notes:
+
+- Uninstall semantics are consistent across platforms: plain `uninstall`
+  unregisters the background service and stops the daemon, but leaves every
+  installed file in place — a later `daemon install` re-registers the same
+  install and resumes from the same state, no re-download needed. `--purge`
+  is the only way to reclaim the binary, config, and data.
+- Windows extra detail: since installing on Windows copies the binary into
+  the service dir, running `daemon uninstall --purge` from that installed
+  copy works — the manager renames the running binary aside and a detached
+  helper deletes it a few seconds after the command exits.
+
 ## Updating
 
 - **Homebrew:** `brew upgrade ferngeist-gateway`
