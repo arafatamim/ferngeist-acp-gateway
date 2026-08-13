@@ -29,6 +29,7 @@ import (
 	gatewaylogging "github.com/arafatamim/ferngeist-acp-gateway/internal/logging"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/pairing"
 	acpregistry "github.com/arafatamim/ferngeist-acp-gateway/internal/registry"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/remote"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/runtime"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/session"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/storage"
@@ -137,6 +138,84 @@ func TestStatusUsesConfiguredGatewayName(t *testing.T) {
 	}
 	if response.Name != "desk-alpha" {
 		t.Fatalf("Name = %q, want %q", response.Name, "desk-alpha")
+	}
+}
+
+func TestStatusSurfacesPendingTailscaleAuth(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	server := NewServer(
+		config.Config{ListenAddr: "127.0.0.1:0"},
+		BuildInfo{},
+		logger,
+		catalog.NewWithBaseDir("."),
+		runtime.NewSupervisor(logger),
+		pairing.NewService(logger, nil),
+		gateway.New(logger, nil),
+		discovery.New(logger),
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+	server.SetRemoteSetup(func() *remote.RemoteSetupSnapshot {
+		return &remote.RemoteSetupSnapshot{
+			AuthRequired: true,
+			AuthURL:      "https://login.tailscale.com/a/test1234",
+		}
+	})
+
+	request := httptest.NewRequest(http.MethodGet, "/v1/status", nil)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+
+	var response statusResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if !response.Remote.AuthRequired {
+		t.Fatal("Remote.AuthRequired = false, want true")
+	}
+	if response.Remote.AuthURL != "https://login.tailscale.com/a/test1234" {
+		t.Fatalf("Remote.AuthURL = %q, want the pending login link", response.Remote.AuthURL)
+	}
+	if response.Remote.Healthy {
+		t.Fatal("Remote.Healthy = true, want false while auth is pending")
+	}
+	if response.Remote.Mode != "tsnet" {
+		t.Fatalf("Remote.Mode = %q, want %q", response.Remote.Mode, "tsnet")
+	}
+}
+
+func TestStatusOmitsAuthFieldsWithoutRemoteSetup(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	server := NewServer(
+		config.Config{ListenAddr: "127.0.0.1:0"},
+		BuildInfo{},
+		logger,
+		catalog.NewWithBaseDir("."),
+		runtime.NewSupervisor(logger),
+		pairing.NewService(logger, nil),
+		gateway.New(logger, nil),
+		discovery.New(logger),
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+
+	request := httptest.NewRequest(http.MethodGet, "/v1/status", nil)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+
+	var response statusResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if response.Remote.AuthRequired {
+		t.Fatal("Remote.AuthRequired = true, want false without a pending setup")
+	}
+	if response.Remote.AuthURL != "" {
+		t.Fatalf("Remote.AuthURL = %q, want empty without a pending setup", response.Remote.AuthURL)
 	}
 }
 

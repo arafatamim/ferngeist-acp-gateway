@@ -29,6 +29,7 @@ import (
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/logging"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/pairing"
 	acpregistry "github.com/arafatamim/ferngeist-acp-gateway/internal/registry"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/remote"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/runtime"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/session"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/storage"
@@ -60,6 +61,10 @@ type Server struct {
 	discovery  *discovery.Service
 	logs       *logging.Service
 	registry   registryStatusProvider
+
+	// remoteSetup, when set, returns the daemon's live remote-access
+	// provisioning state (auth pending, setup blockers) for status snapshots.
+	remoteSetup func() *remote.RemoteSetupSnapshot
 
 	rateLimiter *pairingRateLimiter    // protects pairing endpoints from abuse
 	attempts    *pairingAttemptTracker // tracks failed pairing attempts for lockout
@@ -136,12 +141,14 @@ type statusResponse struct {
 // remoteStatus describes the gateway's remote access configuration as detected
 // from the PublicBaseURL setting (tailscale, cloudflare tunnel, manual proxy, etc).
 type remoteStatus struct {
-	Configured bool   `json:"configured"`
-	Mode       string `json:"mode,omitempty"`  // e.g. "tailscale", "cloudflare_tunnel", "lan_direct"
-	Scope      string `json:"scope,omitempty"` // "public", "private", or "local"
-	Healthy    bool   `json:"healthy"`
-	Warning    string `json:"warning,omitempty"`
-	PublicURL  string `json:"publicUrl,omitempty"`
+	Configured   bool   `json:"configured"`
+	Mode         string `json:"mode,omitempty"`  // e.g. "tailscale", "cloudflare_tunnel", "lan_direct"
+	Scope        string `json:"scope,omitempty"` // "public", "private", or "local"
+	Healthy      bool   `json:"healthy"`
+	Warning      string `json:"warning,omitempty"`
+	PublicURL    string `json:"publicUrl,omitempty"`
+	AuthRequired bool   `json:"authRequired,omitempty"`
+	AuthURL      string `json:"authUrl,omitempty"`
 }
 
 // adminStatusResponse is the comprehensive status returned by the admin endpoint,
@@ -436,6 +443,13 @@ func isSensitiveQueryKey(key string) bool {
 	}
 }
 
+// SetRemoteSetup wires a reader for the daemon's live remote-access
+// provisioning state (auth pending, setup blockers). Nil-safe: status simply
+// reports no pending setup when unset.
+func (s *Server) SetRemoteSetup(remoteSetup func() *remote.RemoteSetupSnapshot) {
+	s.remoteSetup = remoteSetup
+}
+
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
@@ -518,6 +532,31 @@ func (s *Server) remoteStatus(includePublicURL bool) remoteStatus {
 	default:
 		status.Mode = "local_only"
 		status.Scope = "local"
+	}
+
+	// Overlay the daemon's live provisioning state: an interactive Tailscale
+	// login still pending, or a setup blocker. This is what lets `daemon
+	// status` surface the login link instead of forcing a log-file dig.
+	if s.remoteSetup != nil {
+		if snap := s.remoteSetup(); snap != nil {
+			if snap.AuthRequired {
+				status.Mode = "tsnet"
+				if s.cfg.TailscalePrivate {
+					status.Scope = "private"
+				} else {
+					status.Scope = "public"
+				}
+				status.Healthy = false
+				status.AuthRequired = true
+				status.AuthURL = snap.AuthURL
+			}
+			if hint := strings.TrimSpace(snap.Hint); hint != "" {
+				status.Warning = strings.TrimSpace(strings.Join([]string{status.Warning, hint}, "; "))
+			}
+			if lastErr := strings.TrimSpace(snap.LastErr); lastErr != "" {
+				status.Warning = strings.TrimSpace(strings.Join([]string{status.Warning, "setup issue: " + lastErr}, "; "))
+			}
+		}
 	}
 
 	return status

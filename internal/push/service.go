@@ -30,6 +30,10 @@ const (
 	CategoryError             = "agent_error"
 	CategoryAgentCrash        = "agent_crash"
 	CategoryProgress          = "progress"
+	// CategoryGatewayURL is used when the gateway's public URL changes or is
+	// first provisioned, so clients can re-address the server without manual
+	// entry.
+	CategoryGatewayURL = "gateway_url"
 )
 
 // Notification is a platform-neutral, renderable event destined for a device.
