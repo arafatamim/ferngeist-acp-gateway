@@ -25,7 +25,57 @@ func runDaemonInstall(options service.InstallOptions) error {
 		return fmt.Errorf("install daemon service: %w", err)
 	}
 	fmt.Println("Daemon service installed and started.")
+	if options.TailscaleMode != "off" {
+		printRemoteSetupAfterInstall(context.Background())
+	}
 	return nil
+}
+
+// printRemoteSetupAfterInstall waits briefly for the freshly installed daemon
+// to report its remote-access state and prints the actionable next step: the
+// login link when Tailscale auth is pending, the public URL when ready, or a
+// pointer to `daemon status` while provisioning is still in flight.
+func printRemoteSetupAfterInstall(ctx context.Context) {
+	status, err := waitForRemoteSetup(ctx, fetchDaemonStatus, 30*time.Second)
+	if err != nil {
+		fmt.Println("\nRemote access is provisioning in the background.")
+		fmt.Println("Check progress with: ferngeist-gateway daemon status")
+		return
+	}
+	switch {
+	case status.Remote.AuthRequired:
+		fmt.Println("\nTailscale login required — open this link once to finish setup:")
+		fmt.Printf("  %s\n", status.Remote.AuthURL)
+		fmt.Println("\nIt is also shown anytime by: ferngeist-gateway daemon status")
+	case status.Remote.PublicURL != "":
+		fmt.Printf("\nRemote access ready: %s\n", status.Remote.PublicURL)
+	default:
+		fmt.Println("\nRemote access is provisioning in the background.")
+		fmt.Println("Check progress with: ferngeist-gateway daemon status")
+	}
+}
+
+// waitForRemoteSetup polls daemon status until remote access is ready or
+// blocked on interactive login, or the budget expires. Returns the last
+// observed status (zero value if the daemon never answered).
+func waitForRemoteSetup(ctx context.Context, fetch func(context.Context) (adminclient.DaemonStatus, error), budget time.Duration) (adminclient.DaemonStatus, error) {
+	ctx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+	var last adminclient.DaemonStatus
+	for {
+		st, err := fetch(ctx)
+		if err == nil {
+			last = st
+			if st.Remote.PublicURL != "" || st.Remote.AuthRequired {
+				return st, nil
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return last, ctx.Err()
+		case <-time.After(time.Second):
+		}
+	}
 }
 
 func runDaemonUninstall(purge bool) error {
@@ -94,7 +144,7 @@ func runDaemonStatus() error {
 		fmt.Fprintf(writer, "DETAIL\t%s\n", serviceStatus.UnitFileState)
 	}
 
-	daemonStatus, err := fetchDaemonStatus()
+	daemonStatus, err := fetchDaemonStatus(context.Background())
 	if err != nil {
 		fmt.Fprintf(writer, "DAEMON API\tunreachable (%s)\n", err)
 		return writer.Flush()
@@ -113,6 +163,9 @@ func runDaemonStatus() error {
 	fmt.Fprintf(writer, "UPTIME\t%s\n", formatUptime(daemonStatus.UptimeSeconds))
 	if daemonStatus.Remote.PublicURL != "" {
 		fmt.Fprintf(writer, "PUBLIC URL\t%s\n", daemonStatus.Remote.PublicURL)
+	}
+	if daemonStatus.Remote.AuthRequired {
+		fmt.Fprintf(writer, "AUTH REQUIRED\topen this link once to finish Tailscale login: %s\n", daemonStatus.Remote.AuthURL)
 	}
 	if daemonStatus.Remote.Warning != "" {
 		fmt.Fprintf(writer, "REMOTE WARNING\t%s\n", daemonStatus.Remote.Warning)
@@ -134,11 +187,8 @@ func runDaemonStatus() error {
 	return writer.Flush()
 }
 
-func fetchDaemonStatus() (adminclient.DaemonStatus, error) {
+func fetchDaemonStatus(ctx context.Context) (adminclient.DaemonStatus, error) {
 	client := adminclient.New(config.Load())
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
 	status, err := client.Status(ctx)
 	if err != nil {
 		return adminclient.DaemonStatus{}, fmt.Errorf("read daemon status: %w", err)

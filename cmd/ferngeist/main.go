@@ -91,6 +91,10 @@ func main() {
 								Name:  "lan",
 								Usage: "expose the gateway on the local network",
 							},
+							&cli.BoolFlag{
+								Name:  "remote",
+								Usage: "provision remote access over Tailscale (CLI when available, embedded tsnet otherwise)",
+							},
 							&cli.StringFlag{
 								Name:  "listen-addr",
 								Usage: "override the gateway public API listen address",
@@ -101,7 +105,7 @@ func main() {
 							},
 						},
 						Action: func(_ context.Context, cmd *cli.Command) error {
-							return runDaemon(cmd.Bool("lan"), cmd.String("listen-addr"), cmd.String("public-base-url"))
+							return runDaemon(cmd.Bool("lan"), cmd.String("listen-addr"), cmd.String("public-base-url"), cmd.Bool("remote"))
 						},
 					},
 					{
@@ -111,6 +115,10 @@ func main() {
 							&cli.BoolFlag{
 								Name:  "lan",
 								Usage: "listen on 0.0.0.0 and enable LAN access (defaults to localhost-only)",
+							},
+							&cli.BoolFlag{
+								Name:  "remote",
+								Usage: "provision remote access over Tailscale (CLI when available, embedded tsnet otherwise)",
 							},
 							&cli.StringFlag{
 								Name:  "host",
@@ -133,11 +141,15 @@ func main() {
 								// from other devices on the network.
 								host = "0.0.0.0"
 							}
-							return runDaemonInstall(service.InstallOptions{
+							options := service.InstallOptions{
 								Host:      host,
 								Port:      cmd.Int("port"),
 								PublicURL: cmd.String("public-url"),
-							})
+							}
+							if cmd.Bool("remote") {
+								options.TailscaleMode = "auto"
+							}
+							return runDaemonInstall(options)
 						},
 					},
 					{
@@ -227,8 +239,8 @@ func main() {
 	}
 }
 
-func runDaemon(enableLAN bool, listenAddr string, publicBaseURL string) error {
-	applyDaemonRunOverrides(enableLAN, listenAddr, publicBaseURL)
+func runDaemon(enableLAN bool, listenAddr string, publicBaseURL string, remote bool) error {
+	applyDaemonRunOverrides(enableLAN, listenAddr, publicBaseURL, remote)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -241,7 +253,7 @@ func runDaemon(enableLAN bool, listenAddr string, publicBaseURL string) error {
 	})
 }
 
-func applyDaemonRunOverrides(enableLAN bool, listenAddr string, publicBaseURL string) {
+func applyDaemonRunOverrides(enableLAN bool, listenAddr string, publicBaseURL string, remote bool) {
 	if enableLAN {
 		_ = os.Setenv("FERNGEIST_GATEWAY_ENABLE_LAN", "1")
 		if strings.TrimSpace(listenAddr) == "" {
@@ -255,6 +267,13 @@ func applyDaemonRunOverrides(enableLAN bool, listenAddr string, publicBaseURL st
 	}
 	if strings.TrimSpace(publicBaseURL) != "" {
 		_ = os.Setenv("FERNGEIST_GATEWAY_PUBLIC_BASE_URL", strings.TrimSpace(publicBaseURL))
+	}
+	if remote {
+		// --remote enables Tailscale provisioning unless the operator already
+		// pinned an explicit mode.
+		if _, hasMode := os.LookupEnv("FERNGEIST_GATEWAY_TAILSCALE_MODE"); !hasMode {
+			_ = os.Setenv("FERNGEIST_GATEWAY_TAILSCALE_MODE", "auto")
+		}
 	}
 }
 
