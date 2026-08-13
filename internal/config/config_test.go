@@ -220,3 +220,42 @@ func TestLoadAllowsDisablingGrace(t *testing.T) {
 		t.Fatalf("CredentialGracePeriod = %v, want 0", cfg.CredentialGracePeriod)
 	}
 }
+
+func TestLoadTailscaleModeDefaultOff(t *testing.T) {
+	cfg := Load()
+	if cfg.TailscaleMode != "off" {
+		t.Fatalf("TailscaleMode = %q, want %q", cfg.TailscaleMode, "off")
+	}
+}
+
+func TestLoadTailscaleEnv(t *testing.T) {
+	t.Setenv("FERNGEIST_GATEWAY_TAILSCALE_MODE", "auto")
+	t.Setenv("FERNGEIST_GATEWAY_TAILSCALE_AUTH_KEY", "tskey-test")
+	t.Setenv("FERNGEIST_GATEWAY_TAILSCALE_HOSTNAME", "my-gw")
+	t.Setenv("FERNGEIST_GATEWAY_TAILSCALE_PRIVATE", "1")
+	cfg := Load()
+	if cfg.TailscaleMode != "auto" || cfg.TailscaleAuthKey != "tskey-test" ||
+		cfg.TailscaleHostname != "my-gw" || !cfg.TailscalePrivate {
+		t.Fatalf("unexpected config: %+v", cfg)
+	}
+}
+
+func TestLoadTailscaleModeInvalid(t *testing.T) {
+	t.Setenv("FERNGEIST_GATEWAY_TAILSCALE_MODE", "bogus")
+	if cfg := Load(); cfg.TailscaleMode != "off" {
+		t.Fatalf("TailscaleMode = %q, want %q", cfg.TailscaleMode, "off")
+	}
+}
+
+func TestLoadTailscaleModeForcesPublicSecurityDefaults(t *testing.T) {
+	// Even before the public URL is known (async provisioning), an enabled
+	// Tailscale mode must engage the same strict defaults as a public URL.
+	t.Setenv("FERNGEIST_GATEWAY_TAILSCALE_MODE", "auto")
+	cfg := Load()
+	if !cfg.RequireProofOfPossession {
+		t.Fatal("RequireProofOfPossession should default true when Tailscale mode is enabled")
+	}
+	if cfg.AllowLegacyBearerCredentials {
+		t.Fatal("AllowLegacyBearerCredentials should default false when Tailscale mode is enabled")
+	}
+}

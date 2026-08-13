@@ -2,16 +2,21 @@ package daemon
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/adminclient"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/api"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/config"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/remote"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/storage"
 )
 
@@ -325,7 +330,7 @@ func TestRun_returns_error_when_state_db_unavailable(t *testing.T) {
 
 	dir := t.TempDir()
 	dbDir := filepath.Join(dir, "statedb")
-	if err := os.MkdirAll(dbDir, 0755); err != nil {
+	if err := os.MkdirAll(dbDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -344,5 +349,192 @@ func TestRun_returns_error_when_state_db_unavailable(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "state database") {
 		t.Errorf("error = %v, want error containing 'state database'", err)
+	}
+}
+
+func TestRun_surfaces_pending_tailscale_auth_in_status(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test")
+	}
+
+	oldProvision := remoteProvision
+	oldInterval := remoteRetryInterval
+	defer func() {
+		remoteProvision = oldProvision
+		remoteRetryInterval = oldInterval
+	}()
+	remoteRetryInterval = 10 * time.Millisecond
+
+	remoteProvision = func(ctx context.Context, cfg config.Config, localAddr string, port int, _ func(string)) (*remote.Result, error) {
+		return nil, &remote.ErrAuthRequired{AuthURL: "https://login.tailscale.com/a/daemontest"}
+	}
+
+	adminPort := 15789
+	t.Setenv("FERNGEIST_GATEWAY_LISTEN_ADDR", "127.0.0.1:0")
+	t.Setenv("FERNGEIST_GATEWAY_ADMIN_ADDR", fmt.Sprintf("127.0.0.1:%d", adminPort))
+	t.Setenv("FERNGEIST_GATEWAY_STATE_DB", filepath.Join(t.TempDir(), "state.db"))
+	t.Setenv("FERNGEIST_GATEWAY_LOG_DIR", t.TempDir())
+	t.Setenv("FERNGEIST_GATEWAY_MANAGED_BIN_DIR", t.TempDir())
+	t.Setenv("FERNGEIST_GATEWAY_ENABLE_LAN", "0")
+	t.Setenv("FERNGEIST_GATEWAY_UPDATE_CHECK_ENABLED", "0")
+	t.Setenv("FERNGEIST_GATEWAY_TAILSCALE_MODE", "auto")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- Run(ctx, api.BuildInfo{Version: "test"})
+	}()
+
+	// Poll the admin API status until auth-required surfaces.
+	cfg := config.Config{AdminListenAddr: fmt.Sprintf("127.0.0.1:%d", adminPort)}
+	client := adminclient.New(cfg)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		st, err := client.Status(ctx)
+		if err == nil && st.Remote.AuthRequired {
+			if st.Remote.AuthURL != "https://login.tailscale.com/a/daemontest" {
+				t.Fatalf("AuthURL = %q, want the provisioning login link", st.Remote.AuthURL)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("remote setup snapshot never reported auth-required via status API")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("Run returned: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for Run to complete")
+	}
+}
+
+func TestRun_retries_remote_provisioning_until_success(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test")
+	}
+
+	oldProvision := remoteProvision
+	oldInterval := remoteRetryInterval
+	defer func() {
+		remoteProvision = oldProvision
+		remoteRetryInterval = oldInterval
+	}()
+	remoteRetryInterval = 10 * time.Millisecond
+
+	var mu sync.Mutex
+	calls := 0
+	succeeded := make(chan struct{})
+	remoteProvision = func(ctx context.Context, cfg config.Config, localAddr string, port int, _ func(string)) (*remote.Result, error) {
+		mu.Lock()
+		calls++
+		n := calls
+		mu.Unlock()
+		if n == 1 {
+			return nil, errors.New("tsnet funnel: Funnel not available; HTTPS must be enabled. See https://tailscale.com/s/https.")
+		}
+		close(succeeded)
+		return &remote.Result{Mode: "tsnet", URL: "https://gw.tail1234.ts.net", Close: func() error { return nil }}, nil
+	}
+
+	t.Setenv("FERNGEIST_GATEWAY_LISTEN_ADDR", "127.0.0.1:0")
+	t.Setenv("FERNGEIST_GATEWAY_ADMIN_ADDR", "127.0.0.1:0")
+	t.Setenv("FERNGEIST_GATEWAY_STATE_DB", filepath.Join(t.TempDir(), "state.db"))
+	t.Setenv("FERNGEIST_GATEWAY_LOG_DIR", t.TempDir())
+	t.Setenv("FERNGEIST_GATEWAY_MANAGED_BIN_DIR", t.TempDir())
+	t.Setenv("FERNGEIST_GATEWAY_ENABLE_LAN", "0")
+	t.Setenv("FERNGEIST_GATEWAY_UPDATE_CHECK_ENABLED", "0")
+	t.Setenv("FERNGEIST_GATEWAY_TAILSCALE_MODE", "auto")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- Run(ctx, api.BuildInfo{Version: "test"})
+	}()
+
+	select {
+	case <-succeeded:
+	case <-time.After(5 * time.Second):
+		t.Fatal("retry never succeeded")
+	}
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("Run returned: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for Run to complete")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if calls < 2 {
+		t.Fatalf("provision called %d times, want at least 2 (a retry)", calls)
+	}
+}
+
+func TestRun_provisions_remote_access_and_closes(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test")
+	}
+
+	old := remoteProvision
+	defer func() { remoteProvision = old }()
+
+	provisioned := make(chan struct{})
+	closed := make(chan struct{})
+	remoteProvision = func(ctx context.Context, cfg config.Config, localAddr string, port int, _ func(string)) (*remote.Result, error) {
+		close(provisioned)
+		return &remote.Result{
+			Mode: "tsnet",
+			URL:  "https://gw.tail1234.ts.net",
+			Close: func() error {
+				close(closed)
+				return nil
+			},
+		}, nil
+	}
+
+	t.Setenv("FERNGEIST_GATEWAY_LISTEN_ADDR", "127.0.0.1:0")
+	t.Setenv("FERNGEIST_GATEWAY_ADMIN_ADDR", "127.0.0.1:0")
+	t.Setenv("FERNGEIST_GATEWAY_STATE_DB", filepath.Join(t.TempDir(), "state.db"))
+	t.Setenv("FERNGEIST_GATEWAY_LOG_DIR", t.TempDir())
+	t.Setenv("FERNGEIST_GATEWAY_MANAGED_BIN_DIR", t.TempDir())
+	t.Setenv("FERNGEIST_GATEWAY_ENABLE_LAN", "0")
+	t.Setenv("FERNGEIST_GATEWAY_UPDATE_CHECK_ENABLED", "0")
+	t.Setenv("FERNGEIST_GATEWAY_TAILSCALE_MODE", "auto")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- Run(ctx, api.BuildInfo{Version: "test"})
+	}()
+
+	select {
+	case <-provisioned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("remote provisioning was not invoked")
+	}
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("Run returned: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for Run to complete")
+	}
+	select {
+	case <-closed:
+	default:
+		t.Fatal("remote result Close was not called during shutdown")
 	}
 }

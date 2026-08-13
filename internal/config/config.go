@@ -91,6 +91,18 @@ type Config struct {
 	// UpdateCheckInterval is how often the daemon re-checks for a newer stable
 	// release. 0 means use the default (24h).
 	UpdateCheckInterval time.Duration
+	// TailscaleMode controls automatic remote access provisioning:
+	// "off" disables it, "auto" uses the tailscale CLI when available and
+	// falls back to an embedded tsnet node, "cli" forces the CLI path,
+	// "tsnet" forces the embedded node. Empty/invalid values mean "off".
+	TailscaleMode string
+	// TailscaleAuthKey optionally pre-authenticates the embedded tsnet node.
+	TailscaleAuthKey string
+	// TailscaleHostname is the tailnet device name for the embedded node.
+	TailscaleHostname string
+	// TailscalePrivate restricts exposure to the tailnet only (tsnet
+	// ListenTLS / `tailscale serve`) instead of public Funnel.
+	TailscalePrivate bool
 }
 
 type PersistedSettings struct {
@@ -134,6 +146,10 @@ func Load() Config {
 		FCMCredentialsFile:     strings.TrimSpace(os.Getenv("FERNGEIST_GATEWAY_FCM_CREDENTIALS_FILE")),
 		FrameLogEnabled:        envBool("FERNGEIST_GATEWAY_FRAME_LOG"),
 		UpdateCheckInterval:    envDurationSecondsOrDefault("FERNGEIST_GATEWAY_UPDATE_CHECK_INTERVAL_SECONDS", defaultUpdateCheckInterval),
+		TailscaleMode:          normalizeTailscaleMode(envOrDefault("FERNGEIST_GATEWAY_TAILSCALE_MODE", "off")),
+		TailscaleAuthKey:       strings.TrimSpace(os.Getenv("FERNGEIST_GATEWAY_TAILSCALE_AUTH_KEY")),
+		TailscaleHostname:      envOrDefault("FERNGEIST_GATEWAY_TAILSCALE_HOSTNAME", "ferngeist-gateway"),
+		TailscalePrivate:       envBool("FERNGEIST_GATEWAY_TAILSCALE_PRIVATE"),
 	}
 	// UpdateCheckEnabled defaults to true; only an explicit false/0 disables it.
 	cfg.UpdateCheckEnabled = true
@@ -163,13 +179,18 @@ func (c Config) ApplyPersistedSettings(settings PersistedSettings) Config {
 
 func (c Config) applySecurityDefaults() Config {
 	publicMode := strings.TrimSpace(c.PublicBaseURL) != ""
+	// Remote access is provisioned asynchronously when no auth key is set, so
+	// the public URL may not be known at boot. Treat any enabled Tailscale mode
+	// as intended public exposure: strict defaults apply from the first boot,
+	// not only once the URL is persisted. Env overrides below still win.
+	remoteExposed := c.TailscaleMode != "" && c.TailscaleMode != "off"
 	if !hasEnv("FERNGEIST_GATEWAY_REQUIRE_PROOF_OF_POSSESSION") {
-		c.RequireProofOfPossession = publicMode
+		c.RequireProofOfPossession = publicMode || remoteExposed
 	} else {
 		c.RequireProofOfPossession = envBool("FERNGEIST_GATEWAY_REQUIRE_PROOF_OF_POSSESSION")
 	}
 	if !hasEnv("FERNGEIST_GATEWAY_ALLOW_LEGACY_BEARER_CREDENTIALS") {
-		c.AllowLegacyBearerCredentials = !publicMode
+		c.AllowLegacyBearerCredentials = !publicMode && !remoteExposed
 	} else {
 		c.AllowLegacyBearerCredentials = envBool("FERNGEIST_GATEWAY_ALLOW_LEGACY_BEARER_CREDENTIALS")
 	}
@@ -182,6 +203,17 @@ func envOrDefault(key, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+// normalizeTailscaleMode coerces a FERNGEIST_GATEWAY_TAILSCALE_MODE value into
+// one of the valid modes, defaulting to "off" for empty or unknown values.
+func normalizeTailscaleMode(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "auto", "cli", "tsnet":
+		return strings.ToLower(strings.TrimSpace(value))
+	default:
+		return "off"
+	}
 }
 
 func hasEnv(key string) bool {
