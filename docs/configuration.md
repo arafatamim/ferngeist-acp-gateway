@@ -18,6 +18,10 @@ Ferngeist Gateway is configured through environment variables and persisted stat
 | `FERNGEIST_GATEWAY_CREDENTIAL_GRACE_SECONDS` | How long an expired credential stays recoverable via refresh; `0` disables grace (hard-delete-on-expiry) | `90 days` |
 | `FERNGEIST_GATEWAY_REQUIRE_PROOF_OF_POSSESSION` | Require proof-of-possession pairing | `true` in public mode |
 | `FERNGEIST_GATEWAY_ALLOW_LEGACY_BEARER_CREDENTIALS` | Allow legacy bearer-only credentials | `false` in public mode |
+| `FERNGEIST_GATEWAY_TAILSCALE_MODE` | Remote access provisioning: `off`, `auto` (tailscale CLI when available, else embedded node), `cli`, `tsnet` | `off` |
+| `FERNGEIST_GATEWAY_TAILSCALE_AUTH_KEY` | Pre-auth key for the embedded Tailscale node (skips interactive login) | unset |
+| `FERNGEIST_GATEWAY_TAILSCALE_HOSTNAME` | Tailnet device name for the embedded node | `ferngeist-gateway` |
+| `FERNGEIST_GATEWAY_TAILSCALE_PRIVATE` | Use `serve`/`ListenTLS` (tailnet-only) instead of public Funnel | `false` |
 
 ## Resilient session settings
 
@@ -54,6 +58,9 @@ Ferngeist Gateway is configured through environment variables and persisted stat
 - `daemon install` registers the extracted binary as a background service.
 - `daemon install --lan` listens on `0.0.0.0` and enables LAN access (default is
   localhost-only). `--host 0.0.0.0` is the explicit equivalent.
+- `daemon install --remote` (or `daemon run --remote`) writes
+  `FERNGEIST_GATEWAY_TAILSCALE_MODE=auto` into the service environment. See
+  [docs/remote-access.md](docs/remote-access.md).
 - `PUBLIC_BASE_URL` should match the URL clients use to reach the gateway.
 - In public mode, proof-of-possession is required unless legacy bearer credentials are explicitly enabled.
 - Push notifications are optional. With `FERNGEIST_GATEWAY_FCM_CREDENTIALS_FILE` set, the gateway delivers hybrid notification+data pushes via FCM HTTP v1; without it, notifications are logged only and the gateway runs normally. A bad or unreadable credentials file is non-fatal — the daemon logs a warning and degrades to log-only.

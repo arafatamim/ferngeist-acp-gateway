@@ -29,6 +29,24 @@ Base path: `/v1`
 
 - `GET /v1/status`
   - Returns gateway status, build info, discovery state, remote access state, registry status, and runtime counts.
+  - The `remote` object describes how the gateway is reachable:
+    ```json
+    {
+      "configured": true,
+      "mode": "tailscale",
+      "scope": "public",
+      "healthy": true,
+      "publicUrl": "https://ferngeist-gateway.tail123.ts.net",
+      "authRequired": false,
+      "authUrl": ""
+    }
+    ```
+  - `mode` is one of: `tailscale`, `cloudflare_tunnel`, `lan_direct`, `local_only`, `tsnet`.
+  - `scope` is one of: `public`, `private`, `lan`, `local`.
+  - `authRequired` is `true` when an interactive Tailscale login is pending;
+    `authUrl` carries the link the operator must open. Both clear after login.
+  - `warning` (omitted when empty) carries setup hints (e.g. "HTTPS must be
+    enabled") or security warnings.
 
 - `GET /v1/agents`
   - Returns the supported agent catalog merged with live runtime state.

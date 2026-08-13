@@ -20,6 +20,9 @@ Its main job is to expose ACP agents through a unified WebSocket API. It discove
 - `internal/discovery` — LAN advertising via mDNS
 - `internal/config` — configuration and persisted settings
 - `internal/daemon` — wiring and startup reconciliation
+- `internal/remote` — Tailscale adapter (CLI or embedded tsnet), funnel/serve provisioning, and domain types (`Result`, `ErrAuthRequired`, `RemoteSetupSnapshot`)
+- `internal/remoteaccess` — remote access provisioning lifecycle: owns the snapshot, persists public URLs, notifies paired devices, and surfaces auth-pending state to the status API
+- `internal/adminclient` — typed HTTP client for the admin API (used by `daemon status` and `daemon install`)
 
 ## Resilient gateway sessions
 
@@ -192,6 +195,37 @@ Single-use, short-lived (5-minute TTL) nonces used to prove ownership of a sessi
 ## Startup reconciliation
 
 On daemon restart, all sessions in `active` or `disconnected` status are transitioned to `failed` in SQLite, since their backing processes are gone.
+
+## Remote access provisioning
+
+The gateway can expose itself over the internet via Tailscale Funnel (or a
+manual tunnel/proxy). The provisioning pipeline is split across three
+packages:
+
+- **`internal/remote`** — the adapter layer. `Provisioner` detects whether
+  to use the host Tailscale CLI or an embedded tsnet node, runs funnel or
+  serve, and returns a `Result` with the stable public URL. It defines the
+  domain types: `Result` (mode + URL), `ErrAuthRequired` (interactive login
+  pending), and `RemoteSetupSnapshot` (status API payload).
+
+- **`internal/remoteaccess`** — the lifecycle manager. `Access` wraps a
+  `ProvisionFunc` (the seam the daemon injects), owns the provisioning
+  snapshot (`atomic.Pointer`), persists the public URL to SQLite, and
+  notifies paired devices via push. On interactive Tailscale login, the
+  module's internal `loginHook` stores the auth URL so `daemon status` can
+  surface it while the node stays alive for the human. The retry loop (15s
+  intervals for transient tailnet-settings errors) stays in `daemon` —
+  `remoteaccess` handles a single provision attempt.
+
+- **`internal/daemon`** — wires the two together. On `--remote`, it
+  creates `remoteaccess.Access` with the real `remoteProvision` closure,
+  calls `Provision()` in a background goroutine, and retries on transient
+  failures. The status API reads `Access.Snapshot()` to report
+  `AUTH REQUIRED` / `SETUP NEEDED` / `PUBLIC URL` to `daemon status`.
+
+The snapshot flows one way: `remoteaccess` writes, `api` reads for the
+status endpoint, `daemon` reads to decide retry behavior. No package
+reaches into another's snapshot state.
 
 ## Notes
 

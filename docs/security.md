@@ -45,6 +45,19 @@ If you expose the gateway outside your local network:
 - prefer HTTPS
 - keep the admin API bound to localhost
 
+Tailscale specifics:
+
+- Tailscale Funnel exposes the gateway to the public internet with a stable
+  URL. The gateway's own security model is unchanged: proof-of-possession
+  pairing is enforced, device credentials are hashed, and the admin API
+  remains bound to localhost.
+- Tailscale Serve (or `FERNGEIST_GATEWAY_TAILSCALE_PRIVATE=1`) keeps the
+  gateway reachable only from the tailnet — the more private option when the
+  client app runs Tailscale too.
+- Enabling any Tailscale mode turns the public-mode security defaults on from
+  the first boot, even before the public URL is known: proof-of-possession
+  required, legacy bearer-only credentials disabled.
+
 See [docs/remote-access.md](docs/remote-access.md) for tunnel and proxy options.
 
 ## Diagnostics

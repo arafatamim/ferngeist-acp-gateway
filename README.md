@@ -8,7 +8,8 @@ See [docs/install.md](docs/install.md) for per-OS instructions:
 
 - **macOS + Linux (one command):** `curl -fsSL https://arafatamim.github.io/ferngeist-acp-gateway/install.sh | sh`
 - **Windows:** `irm https://arafatamim.github.io/ferngeist-acp-gateway/install.ps1 | iex`
-- **Linux packages:** apt/dnf, pacman, or tarball (the one-liner picks the right one)
+
+Or download the latest release package from the [GitHub releases page](https://github.com/arafatamim/ferngeist-acp-gateway/releases) if you want to install manually.
 
 ## Building from source
 
@@ -33,6 +34,14 @@ go run -ldflags "-X main.buildVersion=dev" ./cmd/ferngeist daemon run
 Run the daemon on the machine hosting the agents:
 
 ```powershell
+# This automatically provisions a secure public URL for the gateway using Tailscale
+ferngeist-gateway daemon run --remote
+```
+
+or
+
+```powershell
+# Run the daemon locally on your home network
 ferngeist-gateway daemon run --lan
 ```
 
@@ -48,9 +57,6 @@ ferngeist-gateway pair
 
 Register the extracted binary as a background service.
 
-> NOTE: On Windows, creating the scheduled task shows one UAC prompt
-> (the installer handles it via `Start-Process -Verb RunAs`).
-
 ```powershell
 ferngeist-gateway daemon install
 ```
@@ -62,7 +68,19 @@ ferngeist-gateway daemon status
 
 ### Expose remotely
 
-Use a tunnel or reverse proxy if the client is not on the same network.
+#### Automatic provisioning (powered by Tailscale)
+
+```powershell
+ferngeist-gateway daemon install --remote
+```
+
+This embeds a Tailscale node in the gateway, provisions Funnel for public
+access, and gives you a stable `https://<machine>.<tailnet>.ts.net` URL that
+never changes between restarts. One-time Tailscale settings (HTTPS + Funnel
+permission) are required on first boot — the gateway retries and tells you
+exactly what to enable. See [docs/remote-access.md](docs/remote-access.md).
+
+#### Manually
 
 **ngrok**
 
