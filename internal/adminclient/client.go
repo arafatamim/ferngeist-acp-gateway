@@ -45,12 +45,14 @@ type DaemonStatus struct {
 }
 
 type RemoteStatus struct {
-	Configured bool   `json:"configured"`
-	Mode       string `json:"mode,omitempty"`
-	Scope      string `json:"scope,omitempty"`
-	Healthy    bool   `json:"healthy"`
-	Warning    string `json:"warning,omitempty"`
-	PublicURL  string `json:"publicUrl,omitempty"`
+	Configured   bool   `json:"configured"`
+	Mode         string `json:"mode,omitempty"`
+	Scope        string `json:"scope,omitempty"`
+	Healthy      bool   `json:"healthy"`
+	Warning      string `json:"warning,omitempty"`
+	PublicURL    string `json:"publicUrl,omitempty"`
+	AuthRequired bool   `json:"authRequired,omitempty"`
+	AuthURL      string `json:"authUrl,omitempty"`
 }
 
 type PairingTargetInfo struct {
