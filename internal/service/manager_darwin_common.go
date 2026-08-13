@@ -348,6 +348,9 @@ func writeDarwinEnvFile(paths darwinPaths, options InstallOptions) error {
 	if options.PublicURL != "" {
 		lines = append(lines, "FERNGEIST_GATEWAY_PUBLIC_BASE_URL="+options.PublicURL)
 	}
+	if options.TailscaleMode != "" && options.TailscaleMode != "off" {
+		lines = append(lines, "FERNGEIST_GATEWAY_TAILSCALE_MODE="+options.TailscaleMode)
+	}
 	content := strings.Join(lines, "\n") + "\n"
 	if err := os.WriteFile(paths.envPath, []byte(content), 0o600); err != nil {
 		return fmt.Errorf("write service environment file: %w", err)

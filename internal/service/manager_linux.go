@@ -311,6 +311,9 @@ func writeLinuxEnvFile(paths linuxPaths, options InstallOptions) error {
 	if options.PublicURL != "" {
 		lines = append(lines, "FERNGEIST_GATEWAY_PUBLIC_BASE_URL="+options.PublicURL)
 	}
+	if options.TailscaleMode != "" && options.TailscaleMode != "off" {
+		lines = append(lines, "FERNGEIST_GATEWAY_TAILSCALE_MODE="+options.TailscaleMode)
+	}
 	lines = append(lines, "")
 
 	content := strings.Join(lines, "\n")

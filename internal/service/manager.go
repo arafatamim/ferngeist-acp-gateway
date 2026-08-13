@@ -36,6 +36,9 @@ type InstallOptions struct {
 	Host      string
 	Port      int
 	PublicURL string
+	// TailscaleMode is written into the service environment; "off" writes
+	// nothing. Valid: "off", "auto", "cli", "tsnet".
+	TailscaleMode string
 }
 
 type Manager interface {
@@ -88,6 +91,11 @@ func ValidateInstallOptions(options InstallOptions) error {
 	if normalized.Port < 1 || normalized.Port > 65535 {
 		return fmt.Errorf("%w: port must be between 1 and 65535", ErrInvalidInstallOptions)
 	}
+	switch normalized.TailscaleMode {
+	case "", "off", "auto", "cli", "tsnet":
+	default:
+		return fmt.Errorf("%w: invalid tailscale mode %q", ErrInvalidInstallOptions, normalized.TailscaleMode)
+	}
 	return nil
 }
 
@@ -107,9 +115,10 @@ func NormalizeInstallOptions(options InstallOptions) InstallOptions {
 	}
 
 	return InstallOptions{
-		Host:      host,
-		Port:      port,
-		PublicURL: strings.TrimSpace(options.PublicURL),
+		Host:          host,
+		Port:          port,
+		PublicURL:     strings.TrimSpace(options.PublicURL),
+		TailscaleMode: strings.TrimSpace(options.TailscaleMode),
 	}
 }
 

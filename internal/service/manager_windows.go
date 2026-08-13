@@ -431,6 +431,10 @@ func writeWindowsWrapperScript(paths windowsPaths, options InstallOptions) error
 	if options.PublicURL != "" {
 		publicURLLine = "$env:FERNGEIST_GATEWAY_PUBLIC_BASE_URL = '" + escapePowerShellSingleQuoted(options.PublicURL) + "'"
 	}
+	tailscaleModeLine := ""
+	if options.TailscaleMode != "" && options.TailscaleMode != "off" {
+		tailscaleModeLine = "$env:FERNGEIST_GATEWAY_TAILSCALE_MODE = '" + escapePowerShellSingleQuoted(options.TailscaleMode) + "'"
+	}
 
 	content := fmt.Sprintf(
 		`$ErrorActionPreference = "Stop"
@@ -450,6 +454,7 @@ $env:FERNGEIST_GATEWAY_LOG_DIR = $logDir
 $env:FERNGEIST_GATEWAY_MANAGED_BIN_DIR = $managedBinDir
 $env:FERNGEIST_GATEWAY_LISTEN_ADDR = '%s'
 $env:FERNGEIST_GATEWAY_ENABLE_LAN = '%s'
+%s
 %s
 
 if (Test-Path $overrideScriptPath) {
@@ -497,6 +502,7 @@ if ($logEntry) {
 		escapePowerShellSingleQuoted(listenAddr),
 		escapePowerShellSingleQuoted(enableLAN),
 		publicURLLine,
+		tailscaleModeLine,
 	)
 
 	if err := os.WriteFile(paths.wrapperScriptPath, []byte(content), 0o644); err != nil {
@@ -540,6 +546,7 @@ func writeWindowsOverridesTemplate(paths windowsPaths) error {
 # $env:FERNGEIST_GATEWAY_ENABLE_LAN = "1"
 # $env:FERNGEIST_GATEWAY_LISTEN_ADDR = "0.0.0.0:5788"
 # $env:FERNGEIST_GATEWAY_PUBLIC_BASE_URL = "https://example.com"
+# $env:FERNGEIST_GATEWAY_TAILSCALE_MODE = "auto"
 `)
 
 	if err := os.WriteFile(paths.overrideScriptPath, content, 0o644); err != nil {
