@@ -10,9 +10,6 @@ import (
 )
 
 func TestWriteLinuxEnvFileDropsPublicURLForLanOnly(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("posix env file only")
-	}
 	paths := linuxPaths{envPath: filepath.Join(t.TempDir(), "daemon.env")}
 
 	err := writeLinuxEnvFile(paths, InstallOptions{
@@ -33,9 +30,6 @@ func TestWriteLinuxEnvFileDropsPublicURLForLanOnly(t *testing.T) {
 }
 
 func TestWriteLinuxEnvFileKeepsPublicURLWithRemote(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("posix env file only")
-	}
 	paths := linuxPaths{envPath: filepath.Join(t.TempDir(), "daemon.env")}
 
 	err := writeLinuxEnvFile(paths, InstallOptions{
@@ -57,9 +51,6 @@ func TestWriteLinuxEnvFileKeepsPublicURLWithRemote(t *testing.T) {
 }
 
 func TestWriteLinuxEnvFileKeepsExplicitPublicURLOnLocalhost(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("posix env file only")
-	}
 	paths := linuxPaths{envPath: filepath.Join(t.TempDir(), "daemon.env")}
 
 	err := writeLinuxEnvFile(paths, InstallOptions{

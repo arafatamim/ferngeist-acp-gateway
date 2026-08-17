@@ -155,6 +155,10 @@ func Run(ctx context.Context, build api.BuildInfo) error {
 				// so fixing the setting in the browser is enough — the gateway
 				// picks up on its own, no restart. The actionable hint is
 				// logged once; later attempts stay quiet until one succeeds.
+				// Capture the interval on the main goroutine: tests swap the
+				// package var while Run is live, and reading it from the
+				// retry loop would race the write.
+				retryInterval := remoteRetryInterval
 				go func() {
 					attempt := 0
 					for {
@@ -172,7 +176,7 @@ func Run(ctx context.Context, build api.BuildInfo) error {
 						select {
 						case <-ctx.Done():
 							return
-						case <-time.After(remoteRetryInterval):
+						case <-time.After(retryInterval):
 						}
 					}
 				}()

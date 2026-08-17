@@ -310,7 +310,7 @@ func writeLinuxEnvFile(paths linuxPaths, options InstallOptions) error {
 	}
 	// A persisted remote URL must not survive into a LAN-only service: it
 	// would otherwise keep advertising the old tailnet URL.
-	if options.PublicURL != "" && (options.TailscaleMode == "" || options.TailscaleMode == "off") && !enableLAN {
+	if options.PublicURL != "" && (options.TailscaleMode == "" || options.TailscaleMode == "off") && enableLAN != "1" {
 		lines = append(lines, "FERNGEIST_GATEWAY_PUBLIC_BASE_URL="+options.PublicURL)
 	}
 	if options.TailscaleMode != "" && options.TailscaleMode != "off" {
