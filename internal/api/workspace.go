@@ -88,6 +88,7 @@ type gitChangedFile struct {
 	Added   int    `json:"added"`
 	Removed int    `json:"removed"`
 	Binary  bool   `json:"binary"` // true when git reported "-" for the counts
+	IsDir   bool   `json:"isDir"`  // true for submodules and collapsed untracked dirs
 }
 
 // parseGitStatus parses `git status --porcelain=v2` output into a list of
@@ -108,8 +109,11 @@ func parseGitStatus(out string) []gitChangedFile {
 		}
 		switch {
 		case line[0] == '?' && line[1] == ' ':
-			// Untracked file: `? <path>`.
-			files = append(files, gitChangedFile{Path: strings.TrimSpace(line[1:]), Status: "?"})
+			// Untracked file: `? <path>`. With --untracked-files=all the path
+			// is a file; without it Git collapses whole untracked directories
+			// to a single `? <dir>/` entry, which is a directory.
+			p := strings.TrimSpace(line[1:])
+			files = append(files, gitChangedFile{Path: p, Status: "?", IsDir: strings.HasSuffix(p, "/")})
 		case (line[0] == '1' || line[0] == '2') && line[1] == ' ':
 			// Tracked change. Both formats share a fixed whitespace-separated
 			// prefix (7 fields for format 1, 8 for format 2); the path is the
@@ -119,8 +123,19 @@ func parseGitStatus(out string) []gitChangedFile {
 			if line[0] == '2' {
 				prefix = 8
 			}
-			xy, rest, ok := afterFields(line[2:], prefix)
-			if !ok || xy == "" || rest == "" {
+			xy, rest, ok := afterFields(line[2:], 1)
+			if !ok || rest == "" {
+				continue
+			}
+			sub, rest, ok := afterFields(rest, 1)
+			if !ok || rest == "" {
+				continue
+			}
+			// Skip the remaining fixed fields (mH mI mW hH hI for format 1,
+			// plus the rename score for format 2); the path is the raw
+			// remainder and may contain spaces.
+			_, rest, ok = afterFields(rest, prefix-2)
+			if !ok || rest == "" {
 				continue
 			}
 			path := rest
@@ -135,7 +150,11 @@ func parseGitStatus(out string) []gitChangedFile {
 			if status == "." {
 				status = string(xy[1])
 			}
-			files = append(files, gitChangedFile{Path: path, Status: status})
+			// sub is the abbreviated status per worktree: S..U marks a modified
+			// submodule (a gitlink directory). A trailing slash marks a collapsed
+			// untracked directory. Both are directories, not files.
+			isDir := strings.HasSuffix(path, "/") || strings.HasPrefix(sub, "S")
+			files = append(files, gitChangedFile{Path: path, Status: status, IsDir: isDir})
 		}
 	}
 	return files
@@ -450,7 +469,7 @@ func (s *Server) handleWorkspaceGitStatus(w http.ResponseWriter, r *http.Request
 	if !ok {
 		return
 	}
-	out, err := runGit(r.Context(), cwd, "status", "--porcelain=v2", "--branch")
+	out, err := runGit(r.Context(), cwd, "status", "--porcelain=v2", "--branch", "--untracked-files=all")
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
@@ -529,6 +548,13 @@ func (s *Server) handleWorkspaceGitDiff(w http.ResponseWriter, r *http.Request) 
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		// Submodules and directories are not diffable file content; reject them
+		// with a clear 400 instead of letting git show/read fail into a 422.
+		// Whole-tree diffs skip them via isDir; this is the single-file guard.
+		if fi, err := os.Stat(abs); err == nil && fi.IsDir() {
+			writeError(w, http.StatusBadRequest, "path is a directory or submodule, not a file: "+rel)
+			return
+		}
 		entry, err := s.gitDiffEntry(r.Context(), cwd, rel, abs)
 		if err != nil {
 			writeError(w, http.StatusUnprocessableEntity, err.Error())
@@ -540,7 +566,7 @@ func (s *Server) handleWorkspaceGitDiff(w http.ResponseWriter, r *http.Request) 
 
 	// Whole-tree: enumerate changed files via git status and emit one entry
 	// per file that has readable or deleted working content.
-	out, err := runGit(r.Context(), cwd, "status", "--porcelain=v2", "--branch")
+	out, err := runGit(r.Context(), cwd, "status", "--porcelain=v2", "--branch", "--untracked-files=all")
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
@@ -548,6 +574,13 @@ func (s *Server) handleWorkspaceGitDiff(w http.ResponseWriter, r *http.Request) 
 	changed := parseGitStatus(out)
 	entries := make([]acp.ToolCallContentDiff, 0, len(changed))
 	for _, f := range changed {
+		// Submodules and collapsed untracked dirs are directories, not files;
+		// they cannot be diffed as file content (git show HEAD:<path> fails
+		// for a gitlink, readFileLimited fails on a dir). /git/status reports
+		// them with isDir:true; the diff lists only real files.
+		if f.IsDir {
+			continue
+		}
 		abs, err := resolveWithinRoot(cwd, f.Path)
 		if err != nil {
 			continue

@@ -75,6 +75,23 @@ func TestParseGitStatus(t *testing.T) {
 	if files[3].Path != "my untracked file.txt" || files[3].Status != "?" {
 		t.Fatalf("files[3] = %+v, want {my untracked file.txt ?}", files[3])
 	}
+	// A modified submodule: format-1 record with submodule mode (160000) and
+	// worktree status M; the path is a directory-like gitlink and must be
+	// classified as such, not as an ordinary file.
+	out += "1 .M S..U 160000 160000 160000 abc 000 vendor/DiffuEraser\n"
+	files = parseGitStatus(out)
+	if len(files) != 5 {
+		t.Fatalf("parseGitStatus returned %d files, want 5: %+v", len(files), files)
+	}
+	if f := files[4]; f.Path != "vendor/DiffuEraser" || f.Status != "M" || !f.IsDir {
+		t.Fatalf("files[4] = %+v, want {vendor/DiffuEraser M isDir:true}", f)
+	}
+	// An untracked directory collapses to a trailing-slash path by default; it
+	// is a directory, not a file.
+	files = parseGitStatus("? vendor/\n")
+	if len(files) != 1 || files[0].Path != "vendor/" || files[0].Status != "?" || !files[0].IsDir {
+		t.Fatalf("untracked dir = %+v, want {vendor/ ? isDir:true}", files)
+	}
 }
 
 func TestRunGit(t *testing.T) {
