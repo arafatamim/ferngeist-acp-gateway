@@ -1,3 +1,8 @@
+## [0.9.1] - 2026-08-17
+
+### 🐛 Bug Fixes
+
+- *(service)* Unify public-URL env guard across platforms
 ## [0.9.0] - 2026-08-17
 
 ### 🚀 Features
@@ -13,6 +18,7 @@
 
 - *(adminclient)* Add authRequired/authURL to DaemonStatus struct
 - *(config)* Apply persisted remote URL only when remote requested
+- *(ci)* Linux env guard and remote retry race
 
 ### 💼 Other
 
@@ -22,6 +28,7 @@
 ### 📚 Documentation
 
 - Remote access documentation
+- Regenerate changelog for v0.9.0
 ## [0.8.0] - 2026-08-10
 
 ### 🚀 Features
