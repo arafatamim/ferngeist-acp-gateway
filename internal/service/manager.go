@@ -23,6 +23,25 @@ const (
 
 const linuxUnitName = "ferngeist-gateway.service"
 
+// remoteModeRequested reports whether the operator asked for remote access
+// (any valid Tailscale mode). An empty string is NOT remote — it is the
+// LAN/localhost default.
+func remoteModeRequested(mode string) bool {
+	return mode != "" && mode != "off"
+}
+
+// includePublicURL decides whether an explicit PublicURL is written into the
+// service environment. It is dropped only for a LAN-only install (non-loopback
+// host, no remote requested): a URL persisted by a previous --remote run would
+// otherwise keep advertising the old tailnet URL. It is kept for loopback
+// installs (reverse-proxy setups) and whenever remote access is requested.
+func includePublicURL(options InstallOptions) bool {
+	if options.PublicURL == "" {
+		return false
+	}
+	return remoteModeRequested(options.TailscaleMode) || isLoopbackHost(options.Host)
+}
+
 type Status struct {
 	Installed     bool
 	LoadState     string

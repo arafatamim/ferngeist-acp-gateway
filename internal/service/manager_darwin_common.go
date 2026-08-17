@@ -347,10 +347,10 @@ func writeDarwinEnvFile(paths darwinPaths, options InstallOptions) error {
 	}
 	// A persisted remote URL must not survive into a LAN-only service: it
 	// would otherwise keep advertising the old tailnet URL.
-	if options.PublicURL != "" && (options.TailscaleMode == "" || options.TailscaleMode == "off") && !isLoopbackHost(options.Host) {
+	if includePublicURL(options) {
 		lines = append(lines, "FERNGEIST_GATEWAY_PUBLIC_BASE_URL="+options.PublicURL)
 	}
-	if options.TailscaleMode != "" && options.TailscaleMode != "off" {
+	if remoteModeRequested(options.TailscaleMode) {
 		lines = append(lines, "FERNGEIST_GATEWAY_TAILSCALE_MODE="+options.TailscaleMode)
 	}
 	content := strings.Join(lines, "\n") + "\n"

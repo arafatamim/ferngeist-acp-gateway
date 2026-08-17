@@ -30,6 +30,8 @@ func TestWriteLinuxEnvFileDropsPublicURLForLanOnly(t *testing.T) {
 }
 
 func TestWriteLinuxEnvFileKeepsPublicURLWithRemote(t *testing.T) {
+	// --remote (TailscaleMode=auto) must keep the public URL even on a LAN
+	// host: the operator explicitly asked for remote access.
 	paths := linuxPaths{envPath: filepath.Join(t.TempDir(), "daemon.env")}
 
 	err := writeLinuxEnvFile(paths, InstallOptions{
