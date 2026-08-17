@@ -39,13 +39,16 @@ func TestApplyPersistedSettingsKeepsExplicitEnvOverrides(t *testing.T) {
 	t.Setenv("FERNGEIST_GATEWAY_ENABLE_LAN", "1")
 	t.Setenv("FERNGEIST_GATEWAY_NAME", "env-gateway")
 
+	// Simulate a LAN run (no --remote) with an explicit env URL: the env
+	// value already loaded into cfg must win over the persisted URL.
+	enableLAN := true
 	cfg := Config{
 		RegistryURL:   "https://env.example/registry.json",
 		PublicBaseURL: "https://env.example.com",
 		EnableLAN:     true,
+		TailscaleMode: "off",
 		GatewayName:   "env-gateway",
 	}
-	enableLAN := false
 
 	updated := cfg.ApplyPersistedSettings(PersistedSettings{
 		RegistryURL:   "https://stored.example/registry.json",
@@ -184,6 +187,45 @@ func TestLoadAppliesPairingSecurityEnvOverrides(t *testing.T) {
 	}
 	if cfg.AllowLegacyBearerCredentials {
 		t.Fatal("AllowLegacyBearerCredentials should be false")
+	}
+}
+
+func TestApplyPersistedSettingsSkipsStaleURLWhenRemoteOff(t *testing.T) {
+	// A URL persisted by a previous --remote run must not survive into a
+	// boot without remote access: plain localhost or LAN mode would
+	// otherwise keep advertising the old tailnet URL.
+	enableLAN := true
+	cfg := Config{EnableLAN: true, TailscaleMode: "off"}
+	updated := cfg.ApplyPersistedSettings(PersistedSettings{
+		PublicBaseURL: "https://stale.tail1234.ts.net",
+		EnableLAN:     &enableLAN,
+	})
+	if updated.PublicBaseURL != "" {
+		t.Fatalf("PublicBaseURL = %q, want empty (stale URL must not survive non-remote boot)", updated.PublicBaseURL)
+	}
+
+	enableLAN = false
+	updated = cfg.ApplyPersistedSettings(PersistedSettings{
+		PublicBaseURL: "https://stale.tail1234.ts.net",
+		EnableLAN:     &enableLAN,
+	})
+	if updated.PublicBaseURL != "" {
+		t.Fatalf("PublicBaseURL = %q, want empty (stale URL must not survive plain localhost boot)", updated.PublicBaseURL)
+	}
+}
+
+func TestApplyPersistedSettingsKeepsURLWhenRemoteRequested(t *testing.T) {
+	// Any explicit remote mode (auto/cli/tsnet) still gets its persisted URL.
+	for _, mode := range []string{"auto", "cli", "tsnet"} {
+		enableLAN := false
+		cfg := Config{TailscaleMode: mode}
+		updated := cfg.ApplyPersistedSettings(PersistedSettings{
+			PublicBaseURL: "https://gw.tail1234.ts.net",
+			EnableLAN:     &enableLAN,
+		})
+		if updated.PublicBaseURL != "https://gw.tail1234.ts.net" {
+			t.Fatalf("mode %q: PublicBaseURL = %q, want persisted URL", mode, updated.PublicBaseURL)
+		}
 	}
 }
 

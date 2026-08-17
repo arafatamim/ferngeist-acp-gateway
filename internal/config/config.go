@@ -165,7 +165,13 @@ func (c Config) ApplyPersistedSettings(settings PersistedSettings) Config {
 	if !hasEnv("FERNGEIST_GATEWAY_REGISTRY_URL") && strings.TrimSpace(settings.RegistryURL) != "" {
 		c.RegistryURL = strings.TrimSpace(settings.RegistryURL)
 	}
-	if !hasEnv("FERNGEIST_GATEWAY_PUBLIC_BASE_URL") && strings.TrimSpace(settings.PublicBaseURL) != "" {
+	// A persisted remote URL only makes sense when this run actually
+	// requests remote access (Tailscale mode on). It is written by a
+	// --remote provision, so applying it on a plain LAN or localhost boot
+	// would keep advertising the old tailnet URL. An explicit env pin below
+	// still wins.
+	if !hasEnv("FERNGEIST_GATEWAY_PUBLIC_BASE_URL") && strings.TrimSpace(settings.PublicBaseURL) != "" &&
+		c.TailscaleMode != "off" {
 		c.PublicBaseURL = strings.TrimSpace(settings.PublicBaseURL)
 	}
 	if !hasEnv("FERNGEIST_GATEWAY_ENABLE_LAN") && settings.EnableLAN != nil {

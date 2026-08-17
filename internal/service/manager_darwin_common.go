@@ -345,7 +345,9 @@ func writeDarwinEnvFile(paths darwinPaths, options InstallOptions) error {
 		"FERNGEIST_GATEWAY_LOG_DIR=" + paths.logDir,
 		"FERNGEIST_GATEWAY_MANAGED_BIN_DIR=" + paths.managedBinDir,
 	}
-	if options.PublicURL != "" {
+	// A persisted remote URL must not survive into a LAN-only service: it
+	// would otherwise keep advertising the old tailnet URL.
+	if options.PublicURL != "" && (options.TailscaleMode == "" || options.TailscaleMode == "off") && !isLoopbackHost(options.Host) {
 		lines = append(lines, "FERNGEIST_GATEWAY_PUBLIC_BASE_URL="+options.PublicURL)
 	}
 	if options.TailscaleMode != "" && options.TailscaleMode != "off" {

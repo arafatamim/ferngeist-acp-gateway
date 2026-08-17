@@ -428,7 +428,9 @@ func writeWindowsWrapperScript(paths windowsPaths, options InstallOptions) error
 		enableLAN = "1"
 	}
 	publicURLLine := ""
-	if options.PublicURL != "" {
+	// A persisted remote URL must not survive into a LAN-only service: it
+	// would otherwise keep advertising the old tailnet URL.
+	if options.PublicURL != "" && (options.TailscaleMode == "" || options.TailscaleMode == "off") && !isLoopbackHost(options.Host) {
 		publicURLLine = "$env:FERNGEIST_GATEWAY_PUBLIC_BASE_URL = '" + escapePowerShellSingleQuoted(options.PublicURL) + "'"
 	}
 	tailscaleModeLine := ""
