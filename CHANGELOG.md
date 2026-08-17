@@ -1,4 +1,28 @@
-## [0.8.0] - 2026-08-09
+## [0.9.0] - 2026-08-17
+
+### 🚀 Features
+
+- *(remote)* Tailscale adapter and provisioning lifecycle
+- *(daemon)* Wire remote access provisioning with retry loop
+- *(api)* Remote access state in status endpoint
+- *(service)* Cross-platform env injection for remote access
+- *(cmd)* Daemon install --remote and status auth link
+- *(workspace)* Classify submodules and untracked dirs as directories
+
+### 🐛 Bug Fixes
+
+- *(adminclient)* Add authRequired/authURL to DaemonStatus struct
+- *(config)* Apply persisted remote URL only when remote requested
+
+### 💼 Other
+
+- Update ferngeist-gateway formula to v0.8.0
+- *(win)* Windowless wscript launcher, fix stop/restart, harden uninstall
+
+### 📚 Documentation
+
+- Remote access documentation
+## [0.8.0] - 2026-08-10
 
 ### 🚀 Features
 
@@ -14,8 +38,14 @@
 - *(update)* Notify paired devices when a new stable release exists
 - *(daemon)* Periodic update-available check with device push
 - *(cli)* Add ferngeist-gateway update command
-- *(release)* Goreleaser pipeline with brew, winget, nfpm channels
-- *(release)* Publish signed apt repository to gh-pages-deb
+- *(release)* Goreleaser pipeline with brew, winget, nfpm, AUR channels
+- *(release)* Signed apt repo + one-liner installer
+- *(release)* Signed dnf/yum rpm repo on gh-pages-deb (rpm/ tree)
+- *(release)* Self-hosted signed pacman repo; drop AUR
+- *(release)* Homebrew/Linuxbrew formula on main
+- *(install)* Universal installer for macOS/Linux/Windows
+- *(build)* Android arm64 build for Termux; installer fetches it on Termux
+- *(android)* Working Termux build — cgo/NDK DNS, argv fix, direct-update
 
 ### 🐛 Bug Fixes
 
@@ -23,8 +53,16 @@
 - *(session)* Send agent-side ACP session id in session/close
 - *(update)* Extract binary from release archive, stop service before swap, honor package channels
 - *(update)* Refuse self-update when package-manager env gate is set
-- *(release)* Pin apt signing key export to the key that signs InRelease
-- *(release)* Commit git-cliff changelog before goreleaser to avoid dirty-tree abort
+- *(ci)* Race-free session pump, deterministic teardown, inline-env plist
+- *(service)* Launchd integration test + darwin Status state parsing
+- *(install)* Detect Termux and force the binary channel
+- *(release)* Ignore android/amd64 (forces cgo) in gateway build
+
+### 💼 Other
+
+- Update ferngeist-gateway formula to v0.8.0
+- Update ferngeist-gateway formula to v0.8.0
+- Update ferngeist-gateway formula to v0.8.0
 
 ### 🚜 Refactor
 
@@ -39,6 +77,7 @@
 - Note grace-period refresh in contract changelog
 - Per-OS installation guide
 - Update changelog
+- Bring install/README/changelog up to date
 
 ### 🧪 Testing
 
@@ -49,6 +88,7 @@
 - Add macOS (amd64 + arm64) to release workflow
 - Add Android build task
 - Add git-cliff changelog tooling and tag-scoped release changelog
+- *(release)* Allow replacing existing release assets on re-run
 ## [0.7.3] - 2026-07-20
 
 ### 🐛 Bug Fixes
