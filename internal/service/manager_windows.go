@@ -82,13 +82,24 @@ func (m *windowsManager) Install(options InstallOptions) error {
 	if err := m.schtasks("/Create", "/TN", windowsTaskName, "/SC", "ONLOGON", "/TR", action, "/RL", "LIMITED", "/F"); err != nil {
 		return err
 	}
-	if err := m.schtasks("/Run", "/TN", windowsTaskName); err != nil {
-		if !isTaskAlreadyRunning(err) {
+
+	// schtasks /Run returns success as soon as the scheduler accepts the
+	// request; right after a /Create /F the run can be dropped while the
+	// scheduler reconciles the recreated task. Retry until the task is
+	// actually Running (or already running), so install leaves a live daemon
+	// instead of a Ready task.
+	for range 10 {
+		err := m.schtasks("/Run", "/TN", windowsTaskName)
+		if err == nil || isTaskAlreadyRunning(err) {
+			if m.isTaskRunning() {
+				return nil
+			}
+		} else {
 			return err
 		}
+		time.Sleep(500 * time.Millisecond)
 	}
-
-	return nil
+	return fmt.Errorf("daemon task did not enter running state after install")
 }
 
 func (m *windowsManager) Uninstall(purge bool) error {
@@ -317,6 +328,17 @@ func (m *windowsManager) ensureInstalled() error {
 	return nil
 }
 
+// isTaskRunning reports whether the scheduled task is currently in the
+// Running state (the daemon wrapper is up). Used by Install to confirm the
+// task actually started after schtasks /Run.
+func (m *windowsManager) isTaskRunning() bool {
+	status, err := m.Status()
+	if err != nil {
+		return false
+	}
+	return status.Installed && status.ActiveState == "running"
+}
+
 func (m *windowsManager) schtasks(args ...string) error {
 	_, err := m.schtasksOutput(args...)
 	return err
@@ -463,12 +485,14 @@ if (Test-Path $overrideScriptPath) {
     . $overrideScriptPath
 }
 
-# Launch the daemon with NO console (CreateNoWindow): the scheduled-task
-# console host on some machines is closed shortly after start, which delivers
-# CTRL_CLOSE to every console-attached process (task ends with 0xC000013A). A
-# process with no console cannot receive that event. stdout/stderr are
-# redirected through pipes so the daemon's std handles stay valid and its
-# output is captured to $daemonLogPath; the daemon also writes its own
+# Launch the daemon hidden (CreateNoWindow). Note: CreateNoWindow suppresses
+# a NEW console window, it does NOT detach the child from the parent console —
+# the daemon still inherits the wrapper's console and would receive CTRL_CLOSE
+# when that console closes. Two layers protect it: the launcher runs this
+# wrapper under conhost.exe --headless (no visible console to close), and the
+# daemon registers a SetConsoleCtrlHandler that ignores CTRL_CLOSE. stdout/
+# stderr are redirected through pipes so the daemon's std handles stay valid
+# and its output is captured to $daemonLogPath; the daemon also writes its own
 # structured log to $logDir (gateway.log).
 $psi = New-Object System.Diagnostics.ProcessStartInfo
 $psi.FileName = $binaryPath
@@ -520,11 +544,19 @@ func writeWindowsLauncherScript(paths windowsPaths) error {
 	// Windows Terminal being the default terminal host (which ignores the
 	// -WindowStyle Hidden SW_HIDE hint for new consoles). bWaitOnReturn
 	// keeps wscript as the task's lifecycle owner, same as the wrapper was.
+	//
+	// conhost.exe --headless creates a detached console with no visible
+	// window, so even a fresh Windows Terminal (which would otherwise
+	// materialize a window for a new console) stays out of the picture. The
+	// wrapper gets a real console it can read/write (daemon pipes) without
+	// any surface the user could close; the daemon child then inherits that
+	// console and is shielded from CTRL_CLOSE. See writeWindowsWrapperScript
+	// for the daemon-side CTRL_CLOSE handler.
 	content := fmt.Sprintf(
 		`' Ferngeist gateway daemon launcher (windowless).
 ' wscript.exe has no console; style 0 hides the powershell child.
 Set shell = CreateObject("WScript.Shell")
-shell.Run "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ""%s""", 0, True
+shell.Run "conhost.exe --headless powershell.exe -NoProfile -ExecutionPolicy Bypass -File ""%s""", 0, True
 `,
 		paths.wrapperScriptPath,
 	)

@@ -25,7 +25,7 @@ func runDaemonInstall(options service.InstallOptions) error {
 		return fmt.Errorf("install daemon service: %w", err)
 	}
 	fmt.Println("Daemon service installed and started.")
-	if options.TailscaleMode != "off" {
+	if options.TailscaleMode != "off" && options.TailscaleMode != "" {
 		printRemoteSetupAfterInstall(context.Background())
 	}
 	return nil

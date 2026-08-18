@@ -5,10 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/signal"
 	goruntime "runtime"
 	"strings"
-	"syscall"
 	"text/tabwriter"
 	"time"
 
@@ -242,7 +240,11 @@ func main() {
 func runDaemon(enableLAN bool, listenAddr string, publicBaseURL string, remote bool) error {
 	applyDaemonRunOverrides(enableLAN, listenAddr, publicBaseURL, remote)
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	// On Windows, ignore CTRL_CLOSE (console window closed) so a daemon
+	// launched by the service wrapper survives its console being closed.
+	configureConsoleLifecycle()
+
+	ctx, stop := waitForSignal()
 	defer stop()
 
 	return daemon.Run(ctx, api.BuildInfo{
@@ -278,7 +280,7 @@ func applyDaemonRunOverrides(enableLAN bool, listenAddr string, publicBaseURL st
 }
 
 func runPair() error {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := waitForSignal()
 	defer stop()
 
 	client := adminclient.New(config.Load())
