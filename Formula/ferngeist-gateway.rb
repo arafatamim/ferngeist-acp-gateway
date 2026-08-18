@@ -5,21 +5,21 @@
 class FerngeistGateway < Formula
   desc "Self-hosted backend service for ACP-compatible agents"
   homepage "https://github.com/arafatamim/ferngeist-acp-gateway"
-  version "0.9.1"
+  version "0.9.2"
   license "MIT"
 
   on_macos do
     if Hardware::CPU.intel?
-      url "https://github.com/arafatamim/ferngeist-acp-gateway/releases/download/v0.9.1/ferngeist-gateway_0.9.1_darwin_amd64_brew.tar.gz"
-      sha256 "c2c963e01e2460072d52cb1acd51f33c5fe532268e868045bdcfd0856048cd02"
+      url "https://github.com/arafatamim/ferngeist-acp-gateway/releases/download/v0.9.2/ferngeist-gateway_0.9.2_darwin_amd64_brew.tar.gz"
+      sha256 "1318f8e8598858dcb662ad8d1ac0439034c97348568afc2b7ba943e482160e88"
 
       define_method(:install) do
         bin.install "ferngeist-gateway"
       end
     end
     if Hardware::CPU.arm?
-      url "https://github.com/arafatamim/ferngeist-acp-gateway/releases/download/v0.9.1/ferngeist-gateway_0.9.1_darwin_arm64_brew.tar.gz"
-      sha256 "230cd4a8620388798b6fd6c753ac8f989865a292ba7f44c1e3478b68103d07df"
+      url "https://github.com/arafatamim/ferngeist-acp-gateway/releases/download/v0.9.2/ferngeist-gateway_0.9.2_darwin_arm64_brew.tar.gz"
+      sha256 "5033db6cba8813d584692e242f2c67e89ab9c3bf12b888f88b2411a6b091bc22"
 
       define_method(:install) do
         bin.install "ferngeist-gateway"
@@ -29,15 +29,15 @@ class FerngeistGateway < Formula
 
   on_linux do
     if Hardware::CPU.intel? && Hardware::CPU.is_64_bit?
-      url "https://github.com/arafatamim/ferngeist-acp-gateway/releases/download/v0.9.1/ferngeist-gateway_0.9.1_linux_amd64_brew.tar.gz"
-      sha256 "a6597f3794ea5fd2f42c90edf49ccff701eff4f400d7fa4bfac3aa49cb30ae6e"
+      url "https://github.com/arafatamim/ferngeist-acp-gateway/releases/download/v0.9.2/ferngeist-gateway_0.9.2_linux_amd64_brew.tar.gz"
+      sha256 "dac502f444006373c3559fe0b3c2cdd6f920e3e3f7148f5856a567bb4f4b0d35"
       define_method(:install) do
         bin.install "ferngeist-gateway"
       end
     end
     if Hardware::CPU.arm? && Hardware::CPU.is_64_bit?
-      url "https://github.com/arafatamim/ferngeist-acp-gateway/releases/download/v0.9.1/ferngeist-gateway_0.9.1_linux_arm64_brew.tar.gz"
-      sha256 "eb9a846092120a84e48e4bffdf2e52096d6cbfd9efca3f7298d11e7b2d436425"
+      url "https://github.com/arafatamim/ferngeist-acp-gateway/releases/download/v0.9.2/ferngeist-gateway_0.9.2_linux_arm64_brew.tar.gz"
+      sha256 "aca3f36bb5d044931bd1290c54af1891c3ea2c217dda290630d8969b815d5354"
       define_method(:install) do
         bin.install "ferngeist-gateway"
       end
