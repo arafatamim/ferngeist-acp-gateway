@@ -547,6 +547,58 @@ func TestStatusFlagsInvalidRemoteConfiguration(t *testing.T) {
 	}
 }
 
+// TestStatusReportsLiveSetPublicURL covers asynchronous remote provisioning:
+// the URL is provisioned after NewServer snapshots the config, so
+// SetPublicURL must make remoteStatus report it live, without a restart.
+func TestStatusReportsLiveSetPublicURL(t *testing.T) {
+	server := newTestServer()
+
+	// Before provisioning: local only.
+	request := httptest.NewRequest(http.MethodGet, "/v1/status", nil)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	var response statusResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if response.Remote.Configured {
+		t.Fatal("Remote.Configured should be false before SetPublicURL")
+	}
+	if response.Remote.Mode != "local_only" {
+		t.Fatalf("Remote.Mode = %q, want %q before SetPublicURL", response.Remote.Mode, "local_only")
+	}
+
+	// Provisioning completes asynchronously: the live URL appears in status.
+	server.SetPublicURL("https://gw.tail123.ts.net")
+	recorder = httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	response = statusResponse{}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if !response.Remote.Configured {
+		t.Fatal("Remote.Configured should be true after SetPublicURL")
+	}
+	if response.Remote.Mode != "tailscale" {
+		t.Fatalf("Remote.Mode = %q, want %q after SetPublicURL", response.Remote.Mode, "tailscale")
+	}
+	if !response.Remote.Healthy {
+		t.Fatal("Remote.Healthy should be true for a valid ts.net URL")
+	}
+
+	// Clearing the live URL falls back to the boot config (empty here).
+	server.SetPublicURL("")
+	recorder = httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	response = statusResponse{}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if response.Remote.Configured {
+		t.Fatal("Remote.Configured should be false after clearing live URL")
+	}
+}
+
 func TestPairingRoundTrip(t *testing.T) {
 	server := newTestServer()
 

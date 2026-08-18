@@ -54,6 +54,10 @@ var remoteProvision = func(ctx context.Context, cfg config.Config, localAddr str
 // the shutdown sequence without racing on the shared variable.
 var remoteResultCh = make(chan *remote.Result, 1)
 
+// remoteURLCh delivers the provisioned public URL from the asynchronous path
+// to the status path, so remoteStatus reports the live URL without a restart.
+var remoteURLCh = make(chan string, 1)
+
 // remoteRetryInterval is the pause between background provisioning attempts
 // while the operator fixes tailnet settings (HTTPS/Funnel). Overridden in
 // tests to keep them fast.
@@ -165,6 +169,12 @@ func Run(ctx context.Context, build api.BuildInfo) error {
 						res, err := access.Provision(ctx)
 						if err == nil && res != nil {
 							remoteResultCh <- res
+							// Also hand the URL to the status path: remoteStatus
+							// must report the provisioned URL without a restart.
+							select {
+							case remoteURLCh <- res.URL:
+							default:
+							}
 							return
 						}
 						attempt++
@@ -234,6 +244,16 @@ func Run(ctx context.Context, build api.BuildInfo) error {
 	if access != nil {
 		server.SetRemoteSetup(func() *remote.RemoteSetupSnapshot { return access.Snapshot() })
 	}
+
+	// Apply the asynchronously provisioned public URL to the server once it
+	// arrives: status must report the live remote URL without a restart.
+	go func() {
+		select {
+		case publicURL := <-remoteURLCh:
+			server.SetPublicURL(publicURL)
+		case <-ctx.Done():
+		}
+	}()
 
 	logger.Info("starting gateway daemon",
 		slog.String("listen_addr", cfg.ListenAddr),

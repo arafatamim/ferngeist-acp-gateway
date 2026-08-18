@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/catalog"
@@ -65,6 +66,12 @@ type Server struct {
 	// remoteSetup, when set, returns the daemon's live remote-access
 	// provisioning state (auth pending, setup blockers) for status snapshots.
 	remoteSetup func() *remote.RemoteSetupSnapshot
+
+	// publicURL is the live provisioned remote-access public URL, set when
+	// asynchronous provisioning finishes after NewServer. Guards the
+	// boot-time cfg.PublicBaseURL snapshot for status reporting.
+	publicURL   string
+	publicURLMu sync.Mutex
 
 	rateLimiter *pairingRateLimiter    // protects pairing endpoints from abuse
 	attempts    *pairingAttemptTracker // tracks failed pairing attempts for lockout
@@ -450,6 +457,27 @@ func (s *Server) SetRemoteSetup(remoteSetup func() *remote.RemoteSetupSnapshot) 
 	s.remoteSetup = remoteSetup
 }
 
+// SetPublicURL sets the live remote-access public URL. Remote provisioning
+// can finish asynchronously (interactive Tailscale login) after NewServer
+// snapshotted the config, so remoteStatus must consult this live value rather
+// than the boot-time cfg.PublicBaseURL. Thread-safe; empty clears it.
+func (s *Server) SetPublicURL(publicURL string) {
+	s.publicURLMu.Lock()
+	defer s.publicURLMu.Unlock()
+	s.publicURL = strings.TrimSpace(publicURL)
+}
+
+// publicBaseURL returns the effective public base URL: the live provisioned
+// value when set, otherwise the boot-time config value.
+func (s *Server) publicBaseURL() string {
+	s.publicURLMu.Lock()
+	defer s.publicURLMu.Unlock()
+	if s.publicURL != "" {
+		return s.publicURL
+	}
+	return strings.TrimSpace(s.cfg.PublicBaseURL)
+}
+
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
@@ -511,7 +539,7 @@ func (s *Server) gatewayDisplayName() string {
 // It classifies the connection mode (tailscale, cloudflare tunnel, LAN, local)
 // and detects the network scope (public vs private) for security warnings.
 func (s *Server) remoteStatus(includePublicURL bool) remoteStatus {
-	publicBaseURL := strings.TrimSpace(s.cfg.PublicBaseURL)
+	publicBaseURL := s.publicBaseURL()
 	status := remoteStatus{
 		Configured: publicBaseURL != "",
 		Healthy:    true,
