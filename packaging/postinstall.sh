@@ -1,6 +1,10 @@
 #!/bin/sh
-# Runs after dpkg/rpm installs the binary. `daemon install` is idempotent and
-# per-user; if HOME is unavailable (root package install), skip silently.
+# Runs after dpkg/rpm installs the binary. `daemon install` registers a
+# PER-USER systemd user service, which cannot be done as root (root has no
+# user session bus; the unit would land under /root anyway). When the package
+# was installed via sudo, re-run the install as the invoking user. When no
+# invoking user is identifiable (e.g. su -c apt, container root), skip with a
+# clear message instead of failing with a cryptic DBus error.
 set -u
 
 # The package installs the binary to /usr/bin; prefer it. Fall back to the
@@ -14,11 +18,49 @@ else
     GATEWAY_BIN=
 fi
 
+# Resolve the non-root user who invoked the install (sudo sets SUDO_USER;
+# pkexec sets PKEXEC_UID). Empty when we are root from a non-sudo context.
+invoking_user=""
+if [ "$(id -u)" = 0 ]; then
+    if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+        invoking_user="$SUDO_USER"
+    elif [ -n "${PKEXEC_UID:-}" ]; then
+        invoking_user="$(id -un "$PKEXEC_UID" 2>/dev/null || true)"
+    fi
+fi
+
 if [ -n "$GATEWAY_BIN" ]; then
     # Package installs target non-technical users who want the gateway
     # reachable from their phone/other devices: listen on 0.0.0.0 with LAN
     # enabled. Manual `daemon install` keeps the localhost-only default.
-    "$GATEWAY_BIN" daemon install --lan || true
+    if [ "$(id -u)" = 0 ] && [ -n "$invoking_user" ]; then
+        # runuser/su do not carry the user's session environment; systemctl
+        # --user needs XDG_RUNTIME_DIR (the user bus socket lives there).
+        # Set it explicitly so the re-run reaches the user's systemd instance.
+        uid="$(id -u "$invoking_user" 2>/dev/null || true)"
+        if [ -n "$uid" ] && [ -d "/run/user/$uid" ]; then
+            export XDG_RUNTIME_DIR="/run/user/$uid"
+            export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus"
+        fi
+        if command -v runuser >/dev/null 2>&1; then
+            if ! runuser -u "$invoking_user" -- "$GATEWAY_BIN" daemon install --lan >/dev/null 2>&1; then
+                printf 'WARNING: ferngeist-gateway daemon could not be (re)installed automatically.\n' >&2
+                printf '  After logging in as %s, run: %s daemon install --lan\n' "$invoking_user" "$GATEWAY_BIN" >&2
+            fi
+        elif command -v su >/dev/null 2>&1; then
+            if ! su -s /bin/sh "$invoking_user" -c "\"$GATEWAY_BIN\" daemon install --lan" >/dev/null 2>&1; then
+                printf 'WARNING: ferngeist-gateway daemon could not be (re)installed automatically.\n' >&2
+                printf '  After logging in as %s, run: %s daemon install --lan\n' "$invoking_user" "$GATEWAY_BIN" >&2
+            fi
+        else
+            printf 'WARNING: ferngeist-gateway daemon not (re)installed; run as %s:\n  %s daemon install --lan\n' "$invoking_user" "$GATEWAY_BIN" >&2
+        fi
+    elif [ "$(id -u)" = 0 ]; then
+        printf 'WARNING: ferngeist-gateway daemon service not registered (root install has no user session).\n' >&2
+        printf '  After logging in as your user, run: %s daemon install --lan\n' "$GATEWAY_BIN" >&2
+    else
+        "$GATEWAY_BIN" daemon install --lan || true
+    fi
 fi
 
 # Package-manager builds must not self-update. The daemon env file is
@@ -26,9 +68,14 @@ fi
 # update-check env var instead: package builds are pinned by the package
 # manager, so disable the periodic update-available check too. The env file is
 # written before the service starts, so this takes effect on the next start.
-if [ -n "${HOME:-}" ] && [ -f "$HOME/.local/share/ferngeist-gateway/config/daemon.env" ]; then
-    if ! grep -q '^FERNGEIST_GATEWAY_UPDATE_CHECK_ENABLED=' "$HOME/.local/share/ferngeist-gateway/config/daemon.env"; then
-        printf '\nFERNGEIST_GATEWAY_UPDATE_CHECK_ENABLED=0\n' >> "$HOME/.local/share/ferngeist-gateway/config/daemon.env"
+# When root, the file lives under the invoking user's home, not root's.
+env_home="${HOME:-}"
+if [ "$(id -u)" = 0 ] && [ -n "$invoking_user" ]; then
+    env_home="$(getent passwd "$invoking_user" 2>/dev/null | cut -d: -f6 || true)"
+fi
+if [ -n "$env_home" ] && [ -f "$env_home/.local/share/ferngeist-gateway/config/daemon.env" ]; then
+    if ! grep -q '^FERNGEIST_GATEWAY_UPDATE_CHECK_ENABLED=' "$env_home/.local/share/ferngeist-gateway/config/daemon.env"; then
+        printf '\nFERNGEIST_GATEWAY_UPDATE_CHECK_ENABLED=0\n' >> "$env_home/.local/share/ferngeist-gateway/config/daemon.env"
     fi
 fi
 

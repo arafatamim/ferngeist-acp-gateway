@@ -69,6 +69,17 @@ func (m *linuxManager) Install(options InstallOptions) error {
 		return fmt.Errorf("create systemd user directory: %w", err)
 	}
 
+	// A reinstall with a different binary must stop the running daemon first:
+	// the old process holds targetPath open for execution, and Linux refuses
+	// to overwrite an executing file (ETXTBSY). Best-effort — a fresh
+	// install or stopped service makes stop a no-op. The daemon is brought
+	// back by the enable/restart below.
+	if err := m.systemctl("stop", linuxUnitName); err != nil {
+		if !isSystemctlUnitNotFound(err) {
+			return err
+		}
+	}
+
 	if err := copyCurrentBinary(paths.binaryPath); err != nil {
 		return err
 	}
@@ -83,6 +94,13 @@ func (m *linuxManager) Install(options InstallOptions) error {
 		return err
 	}
 	if err := m.systemctl("enable", "--now", linuxUnitName); err != nil {
+		return err
+	}
+	// A reinstall must swap the running binary: `enable --now` starts a
+	// stopped service but does NOT restart one already running the previous
+	// build, so the old daemon would keep serving the old version. `restart`
+	// is a no-op-start on a fresh install and a real restart on an upgrade.
+	if err := m.systemctl("restart", linuxUnitName); err != nil {
 		return err
 	}
 
@@ -277,9 +295,17 @@ func resolveLinuxPaths() (linuxPaths, error) {
 }
 
 func copyCurrentBinary(targetPath string) error {
-	currentBinaryPath, err := os.Executable()
+	currentBinaryPath, err := copyCurrentBinarySource()
 	if err != nil {
 		return fmt.Errorf("resolve current binary: %w", err)
+	}
+
+	// Installing from the service directory itself: the running image cannot
+	// be overwritten on Linux while executing (ETXTBSY) and it is already the
+	// correct binary. Skip the self-copy so `install` is idempotent when
+	// invoked via the service-bin path.
+	if filepath.Clean(currentBinaryPath) == filepath.Clean(targetPath) {
+		return nil
 	}
 
 	contents, err := os.ReadFile(currentBinaryPath)

@@ -312,9 +312,9 @@ func resolveDarwinPaths() (darwinPaths, error) {
 }
 
 // copyCurrentBinarySource is the path copied into the service bin dir on
-// Install. Defaults to the running executable; the launchd integration test
-// overrides it with a real gateway binary (the test binary itself has no
-// buildVersion and would exit immediately under launchd).
+// Install. Defaults to the running executable; tests override it (the
+// launchd integration test points it at a real gateway binary, and the Linux
+// self-copy test points it at the service binary).
 var copyCurrentBinarySource = func() (string, error) { return os.Executable() }
 
 // copyCurrentBinaryDarwin mirrors copyCurrentBinary in manager_linux.go, which
@@ -323,6 +323,13 @@ func copyCurrentBinaryDarwin(targetPath string) error {
 	currentBinaryPath, err := copyCurrentBinarySource()
 	if err != nil {
 		return fmt.Errorf("resolve current binary: %w", err)
+	}
+
+	// Installing from the service directory itself: skip the self-copy so
+	// `install` is idempotent when invoked via the service-bin path (and
+	// never read-then-write a file onto itself).
+	if filepath.Clean(currentBinaryPath) == filepath.Clean(targetPath) {
+		return nil
 	}
 
 	contents, err := os.ReadFile(currentBinaryPath)
