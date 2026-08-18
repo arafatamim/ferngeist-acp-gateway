@@ -260,6 +260,28 @@ func TestExtractArchive(t *testing.T) {
 	}
 }
 
+// TestExtractArchiveWindowsExe covers the goreleaser windows archive layout:
+// the entry is ferngeist-gateway.exe (the .exe suffix is kept). runUpdate
+// passes filepath.Base(binaryPath) as the name, which is ferngeist-gateway.exe
+// on Windows — ExtractArchive must match it. Regression test for the
+// "ferngeist-gateway not found in archive" update failure on Windows.
+func TestExtractArchiveWindowsExe(t *testing.T) {
+	const binName = "ferngeist-gateway.exe"
+	payload := []byte("windows binary payload")
+	dest := filepath.Join(t.TempDir(), binName)
+
+	if err := ExtractArchive(buildZip(t, binName, payload), binName, dest); err != nil {
+		t.Fatalf("ExtractArchive(zip, .exe) error = %v", err)
+	}
+	data, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatalf("os.ReadFile(dest) error = %v", err)
+	}
+	if !bytes.Equal(data, payload) {
+		t.Fatalf("dest contents = %q, want %q", data, payload)
+	}
+}
+
 func TestExtractArchiveMissingBinary(t *testing.T) {
 	const binName = "ferngeist-gateway"
 	payload := []byte("ferngeist-gateway binary payload")

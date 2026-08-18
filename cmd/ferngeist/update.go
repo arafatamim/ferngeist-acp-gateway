@@ -130,7 +130,11 @@ func runUpdate() error {
 		}
 	}
 
-	if err := update.ExtractArchiveFromFile(tmpArchiveName, "ferngeist-gateway", binaryPath); err != nil {
+	// The archive entry is named after the platform binary: on Windows it is
+	// ferngeist-gateway.exe (goreleaser keeps the .exe suffix), elsewhere
+	// ferngeist-gateway. base(binaryPath) is the exact name the extractor
+	// must match.
+	if err := update.ExtractArchiveFromFile(tmpArchiveName, filepath.Base(binaryPath), binaryPath); err != nil {
 		return fmt.Errorf("extract update: %w", err)
 	}
 
