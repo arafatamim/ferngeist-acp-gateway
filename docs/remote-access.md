@@ -101,7 +101,10 @@ hunt through logs for the link:
   `AUTH REQUIRED` line until you log in.
 
 Open the link once; provisioning then finishes on its own (it retries in the
-background), and the URL appears in `daemon status` as `PUBLIC URL`.
+background), and the URL appears in `daemon status` as `PUBLIC URL` — no
+restart needed. If the URL line is still missing a minute after logging in,
+check the daemon log for a tailnet setting hint (`docs/remote-access.md`
+above) or run `ferngeist-gateway daemon restart`.
 
 #### Finding your public address
 
@@ -109,8 +112,8 @@ Once provisioning succeeds the log shows `remote access ready` with the URL.
 You can also:
 
 - Run `ferngeist-gateway daemon status` — it prints a `PUBLIC URL` line
-  (on the very first boot in background mode it can be blank until the next
-  restart).
+  as soon as provisioning finishes (it is never blank after a successful
+  login; no restart required).
 - Know it in advance: it is always
   `https://ferngeist-gateway.<your-tailnet>.ts.net`, and `<your-tailnet>`
   is shown next to your account name in the admin console. If you set

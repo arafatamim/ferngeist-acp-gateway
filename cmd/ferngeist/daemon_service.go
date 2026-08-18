@@ -46,7 +46,9 @@ func printRemoteSetupAfterInstall(ctx context.Context) {
 	case status.Remote.AuthRequired:
 		fmt.Println("\nTailscale login required — open this link once to finish setup:")
 		fmt.Printf("  %s\n", status.Remote.AuthURL)
-		fmt.Println("\nIt is also shown anytime by: ferngeist-gateway daemon status")
+		fmt.Println("\nAfter logging in, the daemon finishes provisioning on its own")
+		fmt.Println("(it retries in the background) — no restart needed.")
+		fmt.Println("Confirm the public URL anytime with: ferngeist-gateway daemon status")
 	case status.Remote.PublicURL != "":
 		fmt.Printf("\nRemote access ready: %s\n", status.Remote.PublicURL)
 	default:
