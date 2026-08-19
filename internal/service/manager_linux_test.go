@@ -77,14 +77,19 @@ exit 0
 
 	var sawStop, enableNow, restart bool
 	for _, call := range calls {
-		if strings.HasPrefix(call, "stop ") {
-			sawStop = true
-		}
-		if strings.Contains(call, "enable") && strings.Contains(call, "--now") {
-			enableNow = true
-		}
-		if strings.HasPrefix(call, "restart ") {
-			restart = true
+		fields := strings.Fields(call)
+		// Every invocation is `systemctl --user <subcommand> ...`.
+		if len(fields) >= 2 && fields[0] == "--user" {
+			switch fields[1] {
+			case "stop":
+				sawStop = true
+			case "enable":
+				if len(fields) >= 3 && fields[2] == "--now" {
+					enableNow = true
+				}
+			case "restart":
+				restart = true
+			}
 		}
 	}
 	if !sawStop {
