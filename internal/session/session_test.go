@@ -925,11 +925,15 @@ func TestPumpStdoutDrainLoopWithWebSocket(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	go pump.StdoutDrainLoop(ctx)
 
-	w.Write([]byte("hello\n"))
+	if _, err := w.Write([]byte("hello\n")); err != nil {
+		t.Fatalf("w.Write() error = %v", err)
+	}
 	time.Sleep(50 * time.Millisecond)
 
 	cancel()
-	w.Write([]byte("second\n"))
+	if _, err := w.Write([]byte("second\n")); err != nil {
+		t.Fatalf("w.Write() error = %v", err)
+	}
 	time.Sleep(50 * time.Millisecond)
 
 	w.Close()
@@ -975,11 +979,13 @@ func TestPumpStdoutDrainLoopWebSocketWriteError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	go pump.StdoutDrainLoop(ctx)
 
-	w.Write([]byte("hello\n"))
+	if _, err := w.Write([]byte("hello\n")); err != nil {
+		t.Fatalf("w.Write() error = %v", err)
+	}
 	time.Sleep(100 * time.Millisecond)
 
 	cancel()
-	w.Write([]byte("second\n"))
+	_, _ = w.Write([]byte("second\n"))
 	time.Sleep(50 * time.Millisecond)
 	w.Close()
 	r.Close()
@@ -1171,7 +1177,7 @@ func newTestWSConn(t *testing.T) *websocket.Conn {
 	if sc == nil {
 		t.Fatal("server connection not established")
 	}
-	t.Cleanup(func() { sc.CloseNow() })
+	t.Cleanup(func() { _ = sc.CloseNow() })
 	return sc
 }
 
@@ -1460,7 +1466,7 @@ func TestPumpStdoutDrainLoop(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	cancel()
-	w.Write([]byte("second\n"))
+	_, _ = w.Write([]byte("second\n"))
 	time.Sleep(50 * time.Millisecond)
 
 	w.Close()
@@ -1490,11 +1496,11 @@ func TestPumpStdoutDrainLoopWithFramesAndAppendLog(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	go pump.StdoutDrainLoop(ctx)
 
-	w.Write([]byte("line1\n"))
+	_, _ = w.Write([]byte("line1\n"))
 	time.Sleep(50 * time.Millisecond)
 
 	cancel()
-	w.Write([]byte("line2\n"))
+	_, _ = w.Write([]byte("line2\n"))
 	time.Sleep(50 * time.Millisecond)
 
 	w.Close()
@@ -1593,8 +1599,8 @@ func TestPumpTurnCompletePushUsesACPSessionID(t *testing.T) {
 	go pump.StdoutDrainLoop(ctx)
 
 	// session/new first so the ACP id is captured before the turn completes.
-	w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"sessionId":"ses_live"}}` + "\n"))
-	w.Write([]byte(`{"jsonrpc":"2.0","id":2,"result":{"stopReason":"end_turn"}}` + "\n"))
+	_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"sessionId":"ses_live"}}` + "\n"))
+	_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":2,"result":{"stopReason":"end_turn"}}` + "\n"))
 
 	select {
 	case n := <-pushCh:

@@ -104,7 +104,7 @@ func TestStartReplacesAttachedRuntimeForReconnect(t *testing.T) { // TestStartRe
 	if err != nil {
 		t.Fatalf("AcquireLease() error = %v", err)
 	}
-	defer legacyPipes.Release()
+	defer func() { _ = legacyPipes.Release() }()
 
 	second, err := supervisor.Start(agent)
 	if err != nil {
@@ -197,7 +197,7 @@ func TestRestartLaunchesNewRuntimeWithMergedEnv(t *testing.T) { // TestRestartLa
 	lp := rawPipes.(*LeasedPipes)
 	stdin := lp.Stdin
 	stdout := lp.Stdout
-	defer lp.Release()
+	defer func() { _ = lp.Release() }()
 	defer stdin.Close()
 
 	if _, err := io.WriteString(stdin, "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"initialize\",\"params\":{\"protocolVersion\":1,\"capabilities\":{},\"clientInfo\":{\"name\":\"test\",\"version\":\"0\"}}}\n"); err != nil {
@@ -422,7 +422,7 @@ func TestStartSupportsExternalStdioRuntime(t *testing.T) { // TestStartSupportsE
 	lp := rawPipes.(*LeasedPipes)
 	stdin := lp.Stdin
 	stdout := lp.Stdout
-	defer lp.Release()
+	defer func() { _ = lp.Release() }()
 
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
@@ -787,7 +787,7 @@ func TestOptionalInstalledOpenCodeACPSmoke(t *testing.T) { // TestOptionalInstal
 	lp := rawPipes.(*LeasedPipes)
 	stdin := lp.Stdin
 	stdout := lp.Stdout
-	defer lp.Release()
+	defer func() { _ = lp.Release() }()
 
 	request := "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"initialize\",\"params\":{\"protocolVersion\":1,\"capabilities\":{},\"clientInfo\":{\"name\":\"ferngeist-smoke\",\"version\":\"dev\"}}}\n"
 	if _, err := io.WriteString(stdin, request); err != nil {
@@ -1022,7 +1022,7 @@ func TestStartAutoAcquiresMissingExternalBinary(t *testing.T) { // TestStartAuto
 	if legacyPipes, err := supervisor.AcquireLease(runtimeInfo.ID, "legacy"); err != nil {
 		t.Fatalf("AcquireLease() error = %v", err)
 	} else {
-		legacyPipes.Release()
+		_ = legacyPipes.Release()
 	}
 	if _, err := supervisor.StopByRuntimeID(runtimeInfo.ID); err != nil {
 		t.Fatalf("StopByRuntimeID() error = %v", err)
@@ -1064,7 +1064,7 @@ func TestAcquireLeaseReturnsPipesRunningRuntime(t *testing.T) { // TestAcquireLe
 	if pipes == nil {
 		t.Fatal("AcquireLease() returned nil pipes")
 	}
-	pipes.Release()
+	_ = pipes.Release()
 
 	_, _ = supervisor.StopByAgentID(agent.ID)
 }
@@ -1114,7 +1114,7 @@ func TestReleaseLeaseFreesLeaseForReAcquire(t *testing.T) { // TestReleaseLeaseF
 	if pipes2 == nil {
 		t.Fatal("AcquireLease() after ReleaseLease returned nil pipes")
 	}
-	pipes2.Release()
+	_ = pipes2.Release()
 
 	_, _ = supervisor.StopByAgentID(agent.ID)
 }
@@ -1149,7 +1149,7 @@ func TestAcquireLeaseDoubleAcquireError(t *testing.T) { // TestAcquireLeaseDoubl
 	if err != nil {
 		t.Fatalf("First AcquireLease() error = %v", err)
 	}
-	defer pipes.Release()
+	defer func() { _ = pipes.Release() }()
 
 	_, err = supervisor.AcquireLease(rt.ID, "session-B")
 	if err != ErrRuntimeLeaseHeld {
@@ -1189,7 +1189,7 @@ func TestReleaseLeaseWrongLeaseholder(t *testing.T) { // TestReleaseLeaseWrongLe
 	if err != nil {
 		t.Fatalf("AcquireLease() error = %v", err)
 	}
-	defer pipes.Release()
+	defer func() { _ = pipes.Release() }()
 
 	err = supervisor.ReleaseLease(rt.ID, "session-B")
 	if err != ErrRuntimeLeaseHeld {
@@ -1327,7 +1327,7 @@ func TestWriteToAgent(t *testing.T) { // TestWriteToAgent verifies that WriteToA
 	if err != nil {
 		t.Fatalf("AcquireLease() error = %v", err)
 	}
-	defer pipes.Release()
+	defer func() { _ = pipes.Release() }()
 
 	if err := pipes.WriteToAgent([]byte(`{"jsonrpc":"2.0","id":"1","method":"initialize","params":{}}`)); err != nil {
 		t.Fatalf("WriteToAgent() error = %v", err)
@@ -1368,7 +1368,7 @@ func TestStartDoesNotKillSessionLeasedRuntime(t *testing.T) { // TestStartDoesNo
 	if err != nil {
 		t.Fatalf("AcquireLease() error = %v", err)
 	}
-	defer pipes.Release()
+	defer func() { _ = pipes.Release() }()
 
 	second, err := supervisor.Start(agent)
 	if err != nil {
@@ -1470,7 +1470,7 @@ func TestLeasedPipesRelease(t *testing.T) { // TestLeasedPipesRelease verifies t
 	if err != nil {
 		t.Fatalf("AcquireLease() after release error = %v", err)
 	}
-	pipes2.Release()
+	_ = pipes2.Release()
 
 	if _, err := pipes.(*LeasedPipes).Stdin.Write([]byte("test")); err == nil {
 		t.Fatal("expected error writing to stdin after legacy Release()")
@@ -1522,7 +1522,7 @@ func TestLeasedPipesRelease_SessionLease(t *testing.T) { // TestLeasedPipesRelea
 	if err != nil {
 		t.Fatalf("AcquireLease() after session Release() error = %v", err)
 	}
-	pipes2.Release()
+	_ = pipes2.Release()
 
 	_, _ = supervisor.StopByAgentID(agent.ID)
 }

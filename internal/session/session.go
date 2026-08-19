@@ -195,6 +195,6 @@ func NewRuntimeSession(logger *slog.Logger, store *storage.SQLiteStore, pm Proce
 
 func generateID() string {
 	b := make([]byte, 16)
-	rand.Read(b)
+	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
 }

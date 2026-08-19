@@ -124,13 +124,18 @@ func TestProvisionClearsPriorSnapshot(t *testing.T) {
 	)
 
 	// First call: auth required → snapshot stored
-	a.Provision(context.Background())
+	_, err := a.Provision(context.Background())
+	if err == nil {
+		t.Fatal("expected error from auth-required provision")
+	}
 	if snap := a.Snapshot(); snap == nil || !snap.AuthRequired {
 		t.Fatal("first call should store auth-required snapshot")
 	}
 
 	// Second call: success → snapshot cleared
-	a.Provision(context.Background())
+	if _, err := a.Provision(context.Background()); err != nil {
+		t.Fatalf("Provision() error = %v", err)
+	}
 	if a.Snapshot() != nil {
 		t.Fatal("snapshot should be nil after successful provision")
 	}

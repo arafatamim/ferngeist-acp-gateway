@@ -20,12 +20,6 @@ const (
 	wsKeepAlivePingWait = 10 * time.Second
 )
 
-// websocketWriteContext returns a context with the configured ACP WebSocket
-// write timeout. Each outgoing message write is bounded by this deadline.
-func websocketWriteContext() (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.Background(), acpWebSocketWriteTimeout)
-}
-
 // keepAliveWebSocket pings the client on a fixed interval until ctx is cancelled.
 // A ping that is not answered within wsKeepAlivePingWait is treated as a dead
 // peer: the connection is force-closed so the read loop returns and the session
@@ -45,7 +39,7 @@ func keepAliveWebSocket(ctx context.Context, conn *websocket.Conn, logger *slog.
 			if err != nil {
 				if ctx.Err() == nil {
 					logger.Warn("websocket keepalive ping failed; closing", "error", err)
-					conn.CloseNow()
+					_ = conn.CloseNow()
 				}
 				return
 			}

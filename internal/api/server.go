@@ -618,8 +618,6 @@ func classifyRemoteURL(raw string) (mode, scope, warning string, healthy bool) {
 	}
 
 	host := strings.ToLower(parsed.Hostname())
-	mode = "reverse_proxy"
-	scope = "public"
 	healthy = true
 
 	switch {

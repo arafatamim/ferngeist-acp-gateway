@@ -1,0 +1,13 @@
+issues:
+  exclude-rules:
+    # linuxUnitName is used only by manager_linux.go (linux build); invisible
+    # to windows/android analysis -> false positive when linting cross-OS.
+    - linters: [unused]
+      path: internal/service/manager\.go
+      text: "linuxUnitName"
+    # unsupportedManager is consumed by manager_android.go and
+    # manager_unsupported.go, both outside the windows build -> same false
+    # positive. It must stay in manager.go (shared by two tag-gated files).
+    - linters: [unused]
+      path: internal/service/manager\.go
+      text: "unsupportedManager"

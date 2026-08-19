@@ -139,7 +139,7 @@ func (s *SQLiteStore) SavePairing(ctx context.Context, record PairingRecord) err
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(
 		ctx,
 		`INSERT INTO paired_devices(device_id, device_name, token, expires_at)
@@ -234,7 +234,7 @@ func (s *SQLiteStore) DeletePairing(ctx context.Context, deviceID string) error 
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	_, err = tx.ExecContext(ctx, `DELETE FROM paired_device_scopes WHERE device_id = ?`, deviceID)
 	if err != nil {
 		return err

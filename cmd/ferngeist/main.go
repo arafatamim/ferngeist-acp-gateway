@@ -62,7 +62,7 @@ func main() {
 				printVersion()
 				return nil
 			}
-			cli.ShowSubcommandHelp(cmd)
+			_ = cli.ShowSubcommandHelp(cmd)
 			return nil
 		},
 		Commands: []*cli.Command{
@@ -77,7 +77,7 @@ func main() {
 				Name:  "daemon",
 				Usage: "run the gateway daemon",
 				Action: func(_ context.Context, cmd *cli.Command) error {
-					cli.ShowSubcommandHelp(cmd)
+					_ = cli.ShowSubcommandHelp(cmd)
 					return nil
 				},
 				Commands: []*cli.Command{
@@ -204,7 +204,7 @@ func main() {
 				Name:  "devices",
 				Usage: "manage paired devices",
 				Action: func(_ context.Context, cmd *cli.Command) error {
-					cli.ShowSubcommandHelp(cmd)
+					_ = cli.ShowSubcommandHelp(cmd)
 					return nil
 				},
 				Commands: []*cli.Command{

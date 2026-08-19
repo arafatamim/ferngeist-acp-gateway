@@ -1809,25 +1809,6 @@ func dialTestWebSocketConn(wsURL string, bearerToken ...string) (*websocket.Conn
 	return websocket.Dial(ctx, wsURL, options)
 }
 
-func readTestWebSocketMessage(t *testing.T, conn *websocket.Conn) (websocket.MessageType, []byte) {
-	t.Helper()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	messageType, payload, err := conn.Read(ctx)
-	if err != nil {
-		t.Fatalf("Read() error = %v", err)
-	}
-	return messageType, payload
-}
-
-func writeTestWebSocketMessage(conn *websocket.Conn, messageType websocket.MessageType, payload []byte) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	return conn.Write(ctx, messageType, payload)
-}
-
 func newTestServer() *Server {
 	return newConfiguredTestServer(config.Config{ListenAddr: "127.0.0.1:0"})
 }
@@ -2563,7 +2544,7 @@ func TestSessionWebSocketReconnect(t *testing.T) {
 		"&attachToken=" + resumeResp.AttachToken
 
 	conn := dialTestWebSocket(t, wsURL)
-	defer conn.CloseNow()
+	defer func() { _ = conn.CloseNow() }()
 
 	readCtx, readCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer readCancel()
@@ -2572,7 +2553,7 @@ func TestSessionWebSocketReconnect(t *testing.T) {
 		t.Fatalf("Write() error = %v", err)
 	}
 
-	conn.CloseNow()
+	_ = conn.CloseNow()
 }
 
 func TestRuntimeConnectResilientReturnsSessionIDAndAttachToken(t *testing.T) {

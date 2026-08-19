@@ -333,7 +333,7 @@ func TestResilientSession_FullLifecycle(t *testing.T) {
 	}
 
 	conn := h.dialSessionWS(connectResp.SessionID, connectResp.AttachToken)
-	defer conn.CloseNow()
+	defer func() { _ = conn.CloseNow() }()
 
 	sendWSMessage(t, conn, `{"jsonrpc":"2.0","id":"1","method":"initialize","params":{"protocolVersion":1,"capabilities":{},"clientInfo":{"name":"test-client","version":"1.0.0"}}}`)
 	msg := readWSMessage(t, conn)
@@ -381,7 +381,7 @@ func TestResilientSession_FullLifecycle(t *testing.T) {
 		t.Fatalf("connected push sessionId = %q, want %q", connectedPush.Notification.SessionID, acpSessionID)
 	}
 
-	conn.CloseNow()
+	_ = conn.CloseNow()
 
 	waitForSessionStatus(t, h.store, connectResp.SessionID, session.StatusDisconnected, 5*time.Second)
 
@@ -409,7 +409,7 @@ func TestResilientSession_FullLifecycle(t *testing.T) {
 	}
 
 	conn2 := h.dialSessionWS(connectResp.SessionID, newToken)
-	defer conn2.CloseNow()
+	defer func() { _ = conn2.CloseNow() }()
 
 	sendWSMessage(t, conn2, `{"jsonrpc":"2.0","id":"5","method":"session/load","params":{"sessionId":"mock_sess_1"}}`)
 	msg = readWSMessage(t, conn2)
@@ -432,7 +432,7 @@ func TestResilientSession_FullLifecycle(t *testing.T) {
 		t.Fatalf("stopReason = %q, want %q (after reconnection)", resultData.StopReason, "end_turn")
 	}
 
-	conn2.CloseNow()
+	_ = conn2.CloseNow()
 
 	closeReq := httptest.NewRequest(http.MethodDelete, "/v1/sessions/"+connectResp.SessionID, nil)
 	closeReq.Header.Set("Authorization", "Bearer "+h.token)
@@ -466,7 +466,7 @@ func TestResilientSession_MultipleReconnects(t *testing.T) {
 		msg := readWSMessage(t, conn)
 		assertResult(t, msg, "1")
 
-		conn.CloseNow()
+		_ = conn.CloseNow()
 
 		if i < 2 {
 			waitForSessionStatus(t, h.store, connectResp.SessionID, session.StatusDisconnected, 5*time.Second)
@@ -491,7 +491,7 @@ func TestResilientSession_ConcurrentAttachTakesOver(t *testing.T) {
 	connectResp := h.connectResilient()
 
 	conn1 := h.dialSessionWS(connectResp.SessionID, connectResp.AttachToken)
-	defer conn1.CloseNow()
+	defer func() { _ = conn1.CloseNow() }()
 
 	sendWSMessage(t, conn1, `{"jsonrpc":"2.0","id":"1","method":"initialize","params":{"protocolVersion":1,"capabilities":{},"clientInfo":{"name":"test-client","version":"1.0.0"}}}`)
 	msg := readWSMessage(t, conn1)
@@ -500,7 +500,7 @@ func TestResilientSession_ConcurrentAttachTakesOver(t *testing.T) {
 	// Reconnect while conn1 is still "attached" — this must succeed via takeover.
 	secondToken := h.resumeSession(connectResp.SessionID)
 	conn2 := h.dialSessionWS(connectResp.SessionID, secondToken)
-	defer conn2.CloseNow()
+	defer func() { _ = conn2.CloseNow() }()
 
 	// The new connection can drive the agent.
 	sendWSMessage(t, conn2, `{"jsonrpc":"2.0","id":"2","method":"authenticate","params":{}}`)
@@ -532,7 +532,7 @@ func TestResilientSession_ReconnectReusesExistingSession(t *testing.T) {
 	assertResult(t, readWSMessage(t, conn1), "1")
 	// Simulate the app dying without a clean close: drop the socket reference
 	// without going through a graceful shutdown.
-	conn1.CloseNow()
+	_ = conn1.CloseNow()
 
 	// Reconnect path: connect again against the same runtime.
 	second := h.connectResilient()
@@ -544,7 +544,7 @@ func TestResilientSession_ReconnectReusesExistingSession(t *testing.T) {
 	}
 
 	conn2 := h.dialSessionWS(second.SessionID, second.AttachToken)
-	defer conn2.CloseNow()
+	defer func() { _ = conn2.CloseNow() }()
 	sendWSMessage(t, conn2, `{"jsonrpc":"2.0","id":"2","method":"authenticate","params":{}}`)
 	assertResult(t, readWSMessage(t, conn2), "2")
 }
@@ -554,7 +554,7 @@ func TestResilientSession_AgentDeathDuringSession(t *testing.T) {
 	connectResp := h.connectResilient()
 
 	conn := h.dialSessionWS(connectResp.SessionID, connectResp.AttachToken)
-	defer conn.CloseNow()
+	defer func() { _ = conn.CloseNow() }()
 
 	sendWSMessage(t, conn, `{"jsonrpc":"2.0","id":"1","method":"initialize","params":{"protocolVersion":1,"capabilities":{},"clientInfo":{"name":"test-client","version":"1.0.0"}}}`)
 	msg := readWSMessage(t, conn)

@@ -3,13 +3,13 @@
 // (Create, Resume, Attach, Detach, Close), query (ListByDevice, GetPump,
 // GetSessionStatus, FindReconnectableByRuntime), notification
 // (sendPushNotification, handleProcessExit), diagnostics (LogInbound),
-// and background goroutines (reaperLoop, reapExpired, Shutdown).
 package session
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/push"
@@ -82,15 +82,21 @@ func (rs *RuntimeSession) Create(ctx context.Context, runtimeID, deviceID, agent
 	pipes, err := rs.pm.AcquireLease(runtimeID, sessionID)
 	if err != nil {
 		// Lease acquisition failed — undo the store record so no orphaned session remains.
-		rs.store.DeleteSession(ctx, sessionID)
+		if delErr := rs.store.DeleteSession(ctx, sessionID); delErr != nil {
+			rs.logger.Error("failed to delete session after lease acquisition failure", "error", delErr)
+		}
 		return nil, "", err
 	}
 
 	// The pump needs the concrete *runtime.LeasedPipes for Stdout access in the drain loop.
 	lp, ok := pipes.(*runtime.LeasedPipes)
 	if !ok {
-		rs.store.DeleteSession(ctx, sessionID)
-		rs.pm.ReleaseLease(runtimeID, sessionID)
+		if delErr := rs.store.DeleteSession(ctx, sessionID); delErr != nil {
+			rs.logger.Error("failed to delete session after pipe type assertion failure", "error", delErr)
+		}
+		if relErr := rs.pm.ReleaseLease(runtimeID, sessionID); relErr != nil {
+			rs.logger.Error("failed to release lease after pipe type assertion failure", "error", relErr)
+		}
 		return nil, "", errors.New("unexpected pipe type from ProcessManager")
 	}
 
@@ -186,9 +192,9 @@ func (rs *RuntimeSession) supersedeAgentSessions(deviceID, agentID, keepRuntimeI
 		if sess.cancelPump != nil {
 			sess.cancelPump()
 		}
-		rs.pm.StopByRuntimeID(sess.RuntimeID)
-		rs.pm.ReleaseLease(sess.RuntimeID, sess.Leaseholder)
-		rs.store.DeleteSession(context.Background(), sess.ID)
+		_, _ = rs.pm.StopByRuntimeID(sess.RuntimeID)
+		_ = rs.pm.ReleaseLease(sess.RuntimeID, sess.Leaseholder)
+		_ = rs.store.DeleteSession(context.Background(), sess.ID)
 		rs.mu.Lock()
 		delete(rs.sessions, id)
 		rs.mu.Unlock()
@@ -253,9 +259,9 @@ func (rs *RuntimeSession) handleProcessExit(sessionID, runtimeID, deviceID, agen
 			if s.cancelPump != nil {
 				s.cancelPump()
 			}
-			rs.pm.ReleaseLease(runtimeID, s.Leaseholder)
+			_ = rs.pm.ReleaseLease(runtimeID, s.Leaseholder)
 			delete(rs.sessions, sessionID)
-			rs.store.DeleteSession(context.Background(), sessionID)
+			_ = rs.store.DeleteSession(context.Background(), sessionID)
 		}
 	}
 	rs.mu.Unlock()
@@ -400,7 +406,9 @@ func (rs *RuntimeSession) AttachClient(ctx context.Context, sessionID, attachTok
 
 	now := time.Now().UTC()
 	record.LastClientConnectAt = &now
-	rs.store.SaveSession(ctx, record)
+	if err := rs.store.SaveSession(ctx, record); err != nil {
+		return "", 0, fmt.Errorf("save session: %w", err)
+	}
 
 	return runtimeID, gen, nil
 }
@@ -485,7 +493,11 @@ func (rs *RuntimeSession) DetachClient(sessionID string, gen int64) error {
 		return ErrSessionNotFound
 	}
 	saveCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	rs.store.SaveSession(saveCtx, record)
+	if err := rs.store.SaveSession(saveCtx, record); err != nil {
+		cancel()
+		rs.mu.Unlock()
+		return fmt.Errorf("save disconnected session: %w", err)
+	}
 	cancel()
 	rs.mu.Unlock()
 
@@ -520,7 +532,7 @@ func (rs *RuntimeSession) Close(ctx context.Context, sessionID, deviceID string)
 	sess.Status = StatusClosing
 	sess.mu.Unlock()
 
-	rs.store.SaveSession(ctx, storage.SessionRecord{
+	if err := rs.store.SaveSession(ctx, storage.SessionRecord{
 		SessionID:   sess.ID,
 		RuntimeID:   sess.RuntimeID,
 		DeviceID:    sess.DeviceID,
@@ -528,7 +540,9 @@ func (rs *RuntimeSession) Close(ctx context.Context, sessionID, deviceID string)
 		Status:      StatusClosing,
 		Leaseholder: sess.Leaseholder,
 		CreatedAt:   sess.CreatedAt,
-	})
+	}); err != nil {
+		rs.logger.Error("failed to persist closing status", "error", err)
+	}
 
 	// Step 2: Stop the stdout drain loop so no new frames enter the buffer.
 	if sess.cancelPump != nil {
@@ -571,12 +585,17 @@ func (rs *RuntimeSession) Close(ctx context.Context, sessionID, deviceID string)
 	delete(rs.sessions, sessionID)
 	rs.mu.Unlock()
 
-	rs.pm.StopByRuntimeID(sess.RuntimeID)
+	if _, err := rs.pm.StopByRuntimeID(sess.RuntimeID); err != nil {
+		rs.logger.Error("failed to stop runtime during close", "error", err, "runtime_id", sess.RuntimeID)
+	}
 
 	rs.mu.Lock()
-	rs.pm.ReleaseLease(sess.RuntimeID, sess.Leaseholder)
-
-	rs.store.DeleteSession(ctx, sessionID)
+	if err := rs.pm.ReleaseLease(sess.RuntimeID, sess.Leaseholder); err != nil {
+		rs.logger.Error("failed to release lease during close", "error", err, "runtime_id", sess.RuntimeID)
+	}
+	if err := rs.store.DeleteSession(ctx, sessionID); err != nil {
+		rs.logger.Error("failed to delete session from store during close", "error", err, "session_id", sessionID)
+	}
 
 	rs.mu.Unlock()
 
@@ -701,9 +720,9 @@ func (rs *RuntimeSession) reapExpired(maxDisc time.Duration) {
 		if sess.cancelPump != nil {
 			sess.cancelPump()
 		}
-		rs.pm.StopByRuntimeID(sess.RuntimeID)
-		rs.pm.ReleaseLease(sess.RuntimeID, sess.Leaseholder)
-		rs.store.DeleteSession(context.Background(), sess.ID)
+		_, _ = rs.pm.StopByRuntimeID(sess.RuntimeID)
+		_ = rs.pm.ReleaseLease(sess.RuntimeID, sess.Leaseholder)
+		_ = rs.store.DeleteSession(context.Background(), sess.ID)
 		rs.mu.Lock()
 		delete(rs.sessions, id)
 		rs.mu.Unlock()
@@ -721,7 +740,7 @@ func (rs *RuntimeSession) Shutdown() {
 		if sess.cancelPump != nil {
 			sess.cancelPump()
 		}
-		rs.pm.ReleaseLease(sess.RuntimeID, sess.Leaseholder)
+		_ = rs.pm.ReleaseLease(sess.RuntimeID, sess.Leaseholder)
 		delete(rs.sessions, id)
 	}
 	rs.mu.Unlock()

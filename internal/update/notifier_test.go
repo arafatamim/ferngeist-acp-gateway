@@ -30,12 +30,6 @@ func (f *fakePush) Notify(ctx context.Context, deviceID string, n push.Notificat
 	return nil
 }
 
-func (f *fakePush) reset() {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.calls = nil
-}
-
 func TestCheckAndNotifyNewerVersion(t *testing.T) {
 	n := &Notifier{
 		Checker: &fakeChecker{release: Release{TagName: "v2.0.0"}},

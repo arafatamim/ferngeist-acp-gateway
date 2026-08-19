@@ -94,7 +94,7 @@ func TestWorkspaceEndpoints_EndToEnd(t *testing.T) {
 	h := newResilientTestHarness(t)
 	resp := h.connectResilient()
 	ws := h.dialSessionWS(resp.SessionID, resp.AttachToken)
-	defer ws.CloseNow()
+	defer func() { _ = ws.CloseNow() }()
 
 	// Complete the ACP handshake, then send session/new with the project cwd so
 	// the pump captures it. The frame is built with json.Marshal so the Windows

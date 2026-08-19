@@ -84,10 +84,7 @@ func (l *pairingRateLimiter) allow(ip string, isStart bool, now time.Time) bool 
 			return false
 		}
 		l.ipStartBuckets[ip] = bucket
-		if !takeToken(&l.globalStart, now, l.globalBurst, l.startRefill) {
-			return false
-		}
-		return true
+		return takeToken(&l.globalStart, now, l.globalBurst, l.startRefill)
 	}
 	bucket := l.ipDoneBuckets[ip]
 	if !takeToken(&bucket, now, l.burstPerIP, l.completeRefill) {
@@ -95,10 +92,7 @@ func (l *pairingRateLimiter) allow(ip string, isStart bool, now time.Time) bool 
 		return false
 	}
 	l.ipDoneBuckets[ip] = bucket
-	if !takeToken(&l.globalDone, now, l.globalBurst, l.completeRefill) {
-		return false
-	}
-	return true
+	return takeToken(&l.globalDone, now, l.globalBurst, l.completeRefill)
 }
 
 // takeToken attempts to consume one token from the bucket. If the bucket is

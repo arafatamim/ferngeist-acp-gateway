@@ -3,7 +3,6 @@ package session
 import (
 	"encoding/json"
 	"fmt"
-	"path/filepath"
 	"sync"
 	"time"
 
@@ -98,10 +97,4 @@ func (m *frameLogManager) close() error {
 	}
 	m.writers = make(map[string]*logging.Service)
 	return nil
-}
-
-// frameLogPath is a test helper mirroring the file a manager would open for an
-// agent.
-func frameLogPath(dir, agentID string) string {
-	return filepath.Join(dir, agentID+"-agent.log")
 }

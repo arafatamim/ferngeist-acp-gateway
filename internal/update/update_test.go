@@ -118,7 +118,9 @@ func TestDownloadAndVerify(t *testing.T) {
 	badSum := sha256.Sum256([]byte("not the payload"))
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write(payload)
+		if _, err := w.Write(payload); err != nil {
+			t.Fatalf("w.Write() error = %v", err)
+		}
 	}))
 	defer server.Close()
 

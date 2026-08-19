@@ -204,7 +204,7 @@ func (p *StdioPump) StdoutDrainLoop(ctx context.Context) {
 		}
 	}
 	if conn != nil {
-		conn.CloseNow()
+		_ = conn.CloseNow()
 	}
 }
 
@@ -700,7 +700,7 @@ func (p *StdioPump) Attach() int64 {
 	gen := p.connGen
 	p.clientMu.Unlock()
 	if evict != nil {
-		evict.CloseNow()
+		_ = evict.CloseNow()
 	}
 	return gen
 }
@@ -795,7 +795,7 @@ func (p *StdioPump) clientWriterLoop(ctx context.Context, conn *websocket.Conn) 
 					p.stopWriterLocked()
 				}
 				p.clientMu.Unlock()
-				conn.CloseNow()
+				_ = conn.CloseNow()
 				return
 			}
 		}

@@ -57,7 +57,7 @@ func NewFCMProvider(ctx context.Context, credentialsFile string, logger *slog.Lo
 	if err != nil {
 		return nil, fmt.Errorf("read FCM credentials: %w", err)
 	}
-	creds, err := google.CredentialsFromJSON(ctx, data, fcmMessagingScope)
+	creds, err := google.CredentialsFromJSONWithType(ctx, data, google.ServiceAccount, fcmMessagingScope)
 	if err != nil {
 		return nil, fmt.Errorf("parse FCM credentials: %w", err)
 	}

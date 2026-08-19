@@ -128,7 +128,7 @@ func (s *Server) handleSessionWebSocket(w http.ResponseWriter, r *http.Request, 
 	}
 
 	if runtimeIDResult != runtimeID {
-		s.sessionSvc.DetachClient(sessionID, gen)
+		_ = s.sessionSvc.DetachClient(sessionID, gen)
 		http.Error(w, "runtime ID does not match session", http.StatusBadRequest)
 		return
 	}
@@ -136,11 +136,11 @@ func (s *Server) handleSessionWebSocket(w http.ResponseWriter, r *http.Request, 
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
 	if err != nil {
 		s.logger.Warn("websocket accept failed", "error", err)
-		s.sessionSvc.DetachClient(sessionID, gen)
+		_ = s.sessionSvc.DetachClient(sessionID, gen)
 		return
 	}
-	defer conn.CloseNow()
-	defer s.sessionSvc.DetachClient(sessionID, gen)
+	defer func() { _ = conn.CloseNow() }()
+	defer func() { _ = s.sessionSvc.DetachClient(sessionID, gen) }()
 	conn.SetReadLimit(acpWebSocketReadLimit)
 
 	// Bind this connection to the session pump. If a newer attach raced ahead and
