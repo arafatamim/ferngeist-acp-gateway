@@ -11,7 +11,7 @@ class FerngeistGateway < Formula
   on_macos do
     if Hardware::CPU.intel?
       url "https://github.com/arafatamim/ferngeist-acp-gateway/releases/download/v0.9.3/ferngeist-gateway_0.9.3_darwin_amd64_brew.tar.gz"
-      sha256 "93c897accc5d51e23fbef34658e7355c8db88ad4fe6343fc3f6e5977417e841a"
+      sha256 "4f6a0e3bedf7d3608c5c85ddf9e5c33262ad543fbe46729ac1d015c32fc6d43b"
 
       define_method(:install) do
         bin.install "ferngeist-gateway"
@@ -19,7 +19,7 @@ class FerngeistGateway < Formula
     end
     if Hardware::CPU.arm?
       url "https://github.com/arafatamim/ferngeist-acp-gateway/releases/download/v0.9.3/ferngeist-gateway_0.9.3_darwin_arm64_brew.tar.gz"
-      sha256 "8bd71d5d29c8a91e121872e9e9b3439ee813bd2703ca9e19ce4090616d129273"
+      sha256 "cd479029f2f71543205612cf6a29c2eb8da58c2721191ab6c97ae3f3c1b72659"
 
       define_method(:install) do
         bin.install "ferngeist-gateway"
@@ -30,14 +30,14 @@ class FerngeistGateway < Formula
   on_linux do
     if Hardware::CPU.intel? && Hardware::CPU.is_64_bit?
       url "https://github.com/arafatamim/ferngeist-acp-gateway/releases/download/v0.9.3/ferngeist-gateway_0.9.3_linux_amd64_brew.tar.gz"
-      sha256 "7b183fdf5da69ac67c2cb0a3ee20d32b9c8a9e71e77eef46c399f0649d0d5ace"
+      sha256 "675992710b2699087056df9dac6f2a4f111592635c8900333c70bdac8275716a"
       define_method(:install) do
         bin.install "ferngeist-gateway"
       end
     end
     if Hardware::CPU.arm? && Hardware::CPU.is_64_bit?
       url "https://github.com/arafatamim/ferngeist-acp-gateway/releases/download/v0.9.3/ferngeist-gateway_0.9.3_linux_arm64_brew.tar.gz"
-      sha256 "ddf2fafe2c3f0f729cb3c14b1abd89e57cf8e542207ceef2108420d72603ba07"
+      sha256 "6f0870fbb8c497967fe13e7c34cb4fbcbda51574ea2c2e09f265118e30eff598"
       define_method(:install) do
         bin.install "ferngeist-gateway"
       end
