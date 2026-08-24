@@ -116,6 +116,15 @@ type StdioPump struct {
 	lastProgressToolCall string
 	lastProgressSummary  string
 
+	// Swallowed-failure detection. Some agents (e.g. Opencode) never send a
+	// JSON-RPC error for a failed LLM call — they return a success with
+	// stopReason=end_turn, zero usage, and no streamed content. The pump
+	// tracks whether the current turn produced any visible output so such
+	// failures can be flagged. Guarded by turnMu.
+	turnMu         sync.Mutex
+	turnActive     bool // a session/prompt is awaiting its result
+	turnHadContent bool // an agent_message_chunk or tool_call arrived this turn
+
 	// frameLog optionally records every raw ACP frame (in + out) as
 	// newline-delimited JSON in per-agent files. nil when disabled.
 	frameLog *frameLogManager
@@ -234,13 +243,13 @@ func (p *StdioPump) handleStdoutLine(line string) {
 	if p.frameLog != nil {
 		p.frameLog.append(p.agentID, p.runtimeID, p.sessionID, "out", []byte(line))
 	}
-
 	p.snoopInitialize(line)
 	p.snoopSessionID(line)
+	if replacement, handled := p.markTurnActivity(line); handled {
+		line = replacement
+	}
 
 	// Fire a push on notable events regardless of client attachment — the
-	// client suppresses it when foregrounded and shows it when backgrounded
-	// or killed, which is a distinction the gateway cannot make itself.
 	p.checkAndNotify(line)
 
 	// Buffer conversation history so a reconnecting client can be re-hydrated
@@ -462,6 +471,108 @@ func (p *StdioPump) MaybeReplayInitialize(payload []byte) bool {
 	return true
 }
 
+// markTurnStart records that a session/prompt request is heading to the agent.
+// payload is the raw client frame.
+func (p *StdioPump) markTurnStart(payload []byte) {
+	var req struct {
+		Method string `json:"method"`
+	}
+	if err := json.Unmarshal(payload, &req); err != nil || req.Method != "session/prompt" {
+		return
+	}
+	p.turnMu.Lock()
+	p.turnActive = true
+	p.turnHadContent = false
+	p.turnMu.Unlock()
+}
+
+// markTurnActivity flags content on the active turn: any agent_message_chunk
+// or tool_call/tool_call_update session/update counts as the LLM having
+// actually produced output. It also evaluates the prompt result when it
+// arrives: a success with end_turn, zero usage, and no content is how some
+// agents (e.g. Opencode) report a swallowed LLM failure. In that case it
+// returns a replacement JSON-RPC error response (same request id) so
+// the client sees the turn as failed instead of an empty success; handled
+// reports whether the caller must substitute the frame.
+func (p *StdioPump) markTurnActivity(line string) (out string, handled bool) {
+	var probe struct {
+		Method string           `json:"method"`
+		ID     *json.RawMessage `json:"id"`
+		Result *struct {
+			StopReason acp.StopReason `json:"stopReason"`
+			Usage      *acp.Usage     `json:"usage"`
+		} `json:"result"`
+		Error  json.RawMessage `json:"error"`
+		Params *struct {
+			Update *struct {
+				Discriminator string `json:"sessionUpdate"`
+			} `json:"update"`
+		} `json:"params"`
+	}
+	if err := json.Unmarshal([]byte(line), &probe); err != nil {
+		return "", false
+	}
+
+	p.turnMu.Lock()
+
+	if probe.Params != nil && probe.Params.Update != nil {
+		switch probe.Params.Update.Discriminator {
+		case "agent_message_chunk", "tool_call", "tool_call_update":
+			p.turnHadContent = true
+		}
+		p.turnMu.Unlock()
+		return "", false
+	}
+
+	// Prompt result: only judge when a turn was tracked and the response is a
+	// clean success (no JSON-RPC error — that path already pushes via
+	// isJSONRPCError).
+	if !p.turnActive || probe.ID == nil || probe.Result == nil || len(probe.Error) > 0 {
+		p.turnMu.Unlock()
+		return "", false
+	}
+	p.turnActive = false
+	// Any non-zero token field counts as usage: agents may populate
+	// input/output without the unstable totalTokens field.
+	used := probe.Result.Usage != nil && (probe.Result.Usage.TotalTokens != 0 ||
+		probe.Result.Usage.InputTokens != 0 || probe.Result.Usage.OutputTokens != 0)
+	swallowed := probe.Result.StopReason == "end_turn" && !used && !p.turnHadContent
+	p.turnMu.Unlock()
+
+	if !swallowed {
+		return "", false
+	}
+
+	// Log/push outside the lock: the callback reaches network code, and
+	// markTurnStart on the next prompt must never queue behind FCM I/O.
+	p.logger.Warn("agent returned empty success; rewriting as JSON-RPC error "+
+		"(likely swallowed LLM failure: rate limit / invalid model setting)",
+		"runtime_id", p.runtimeID, "session_id", p.sessionID)
+	if p.onPushNotification != nil {
+		p.onPushNotification(PushEvent{
+			SessionID:    p.sessionID,
+			AcpSessionID: p.AcpSessionID(),
+			Category:     push.CategoryError,
+			Body:         "The agent finished without producing anything. This usually means the model call failed (rate limit or invalid setting). Check the gateway logs for details.",
+		})
+	}
+
+	errFrame := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      *probe.ID,
+		"error": map[string]any{
+			"code":    -32000,
+			"message": "Agent produced no output for this turn. The model call likely failed (rate limit or invalid model setting); see the gateway logs for details.",
+		},
+	}
+	outBytes, err := json.Marshal(errFrame)
+	if err != nil {
+		p.logger.Error("failed to marshal swallowed-failure error frame", "error", err)
+		return line, false // forward the original empty success rather than dropping the response
+	}
+	return string(outBytes), true
+}
+
 // isTurnComplete checks if a stdout line is a JSON-RPC response with a non-empty
 // stopReason. Any terminal stop reason (end_turn, stop, error, etc.) triggers
 // the push notification callback. Uses acp.PromptResponse for typed access to
@@ -591,6 +702,7 @@ func verbForKind(kind string) string {
 }
 
 func (p *StdioPump) WriteToAgent(payload []byte) error {
+	p.markTurnStart(payload)
 	p.snoopInboundSessionID(payload)
 	p.snoopInboundCwd(payload)
 	// Record session/load requests so the pump can recover from an "already

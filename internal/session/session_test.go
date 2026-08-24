@@ -1618,6 +1618,69 @@ func TestPumpTurnCompletePushUsesACPSessionID(t *testing.T) {
 	r.Close()
 }
 
+// TestPumpSwallowedFailureDetection verifies the swallowed-LLM-failure
+// heuristic: a prompt whose result is a clean success with stopReason=end_turn,
+// zero usage, and no streamed content is rewritten to a JSON-RPC error
+// response; a turn with content, usage, or a different stop reason passes
+// through unchanged.
+func TestPumpSwallowedFailureDetection(t *testing.T) {
+	events := make(chan PushEvent, 4)
+	pump := &StdioPump{
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		onPushNotification: func(e PushEvent) {
+			events <- e
+		},
+	}
+	pump.markTurnStart([]byte(`{"jsonrpc":"2.0","id":9,"method":"session/prompt","params":{"sessionId":"s","prompt":[]}}`))
+
+	// Swallowed failure: end_turn, zero usage, no content → error frame.
+	out, handled := pump.markTurnActivity(`{"jsonrpc":"2.0","id":9,"result":{"stopReason":"end_turn"}}`)
+	if !handled {
+		t.Fatal("expected swallowed failure to be rewritten")
+	}
+	var resp struct {
+		ID    json.Number `json:"id"`
+		Error *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		t.Fatalf("replacement is not valid JSON: %v", err)
+	}
+	if resp.ID.String() != "9" {
+		t.Fatalf("replacement id = %s, want 9", resp.ID)
+	}
+	if resp.Error == nil || resp.Error.Code != -32000 {
+		t.Fatalf("replacement must carry error code -32000, got %s", out)
+	}
+
+	// Healthy turn: content streamed → passthrough.
+	pump.markTurnStart([]byte(`{"jsonrpc":"2.0","id":10,"method":"session/prompt","params":{}}`))
+	pump.markTurnActivity(`{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk"}}}`)
+	if _, handled := pump.markTurnActivity(`{"jsonrpc":"2.0","id":10,"result":{"stopReason":"end_turn"}}`); handled {
+		t.Fatal("healthy turn with content must not be rewritten")
+	}
+
+	// Non-zero usage → passthrough.
+	pump.markTurnStart([]byte(`{"jsonrpc":"2.0","id":11,"method":"session/prompt","params":{}}`))
+	if _, handled := pump.markTurnActivity(`{"jsonrpc":"2.0","id":11,"result":{"stopReason":"end_turn","usage":{"inputTokens":30,"outputTokens":12}}}`); handled {
+		t.Fatal("turn with usage must not be rewritten")
+	}
+
+	// Non-end_turn stop reason (e.g. refusal) → passthrough.
+	pump.markTurnStart([]byte(`{"jsonrpc":"2.0","id":12,"method":"session/prompt","params":{}}`))
+	if _, handled := pump.markTurnActivity(`{"jsonrpc":"2.0","id":12,"result":{"stopReason":"refusal"}}`); handled {
+		t.Fatal("refusal turn must not be rewritten")
+	}
+
+	// Result without a tracked prompt (e.g. initialize) → passthrough.
+	pump.markTurnStart([]byte(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`))
+	if _, handled := pump.markTurnActivity(`{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}`); handled {
+		t.Fatal("initialize result must not be rewritten")
+	}
+}
+
 func TestIsTurnCompleteWithAllStopReasons(t *testing.T) {
 	tests := []struct {
 		name string
