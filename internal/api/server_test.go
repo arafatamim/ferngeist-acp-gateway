@@ -1058,6 +1058,89 @@ func TestAgentsRejectsNonGetMethods(t *testing.T) {
 	}
 }
 
+func TestAgentsListsMultipleRuntimesAndStartNew(t *testing.T) {
+	baseDir := newHarnessBaseDir(t)
+	buildMockAgent(t, baseDir)
+	server := newTestServerWithBaseDir(baseDir)
+	token := pairDevice(t, server)
+
+	start := func() runtimeStartResponse {
+		t.Helper()
+		body, _ := json.Marshal(map[string]bool{"new": true})
+		req := httptest.NewRequest(http.MethodPost, "/v1/agents/mock-acp/start", bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		server.Handler().ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("start status = %d, body=%s", rec.Code, rec.Body.String())
+		}
+		var resp runtimeStartResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("Unmarshal(start) error = %v", err)
+		}
+		return resp
+	}
+
+	first := start()
+	second := start()
+	if first.Runtime.ID == second.Runtime.ID {
+		t.Fatalf("new:true must launch distinct runtimes, both = %q", first.Runtime.ID)
+	}
+
+	t.Cleanup(func() {
+		stopReq := httptest.NewRequest(http.MethodPost, "/v1/agents/mock-acp/stop", nil)
+		stopReq.Header.Set("Authorization", "Bearer "+token)
+		stopRec := httptest.NewRecorder()
+		server.Handler().ServeHTTP(stopRec, stopReq)
+	})
+
+	// GET /v1/agents lists both runtimes; newest is reflected in the legacy fields.
+	agentsReq := httptest.NewRequest(http.MethodGet, "/v1/agents", nil)
+	agentsReq.Header.Set("Authorization", "Bearer "+token)
+	agentsRec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(agentsRec, agentsReq)
+	if agentsRec.Code != http.StatusOK {
+		t.Fatalf("agents status = %d", agentsRec.Code)
+	}
+	var agentsResp agentsResponse
+	if err := json.Unmarshal(agentsRec.Body.Bytes(), &agentsResp); err != nil {
+		t.Fatalf("Unmarshal(agents) error = %v", err)
+	}
+	state := findAgentState(t, agentsResp.Agents, "mock-acp")
+	if len(state.Runtimes) != 2 {
+		t.Fatalf("len(runtimes) = %d, want 2", len(state.Runtimes))
+	}
+	if !state.Running {
+		t.Fatal("expected running=true")
+	}
+
+	// Stop all runtimes, then agents shows none running.
+	stopReq := httptest.NewRequest(http.MethodPost, "/v1/agents/mock-acp/stop", nil)
+	stopReq.Header.Set("Authorization", "Bearer "+token)
+	stopRec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(stopRec, stopReq)
+	if stopRec.Code != http.StatusOK {
+		t.Fatalf("stop status = %d, body=%s", stopRec.Code, stopRec.Body.String())
+	}
+
+	agentsReq2 := httptest.NewRequest(http.MethodGet, "/v1/agents", nil)
+	agentsReq2.Header.Set("Authorization", "Bearer "+token)
+	agentsRec2 := httptest.NewRecorder()
+	server.Handler().ServeHTTP(agentsRec2, agentsReq2)
+	var agentsResp2 agentsResponse
+	if err := json.Unmarshal(agentsRec2.Body.Bytes(), &agentsResp2); err != nil {
+		t.Fatalf("Unmarshal(agents2) error = %v", err)
+	}
+	state2 := findAgentState(t, agentsResp2.Agents, "mock-acp")
+	if state2.Running {
+		t.Fatal("expected running=false after agent stop")
+	}
+	if len(state2.Runtimes) != 2 {
+		t.Fatalf("len(runtimes after stop) = %d, want 2 (stopped runtimes still tracked)", len(state2.Runtimes))
+	}
+}
+
 func TestPairingRejectsWrongCode(t *testing.T) {
 	server := newTestServer()
 

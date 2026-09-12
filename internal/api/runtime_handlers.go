@@ -21,9 +21,10 @@ type agentsResponse struct {
 // so clients can determine which agents are currently running.
 type agentRuntimeState struct {
 	catalog.Agent
-	Running       bool   `json:"running"`
-	RuntimeID     string `json:"runtimeId,omitempty"`
-	RuntimeStatus string `json:"runtimeStatus,omitempty"`
+	Running       bool              `json:"running"`
+	RuntimeID     string            `json:"runtimeId,omitempty"`
+	RuntimeStatus string            `json:"runtimeStatus,omitempty"`
+	Runtimes      []runtime.Runtime `json:"runtimes,omitempty"`
 }
 
 // runtimesResponse wraps the list of managed ACP runtimes.
@@ -91,19 +92,22 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	runtimes := s.runtime.List()
-	runtimeByAgent := make(map[string]runtime.Runtime, len(runtimes))
+	runtimeByAgent := make(map[string][]runtime.Runtime, len(runtimes))
 	for _, runtimeInfo := range runtimes {
-		runtimeByAgent[runtimeInfo.AgentID] = runtimeInfo
+		runtimeByAgent[runtimeInfo.AgentID] = append(runtimeByAgent[runtimeInfo.AgentID], runtimeInfo)
 	}
 
 	agents := s.catalog.List()
 	response := make([]agentRuntimeState, 0, len(agents))
 	for _, agent := range agents {
 		state := agentRuntimeState{Agent: agent}
-		if runtimeInfo, ok := runtimeByAgent[agent.ID]; ok {
-			state.Running = runtimeInfo.Status == "running"
-			state.RuntimeID = runtimeInfo.ID
-			state.RuntimeStatus = runtimeInfo.Status
+		agentRuntimes := runtimeByAgent[agent.ID]
+		state.Runtimes = agentRuntimes
+		if len(agentRuntimes) > 0 {
+			newest := agentRuntimes[0]
+			state.Running = newest.Status == "running"
+			state.RuntimeID = newest.ID
+			state.RuntimeStatus = newest.Status
 		}
 		response = append(response, state)
 	}
@@ -153,7 +157,18 @@ func (s *Server) handleAgentStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	runtimeInfo, err := s.runtime.Start(agent)
+	var req struct {
+		New bool `json:"new"`
+	}
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&req) // absent/empty body -> New=false
+	}
+	var runtimeInfo runtime.Runtime
+	if req.New {
+		runtimeInfo, err = s.runtime.StartNew(agent)
+	} else {
+		runtimeInfo, err = s.runtime.Start(agent)
+	}
 	if err != nil {
 		switch {
 		case errors.Is(err, runtime.ErrAgentNotDetected), errors.Is(err, runtime.ErrUnsupportedLaunch), errors.Is(err, runtime.ErrRemoteStartNotAllowed):
@@ -174,14 +189,24 @@ func (s *Server) handleAgentStop(w http.ResponseWriter, r *http.Request) {
 	}
 
 	agentID := r.PathValue("agentId")
-	runtimeInfo, err := s.runtime.StopByAgentID(agentID)
-	if err != nil {
-		writeError(w, http.StatusNotFound, err.Error())
+
+	var agentRuntimes []runtime.Runtime
+	for _, rt := range s.runtime.List() {
+		if rt.AgentID == agentID {
+			agentRuntimes = append(agentRuntimes, rt)
+		}
+	}
+	if len(agentRuntimes) == 0 {
+		writeError(w, http.StatusNotFound, "no runtimes for agent")
 		return
 	}
 
-	s.gateway.Revoke(runtimeInfo.ID)
-	writeJSON(w, http.StatusOK, runtimeStopResponse{Runtime: runtimeInfo})
+	for _, rt := range agentRuntimes {
+		s.gateway.Revoke(rt.ID)
+		s.runtime.StopByRuntimeID(rt.ID)
+	}
+
+	writeJSON(w, http.StatusOK, runtimeStopResponse{Runtime: agentRuntimes[0]})
 }
 
 // handleRuntimeConnect converts a running runtime into a short-lived ACP
