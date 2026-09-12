@@ -24,8 +24,10 @@ type frameLogManager struct {
 }
 
 // newFrameLogManager returns a manager rooted at dir, or nil when the toggle
-// is off. Sessions for the same agent share one writer: a session is superseded
-// (not duplicated), so concurrent pumps never race on the same file.
+// is off. Sessions for the same agent share one writer: multiple sessions per
+// agent are allowed (multi-session per agent), so concurrent pumps of the same
+// agent do append to the same file — safe because logging.Service.Write is
+// mutex-guarded and each line carries its runtime_id.
 func newFrameLogManager(enabled bool, dir string, maxSize int64, maxBackups int) (*frameLogManager, error) {
 	if !enabled {
 		return nil, nil
