@@ -73,6 +73,30 @@ not be coupled. Full release notes live in GitHub Releases.
   rejected with 401. A credential past the grace window returns a distinct
   error (`gateway credential expired beyond grace period`) and must re-pair.
   Response shape is unchanged. (2026-08-07)
+- `[additive]` `POST /v1/agents/{agentId}/start` — accepts an optional JSON
+  body `{"new": true}`. When `true`, the gateway always launches a fresh agent
+  process (a new runtime) so a client can open independent chats for the same
+  agent concurrently; absent/`false` keeps the legacy reuse-or-launch behavior.
+  Response shape unchanged. (2026-08-21)
+- `[additive]` `GET /v1/agents` — each per-agent object gains a `runtimes`
+  array listing every runtime tracked for the agent (newest first). The legacy
+  `running`/`runtimeId`/`runtimeStatus` fields keep their shape and reflect the
+  **newest** runtime; clients that never create multiple runtimes see identical
+  values as before. (2026-08-21)
+- `[additive]` `POST /v1/agents/{agentId}/stop` — now stops **all** runtimes
+  tracked for the agent and revokes each runtime's gateway token (previously:
+  the single tracked runtime). Returns `404` when the agent has no runtimes.
+  For a device holding one runtime per agent the observable behavior is
+  unchanged. Response still carries a single `runtime` object — the agent's
+  **newest** runtime (the same one `GET /v1/agents` highlights). (2026-08-21)
+
+Multi-session per agent: a paired device may hold up to
+`FERNGEIST_GATEWAY_MAX_SESSIONS_PER_DEVICE` (default 5) concurrent gateway
+sessions across agents — including several for the *same* agent, one per
+runtime/process. Re-connecting to a runtime's `/connect` endpoint still resumes
+that runtime's existing session rather than creating a second one. No
+`protocolVersion` bump: every change above is additive and ignored by older
+clients.
 
 ## History
 

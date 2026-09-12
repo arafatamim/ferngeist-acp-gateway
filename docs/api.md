@@ -51,6 +51,14 @@ Base path: `/v1`
 - `GET /v1/agents`
   - Returns the supported agent catalog merged with live runtime state.
   - Requires a paired client.
+  - Per-agent object fields:
+    - `running` / `runtimeId` / `runtimeStatus` — reflect the **newest** runtime
+      tracked for the agent (single-runtime shorthand, kept for backward
+      compatibility).
+    - `runtimes` — a list of every runtime currently tracked for the agent (each
+      element is a full runtime object: `id`, `agentId`, `agentName`, `status`,
+      `createdAt`, `pid`, `command`, `launchMode`, `transport`, etc.). Empty when the
+      agent has no live or recently-stopped runtime.
 
 ### Pairing
 
@@ -98,10 +106,27 @@ Base path: `/v1`
 - `POST /v1/agents/{agentId}/start`
   - Starts the selected agent runtime.
   - Requires `control` scope.
+  - Optional JSON request body:
+    ```json
+    {
+      "new": true
+    }
+    ```
+  - When `new` is `true`, the gateway always launches a fresh agent process (a new
+    runtime), bypassing runtime reuse — use this to open an independent chat/session
+    for the agent. When the field is absent or `false`, the gateway keeps the legacy
+    behavior: it reuses an existing unleased runtime for the agent when one is
+    available, and only launches a fresh process when no reusable runtime exists.
+  - Error responses:
+    - `404` — agent not found
+    - `409` — agent detected but launch mode unsupported, or remote start not allowed
+    - `424` — agent executable not found (auto-install failed/unavailable)
 
 - `POST /v1/agents/{agentId}/stop`
-  - Stops the selected agent runtime.
+  - Stops **all** runtimes for the selected agent and revokes each one's gateway token.
   - Requires `control` scope.
+  - Error responses:
+    - `404` — agent has no runtimes (none are tracked for this agent)
 
 ### Runtime control
 
@@ -285,6 +310,14 @@ return `422`.
 ### Gateway sessions
 
 > **Terminology note:** A "gateway session" is a gateway-internal object that keeps a runtime alive across WebSocket disconnections. It manages a stdio pump (for agent stdout), an exclusive pipe lease, and push notification dispatch on notable events. It is not an ACP agent session — ACP agent sessions are negotiated between the client and agent during protocol initialization and are not tracked by this API.
+
+> **Multi-session per agent:** A device may hold multiple gateway sessions for the
+> same agent concurrently — one per runtime/process — so a background chat (agent
+> mid-turn, client disconnected) can coexist with a foreground chat against a
+> separate process of the same agent. The per-device session limit
+> (`MaxSessionsPerDevice`, default 5) is the parallelism ceiling across all agents.
+> Opening `POST /v1/runtimes/{runtimeId}/connect` against an already-connected
+> runtime resumes that runtime's session rather than starting a second one.
 
 - `POST /v1/sessions/{sessionId}/resume`
   - Prepares a disconnected gateway session for WebSocket reconnection.

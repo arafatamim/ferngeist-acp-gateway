@@ -12,6 +12,10 @@ The gateway is a self-hosted backend for ACP-compatible agents:
   reconnect).
 - **Agent discovery + launch** — finds supported agents and starts them on
   demand.
+- **Parallel chats per agent** — start several processes of the same agent at
+  once (`POST /v1/agents/{id}/start` with `{"new": true}`); each chat runs in
+  its own resilient session, so a background agent can keep working while you
+  use another (see [docs/api.md](api.md)).
 - **Pairing + device credentials** — pair a phone/client once; revoke anytime.
 - **Workspace browsing** — a paired client can read files and inspect git
   state inside the project the agent is working on

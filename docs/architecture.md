@@ -30,6 +30,13 @@ Every connection creates a persistent gateway session with:
 
 - **StdioPump** — a long-lived goroutine that drains agent stdout and forwards frames to the WebSocket when a client is attached. When no client is connected, output is discarded after end-turn detection and log append. The pump owns the pipe lifecycle and runs independently of WebSocket connectivity.
 - **Lease** — the session holds an exclusive lease on the runtime's stdio pipes via `AcquireLease`/`ReleaseLease`. The runtime is not stopped on WebSocket disconnect — only the leaseholder string is cleared. Sessions always stop the runtime on close.
+
+> A **device may run multiple sessions for the same agent concurrently** — one
+> session per runtime/process — so a background chat (agent mid-turn, client
+> disconnected) can coexist with a foreground chat against a separate process of
+> the same agent. Per-session close still stops by runtime ID
+> (`StopByRuntimeID`); per-agent stop (`StopByAgentID`) stops all runtimes for the
+> agent. The exclusive pipe lease is unchanged: one leaseholder per runtime.
 - **Push notifications** — when the pump detects a notable event (turn complete, permission request, agent error, or live progress) — or the runtime crashes — it emits a platform-neutral notification through the push dispatcher, which routes it to the device's provider (FCM when credentials are configured, otherwise log-only). Pushes fire **regardless of whether a client is attached**: the gateway can't tell whether the app is foregrounded or backgrounded (only whether a socket is attached, a poor proxy), so it always emits a hybrid notification+data message — the foreground client suppresses the duplicate, while the system displays the `notification` block when the app is backgrounded or killed. The client reconnects and calls `session/load` on the agent for context restoration.
 - **Inbound diagnostics** — client-to-agent frames are logged asynchronously to SQLite via a buffered channel (non-blocking, dropped on overflow with counter).
 - **ACP session/close** — before stopping the runtime on session close, the gateway sends a `session/close` JSON-RPC request to the agent if it advertised `sessionCapabilities.close` during initialize. The mock agent supports this for testing.

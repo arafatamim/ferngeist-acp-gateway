@@ -25,6 +25,39 @@ $env:FERNGEIST_RUN_REAL_AGENT_TESTS="1"
 go test ./internal/runtime -run TestOptionalInstalledOpenCodeACPSmoke -v
 ```
 
+## Multi-session E2E check
+
+The multi-session-per-agent flow (two processes of the same agent, independent
+resilient sessions, stop-all) is covered by unit/integration tests
+(`TestStartNewLaunchesSeparateRuntime`, `TestCreateAllowsSameAgentParallelSessions`,
+`TestAgentsListsMultipleRuntimesAndStartNew`). To verify against a **real
+binary** end to end:
+
+```bash
+# 1. Build gateway + mock agent into a sandbox
+go build -ldflags "-X main.buildVersion=dev" -o /tmp/fg/ferngeist-gateway ./cmd/ferngeist
+go build -o /tmp/fg/sandbox/bin/mock-stdio-agent ./cmd/mock-stdio-agent
+
+# 2. Run the daemon with the sandbox as its working directory (catalog detects
+#    bin/mock-stdio-agent relative to cwd)
+cd /tmp/fg/sandbox
+FERNGEIST_GATEWAY_LISTEN_ADDR=127.0.0.1:5790 \
+FERNGEIST_GATEWAY_ADMIN_ADDR=127.0.0.1:5791 \
+FERNGEIST_GATEWAY_UPDATE_CHECK_ENABLED=0 \
+  /tmp/fg/ferngeist-gateway daemon run
+
+# 3. Drive it: POST /admin/v1/pairings/start (port 5791) -> GET the code ->
+#    POST /v1/pair/complete -> POST /v1/agents/mock-acp/start {"new":true}
+#    twice -> connect both runtimes with sessionMode:"resilient" -> ACP over
+#    GET /v1/acp/{runtimeId}?sessionId=&attachToken= -> POST stop -> confirm
+#    GET /v1/agents shows both runtimes stopped but still tracked.
+```
+
+Success looks like: two distinct runtime IDs, two independent gateway sessions
+serving concurrent ACP conversations, notifications forwarded on both pumps,
+resume + `session/load` working after a disconnect, and stop-all terminating
+both processes.
+
 ## macOS launchd integration test
 
 The launchd service manager (`internal/service/manager_darwin.go` +
