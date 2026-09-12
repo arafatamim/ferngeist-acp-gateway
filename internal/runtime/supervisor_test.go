@@ -70,6 +70,149 @@ func TestStartIsIdempotentPerAgent(t *testing.T) { // TestStartIsIdempotentPerAg
 	_, _ = supervisor.StopByAgentID(agent.ID)
 }
 
+func TestStartNewLaunchesSeparateRuntime(t *testing.T) {
+	baseDir := t.TempDir()
+	buildMockAgent(t, baseDir)
+
+	supervisor := NewSupervisorWithBaseDir(slog.New(slog.NewTextHandler(io.Discard, nil)), baseDir, nil)
+	supervisor.now = func() time.Time { return time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC) }
+
+	agent := catalog.Agent{
+		ID:          "mock-acp",
+		DisplayName: "Mock ACP",
+		Detected:    true,
+		Security:    catalog.SecurityConfig{AllowsRemoteStart: true},
+		Launch: catalog.LaunchConfig{
+			Mode:      "process",
+			Command:   filepath.Join("bin", mockAgentBinaryName()),
+			Transport: "stdio",
+			Readiness: catalog.ReadinessConfig{Mode: "immediate"},
+		},
+		HealthCheck: catalog.HealthCheckConfig{Mode: "none"},
+	}
+
+	first, err := supervisor.StartNew(agent)
+	if err != nil {
+		t.Fatalf("StartNew() first error = %v", err)
+	}
+	second, err := supervisor.StartNew(agent)
+	if err != nil {
+		t.Fatalf("StartNew() second error = %v", err)
+	}
+	if first.ID == second.ID {
+		t.Fatalf("StartNew must launch distinct runtimes, both = %q", first.ID)
+	}
+
+	// Both tracked under the same agent.
+	ids := supervisor.runtimeIDsForAgentLocked(agent.ID)
+	if len(ids) != 2 {
+		t.Fatalf("expected 2 runtimes for agent, got %d", len(ids))
+	}
+
+	_, _ = supervisor.StopByRuntimeID(first.ID)
+	_, _ = supervisor.StopByRuntimeID(second.ID)
+}
+
+func TestStartPrefersUnleasedRuntime(t *testing.T) { // TestStartPrefersUnleasedRuntime verifies Start deterministically reuses an unleased runtime even when map iteration order surfaces leased siblings first.
+	supervisor := NewSupervisor(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	now := time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)
+	supervisor.now = func() time.Time { return now }
+
+	seed := func(id, leaseholder string) {
+		supervisor.runtimes[id] = Runtime{
+			ID: id, AgentID: "agent-x", AgentName: "Agent X",
+			Status: StatusRunning, CreatedAt: now,
+		}
+		supervisor.processes[id] = &processHandle{leaseholder: leaseholder}
+		supervisor.addRuntimeByAgentLocked("agent-x", id)
+	}
+
+	// Several session-leased runtimes plus one free runtime: Start must
+	// reuse the free one, never a leased sibling.
+	seed("rt-s1", "session-1")
+	seed("rt-s2", "session-2")
+	seed("rt-s3", "session-3")
+	seed("rt-free", "")
+
+	rt, err := supervisor.Start(catalog.Agent{ID: "agent-x"})
+	if err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if rt.ID != "rt-free" {
+		t.Fatalf("Start reused %q, want unleased \"rt-free\"", rt.ID)
+	}
+
+	// A free runtime also beats replacing a legacy-leased one.
+	supervisor2 := NewSupervisor(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	supervisor2.now = func() time.Time { return now }
+	seed2 := func(id, leaseholder string) {
+		supervisor2.runtimes[id] = Runtime{
+			ID: id, AgentID: "agent-x", AgentName: "Agent X",
+			Status: StatusRunning, CreatedAt: now,
+		}
+		supervisor2.processes[id] = &processHandle{leaseholder: leaseholder}
+		supervisor2.addRuntimeByAgentLocked("agent-x", id)
+	}
+	seed2("rt-legacy", "legacy")
+	seed2("rt-free2", "")
+
+	rt2, err := supervisor2.Start(catalog.Agent{ID: "agent-x"})
+	if err != nil {
+		t.Fatalf("Start() second error = %v", err)
+	}
+	if rt2.ID != "rt-free2" {
+		t.Fatalf("Start reused %q, want unleased \"rt-free2\"", rt2.ID)
+	}
+}
+
+func TestStopByAgentIDStopsAllRuntimes(t *testing.T) {
+	baseDir := t.TempDir()
+	buildMockAgent(t, baseDir)
+
+	supervisor := NewSupervisorWithBaseDir(slog.New(slog.NewTextHandler(io.Discard, nil)), baseDir, nil)
+	supervisor.now = func() time.Time { return time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC) }
+
+	agent := catalog.Agent{
+		ID:          "mock-acp",
+		DisplayName: "Mock ACP",
+		Detected:    true,
+		Security:    catalog.SecurityConfig{AllowsRemoteStart: true},
+		Launch: catalog.LaunchConfig{
+			Mode:      "process",
+			Command:   filepath.Join("bin", mockAgentBinaryName()),
+			Transport: "stdio",
+			Readiness: catalog.ReadinessConfig{Mode: "immediate"},
+		},
+		HealthCheck: catalog.HealthCheckConfig{Mode: "none"},
+	}
+
+	a, err := supervisor.StartNew(agent)
+	if err != nil {
+		t.Fatalf("StartNew a: %v", err)
+	}
+	b, err := supervisor.StartNew(agent)
+	if err != nil {
+		t.Fatalf("StartNew b: %v", err)
+	}
+
+	if _, err := supervisor.StopByAgentID(agent.ID); err != nil {
+		t.Fatalf("StopByAgentID: %v", err)
+	}
+
+	for _, id := range []string{a.ID, b.ID} {
+		rt, err := supervisor.StopByRuntimeID(id)
+		if err != nil {
+			continue // already removed is fine
+		}
+		if rt.Status != StatusStopped {
+			t.Errorf("runtime %s status = %q, want stopped", id, rt.Status)
+		}
+	}
+	if len(supervisor.runtimeIDsForAgentLocked(agent.ID)) != 0 {
+		t.Errorf("expected agent mapping cleared, got %v", supervisor.runtimeIDsForAgentLocked(agent.ID))
+	}
+}
+
 func TestStartReplacesAttachedRuntimeForReconnect(t *testing.T) { // TestStartReplacesAttachedRuntimeForReconnect verifies that Start creates a new runtime when the previous one has an attached legacy client.
 	baseDir := t.TempDir()
 	buildMockAgent(t, baseDir)
@@ -1946,7 +2089,7 @@ func TestHandleProcessExitCleanExitPersistsRecord(t *testing.T) { // TestHandleP
 	supervisor.runtimes["test-id"] = Runtime{
 		ID: "test-id", AgentID: "test", AgentName: "Test", Status: StatusRunning, CreatedAt: now,
 	}
-	supervisor.runtimeByAgent["test"] = "test-id"
+	supervisor.runtimeByAgent["test"] = map[string]struct{}{"test-id": {}}
 	supervisor.logs["test-id"] = []LogEntry{}
 
 	supervisor.handleProcessExit("test-id", "test", handle)
@@ -2017,7 +2160,7 @@ func TestRestartAfterBackoffLaunchFails(t *testing.T) { // TestRestartAfterBacko
 		CreatedAt: now,
 	}
 	supervisor.runtimes[runtimeInfo.ID] = runtimeInfo
-	supervisor.runtimeByAgent[runtimeInfo.AgentID] = runtimeInfo.ID
+	supervisor.runtimeByAgent[runtimeInfo.AgentID] = map[string]struct{}{runtimeInfo.ID: {}}
 
 	agent := catalog.Agent{
 		ID:          "mock-acp",
@@ -2347,7 +2490,7 @@ func TestHandleProcessExitCleanExit(t *testing.T) { // TestHandleProcessExitClea
 	supervisor.runtimes["test-id"] = Runtime{
 		ID: "test-id", AgentID: "test", AgentName: "Test", Status: StatusRunning, CreatedAt: now,
 	}
-	supervisor.runtimeByAgent["test"] = "test-id"
+	supervisor.runtimeByAgent["test"] = map[string]struct{}{"test-id": {}}
 	supervisor.logs["test-id"] = []LogEntry{}
 
 	supervisor.handleProcessExit("test-id", "test", handle)
@@ -2517,7 +2660,7 @@ func TestStopByAgentIDAlreadyStopped(t *testing.T) { // TestStopByAgentIDAlready
 		ID: "test-id", AgentID: "test", AgentName: "Test",
 		Status: StatusStopped, CreatedAt: time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC),
 	}
-	supervisor.runtimeByAgent["test"] = "test-id"
+	supervisor.runtimeByAgent["test"] = map[string]struct{}{"test-id": {}}
 
 	result, err := supervisor.StopByAgentID("test")
 	if err != nil {
@@ -2548,7 +2691,7 @@ func TestStopByRuntimeIDAlreadyStopped(t *testing.T) { // TestStopByRuntimeIDAlr
 
 func TestStopByAgentIDOrphanedMapping(t *testing.T) { // TestStopByAgentIDOrphanedMapping verifies that StopByAgentID returns ErrRuntimeNotFound when the agent-to-runtime mapping points to a nonexistent ID.
 	supervisor := NewSupervisor(slog.New(slog.NewTextHandler(io.Discard, nil)))
-	supervisor.runtimeByAgent["orphaned"] = "nonexistent-id"
+	supervisor.runtimeByAgent["orphaned"] = map[string]struct{}{"nonexistent-id": {}}
 
 	_, err := supervisor.StopByAgentID("orphaned")
 	if err != ErrRuntimeNotFound {

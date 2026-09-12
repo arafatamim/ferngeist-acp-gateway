@@ -229,8 +229,8 @@ type Supervisor struct {
 	// runtimes maps runtime ID to its current state and metadata.
 	runtimes map[string]Runtime
 
-	// runtimeByAgent maps agent ID to runtime ID for quick lookups.
-	runtimeByAgent map[string]string
+	// runtimeByAgent maps agent ID to the set of runtime IDs currently tracked for it.
+	runtimeByAgent map[string]map[string]struct{}
 
 	// processes holds active process handles for running runtimes.
 	processes map[string]*processHandle
@@ -313,8 +313,8 @@ func NewSupervisorWithBaseDirAndInstaller(logger *slog.Logger, baseDir string, s
 		logger:          logger.With("component", "runtime"),
 		now:             time.Now,
 		runtimes:        make(map[string]Runtime),
-		runtimeByAgent:  make(map[string]string),
 		processes:       make(map[string]*processHandle),
+		runtimeByAgent:  make(map[string]map[string]struct{}),
 		logs:            make(map[string][]LogEntry),
 		baseDir:         baseDir,
 		store:           store,
@@ -334,45 +334,77 @@ func NewSupervisorWithBaseDirAndInstaller(logger *slog.Logger, baseDir string, s
 // Returns the Runtime descriptor on success, or an error if validation or
 // launch fails.
 func (s *Supervisor) Start(agent catalog.Agent) (Runtime, error) {
-	var staleRuntimeID string
-
-	// Check for existing runtime under lock to prevent race conditions
+	// Classify the agent's tracked runtimes under lock to prevent race conditions.
 	s.mu.Lock()
 	s.pruneStoppedRuntimesLocked(s.now().UTC())
 
-	// Look up if there's already a runtime for this agent
-	if runtimeID, ok := s.runtimeByAgent[agent.ID]; ok {
-		if existing, exists := s.runtimes[runtimeID]; exists {
-			// Check if the existing runtime has an active lease
-			// If leased, it's "stale" and needs to be replaced
-			// If a processHandle exists and is leased ONLY by a legacy client
-			// (fate-bound), we can stop and replace it. Session-leased runtimes
-			// (leaseholder is a session ID, not "legacy") must be protected —
-			// killing them would orphan a resilient session.
-			if handle, exists := s.processes[runtimeID]; exists && handle != nil && handle.leaseholder == "legacy" {
-				staleRuntimeID = runtimeID
-			} else {
-				// Runtime exists but not leased - return it without launching a new one
-				s.mu.Unlock()
-				return existing, nil
+	var (
+		reuse   *Runtime // unleased — preferred reuse target
+		staleID string   // legacy-leased — replaceable
+		leased  *Runtime // session-leased — last-resort reuse
+	)
+	for _, runtimeID := range s.runtimeIDsForAgentLocked(agent.ID) {
+		existing, exists := s.runtimes[runtimeID]
+		if !exists {
+			continue
+		}
+		// If a processHandle exists and is leased ONLY by a legacy client
+		// (fate-bound), we can stop and replace it. Session-leased runtimes
+		// (leaseholder is a session ID, not "legacy") must be protected -
+		// killing them would orphan a resilient session.
+		handle := s.processes[runtimeID]
+		switch {
+		case handle == nil || handle.leaseholder == "":
+			if reuse == nil {
+				e := existing
+				reuse = &e
+			}
+		case handle.leaseholder == "legacy":
+			if staleID == "" {
+				staleID = runtimeID
+			}
+		default:
+			if leased == nil {
+				e := existing
+				leased = &e
 			}
 		}
 	}
 	s.mu.Unlock()
 
+	// Prefer a free runtime: replacing a legacy-leased one kills a healthy
+	// process, so only do it when nothing is reusable.
+	if reuse != nil {
+		return *reuse, nil
+	}
+
 	// Stop the stale runtime outside the lock to avoid holding it during I/O
-	if staleRuntimeID != "" {
-		if _, err := s.StopByRuntimeID(staleRuntimeID); err != nil && !errors.Is(err, ErrRuntimeNotFound) {
+	if staleID != "" {
+		if _, err := s.StopByRuntimeID(staleID); err != nil && !errors.Is(err, ErrRuntimeNotFound) {
 			return Runtime{}, err
 		}
 	}
 
+	if leased != nil {
+		return *leased, nil
+	}
+
+	prepared, err := s.prepareAgent(agent)
+	if err != nil {
+		return Runtime{}, err
+	}
+	return s.launchRuntime(prepared, nil, nil)
+}
+
+// prepareAgent applies auto-acquisition and validates launch prerequisites,
+// returning the agent ready to launch.
+func (s *Supervisor) prepareAgent(agent catalog.Agent) (catalog.Agent, error) {
 	// Ensure agent is available - try auto-install if installer is configured
 	if !agent.Detected {
 		if s.installer != nil {
 			acquiredAgent, _, err := s.installer.Ensure(context.Background(), agent)
 			if err != nil {
-				return Runtime{}, err
+				return catalog.Agent{}, err
 			}
 			agent = acquiredAgent
 		}
@@ -380,19 +412,30 @@ func (s *Supervisor) Start(agent catalog.Agent) (Runtime, error) {
 
 	// Validate all prerequisites before attempting launch
 	if !agent.Detected {
-		return Runtime{}, ErrAgentNotDetected
+		return catalog.Agent{}, ErrAgentNotDetected
 	}
 	if !agent.Security.AllowsRemoteStart {
-		return Runtime{}, ErrRemoteStartNotAllowed
+		return catalog.Agent{}, ErrRemoteStartNotAllowed
 	}
 	if agent.Launch.Mode != "process" && agent.Launch.Mode != "external" {
-		return Runtime{}, ErrUnsupportedLaunch
+		return catalog.Agent{}, ErrUnsupportedLaunch
 	}
 	if agent.Launch.Transport != "stdio" {
-		return Runtime{}, ErrRuntimeNotConnectable
+		return catalog.Agent{}, ErrRuntimeNotConnectable
 	}
+	return agent, nil
+}
 
-	return s.launchRuntime(agent, nil, nil)
+// StartNew launches a fresh agent process unconditionally, bypassing the reuse
+// logic in Start. Every call produces a distinct runtime, enabling parallel
+// sessions for the same agent. Validation and auto-install are shared with
+// Start via prepareAgent.
+func (s *Supervisor) StartNew(agent catalog.Agent) (Runtime, error) {
+	prepared, err := s.prepareAgent(agent)
+	if err != nil {
+		return Runtime{}, err
+	}
+	return s.launchRuntime(prepared, nil, nil)
 }
 
 // launchRuntime is the core transition from a validated catalog agent to a
@@ -474,8 +517,8 @@ func (s *Supervisor) launchRuntime(agent catalog.Agent, previous *Runtime, envOv
 
 	// Register the runtime in the supervisor's maps while holding the lock
 	s.mu.Lock()
+	s.addRuntimeByAgentLocked(agent.ID, runtimeInfo.ID)
 	s.runtimes[runtimeInfo.ID] = runtimeInfo
-	s.runtimeByAgent[agent.ID] = runtimeInfo.ID
 	s.processes[runtimeInfo.ID] = handle
 	s.mu.Unlock()
 	s.persistRuntime(runtimeInfo)
@@ -590,67 +633,90 @@ func (s *Supervisor) Restart(runtimeID string, envVars map[string]string) (Runti
 	return restarted, nil
 }
 
-// StopByAgentID is the public stop path used by the API. It removes the
-// runtime from the active maps before waiting on process termination so a
-// concurrent reconnect cannot attach to a runtime that is already stopping.
+// StopByAgentID stops every runtime tracked for the agent, removing each from
+// the active maps before waiting on process termination so a concurrent
+// reconnect cannot attach to a runtime that is already stopping.
+//
+// The API's agent-stop handler does not call this: it walks List() itself so it
+// can revoke each runtime's gateway token before stopping it, and reports the
+// agent's newest runtime in the response. Use this method when the whole
+// agent is being torn down and no per-runtime bookkeeping is needed.
+//
+// The returned Runtime is whichever target finished last (iteration order is
+// unspecified); callers that need a specific runtime stopped should use
+// StopByRuntimeID.
 func (s *Supervisor) StopByAgentID(agentID string) (Runtime, error) {
-	s.mu.Lock()
+	type target struct {
+		runtime Runtime
+		process *processHandle
+	}
+	var targets []target
 
-	// Look up runtime by agent ID
-	runtimeID, ok := s.runtimeByAgent[agentID]
-	if !ok {
+	s.mu.Lock()
+	ids := s.runtimeIDsForAgentLocked(agentID)
+	if len(ids) == 0 {
 		s.mu.Unlock()
 		return Runtime{}, ErrRuntimeNotFound
 	}
-	runtime, ok := s.runtimes[runtimeID]
-	if !ok {
-		// Clean up orphaned mapping
+	for _, runtimeID := range ids {
+		runtime, ok := s.runtimes[runtimeID]
+		if !ok {
+			// Clean up orphaned mapping
+			s.deleteRuntimeByAgentIfMatchesLocked(agentID, runtimeID)
+			continue
+		}
+		// Already stopped - keep for the return value, nothing to stop
+		if runtime.Status == StatusStopped {
+			targets = append(targets, target{runtime: runtime})
+			continue
+		}
+		// Mark process as stopping to prevent restart on exit
+		process := s.processes[runtimeID]
+		if process != nil {
+			process.stopping = true
+		}
+		// Transition to stopping state and remove from active maps
+		runtime.Status = StatusStopping
+		runtime.StoppedAt = time.Time{}
+		s.runtimes[runtimeID] = runtime
 		s.deleteRuntimeByAgentIfMatchesLocked(agentID, runtimeID)
-		s.mu.Unlock()
+		delete(s.processes, runtimeID)
+		targets = append(targets, target{runtime: runtime, process: process})
+	}
+	s.mu.Unlock()
+
+	if len(targets) == 0 {
 		return Runtime{}, ErrRuntimeNotFound
 	}
 
-	// Already stopped - return as-is
-	if runtime.Status == StatusStopped {
+	for _, t := range targets {
+		if t.process == nil {
+			// Already stopped - nothing to terminate or persist.
+			continue
+		}
+		s.persistRuntime(t.runtime)
+
+		// Stop the process outside the lock - this may involve I/O and timeouts.
+		if t.process != nil {
+			if err := s.stopProcess(t.process, 2*time.Second); err != nil {
+				s.logger.Warn("runtime stop required forced termination", "runtime_id", t.runtime.ID, "error", err)
+			}
+		}
+
+		// Update final stopped state after process has terminated
+		s.mu.Lock()
+		final := s.runtimes[t.runtime.ID]
 		s.mu.Unlock()
-		return runtime, nil
+		final.Status = StatusStopped
+		final.PID = 0
+		final.StoppedAt = s.now().UTC()
+		s.mu.Lock()
+		s.runtimes[t.runtime.ID] = final
+		s.mu.Unlock()
+		s.persistRuntime(final)
 	}
 
-	// Mark process as stopping to prevent restart on exit
-	process := s.processes[runtimeID]
-	if process != nil {
-		process.stopping = true
-	}
-
-	// Transition to stopping state and remove from active maps
-	runtime.Status = StatusStopping
-	runtime.StoppedAt = time.Time{}
-	s.runtimes[runtimeID] = runtime
-	s.deleteRuntimeByAgentIfMatchesLocked(agentID, runtimeID)
-	delete(s.processes, runtimeID)
-	s.mu.Unlock()
-	s.persistRuntime(runtime)
-
-	// Stop the process outside the lock - this may involve I/O and timeouts.
-	// stopProcess (via stopProcessWithContext) only guarantees the process has
-	// exited: it blocks on handle.done until graceful termination completes or
-	// the timeout forces SIGKILL.
-	if err := s.stopProcess(process, 2*time.Second); err != nil {
-		s.logger.Warn("runtime stop required forced termination", "runtime_id", runtimeID, "error", err)
-	}
-
-	// Update final stopped state after process has terminated
-	s.mu.Lock()
-	runtime = s.runtimes[runtimeID]
-	s.mu.Unlock()
-	runtime.Status = StatusStopped
-	runtime.PID = 0
-	runtime.StoppedAt = s.now().UTC()
-	s.mu.Lock()
-	s.runtimes[runtimeID] = runtime
-	s.mu.Unlock()
-	s.persistRuntime(runtime)
-	return runtime, nil
+	return targets[len(targets)-1].runtime, nil
 }
 
 func (s *Supervisor) watchProcess(runtimeID, agentID string, handle *processHandle) {
@@ -1239,11 +1305,37 @@ func (s *Supervisor) recentLogs(runtimeID string, limit int) []LogEntry {
 	return lastLogEntries(s.logs[runtimeID], limit)
 }
 
+// addRuntimeByAgentLocked records runtimeID under agentID. Caller holds s.mu.
+func (s *Supervisor) addRuntimeByAgentLocked(agentID, runtimeID string) {
+	set := s.runtimeByAgent[agentID]
+	if set == nil {
+		set = make(map[string]struct{})
+		s.runtimeByAgent[agentID] = set
+	}
+	set[runtimeID] = struct{}{}
+}
+
+// runtimeIDsForAgentLocked returns the tracked runtime IDs for agentID.
+// Caller holds s.mu. Order is unspecified.
+func (s *Supervisor) runtimeIDsForAgentLocked(agentID string) []string {
+	set := s.runtimeByAgent[agentID]
+	ids := make([]string, 0, len(set))
+	for id := range set {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
 // deleteRuntimeByAgentIfMatchesLocked removes the agent-to-runtime mapping only
 // if it points to the specified runtime ID. This prevents accidentally deleting
 // a mapping that has been updated to point to a different runtime.
 func (s *Supervisor) deleteRuntimeByAgentIfMatchesLocked(agentID, runtimeID string) {
-	if currentRuntimeID, ok := s.runtimeByAgent[agentID]; ok && currentRuntimeID == runtimeID {
+	set, ok := s.runtimeByAgent[agentID]
+	if !ok {
+		return
+	}
+	delete(set, runtimeID)
+	if len(set) == 0 {
 		delete(s.runtimeByAgent, agentID)
 	}
 }
