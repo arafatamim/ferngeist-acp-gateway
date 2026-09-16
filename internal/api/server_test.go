@@ -2702,6 +2702,86 @@ func TestRuntimeConnectResilientReturnsSessionIDAndAttachToken(t *testing.T) {
 	}
 }
 
+func TestRuntimeConnectResilientLeaseHeldReturnsConflict(t *testing.T) {
+	baseDir := newHarnessBaseDir(t)
+	buildMockAgent(t, baseDir)
+
+	store, err := storage.Open(filepath.Join(baseDir, "test.db"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	server := newTestServerWithStore(baseDir, store)
+	tokenA := pairDevice(t, server)
+	tokenB := pairDevice(t, server)
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	tokenSvc := token.New(logger)
+	sessionSvc := session.NewRuntimeSession(logger, store, server.runtime, tokenSvc, session.Config{
+		MaxDisconnected: 5 * time.Minute,
+		MaxPerDevice:    3,
+	})
+	server.sessionSvc = sessionSvc
+
+	// Device A starts the agent and takes the runtime lease via resilient connect.
+	startReq := httptest.NewRequest(http.MethodPost, "/v1/agents/mock-acp/start", nil)
+	startReq.Header.Set("Authorization", "Bearer "+tokenA)
+	startRec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(startRec, startReq)
+	if startRec.Code != http.StatusOK {
+		t.Fatalf("start status = %d, want %d", startRec.Code, http.StatusOK)
+	}
+	t.Cleanup(func() {
+		stopReq := httptest.NewRequest(http.MethodPost, "/v1/agents/mock-acp/stop", nil)
+		stopReq.Header.Set("Authorization", "Bearer "+tokenA)
+		stopRec := httptest.NewRecorder()
+		server.Handler().ServeHTTP(stopRec, stopReq)
+	})
+
+	var startResp runtimeStartResponse
+	if err := json.Unmarshal(startRec.Body.Bytes(), &startResp); err != nil {
+		t.Fatalf("Unmarshal(start) error = %v", err)
+	}
+
+	connectResilient := func(token string) *httptest.ResponseRecorder {
+		body, _ := json.Marshal(map[string]string{"sessionMode": "resilient"})
+		req := httptest.NewRequest(http.MethodPost, "/v1/runtimes/"+startResp.Runtime.ID+"/connect", bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		server.Handler().ServeHTTP(rec, req)
+		return rec
+	}
+
+	first := connectResilient(tokenA)
+	if first.Code != http.StatusOK {
+		t.Fatalf("first-device connect status = %d, want %d, body=%s", first.Code, http.StatusOK, first.Body.String())
+	}
+	var firstResp runtimeConnectResponse
+	if err := json.Unmarshal(first.Body.Bytes(), &firstResp); err != nil {
+		t.Fatalf("Unmarshal(first connect) error = %v", err)
+	}
+	if firstResp.SessionID == "" {
+		t.Fatalf("first-device connect returned empty SessionID: %+v", firstResp)
+	}
+
+	// Device B targets the same runtime: the lease is held by device A's
+	// session, so connect must fail loudly (409) instead of returning 200
+	// with empty session credentials.
+	second := connectResilient(tokenB)
+	if second.Code != http.StatusConflict {
+		t.Fatalf("second-device connect status = %d, want %d, body=%s", second.Code, http.StatusConflict, second.Body.String())
+	}
+	var errResp errorResponse
+	if err := json.Unmarshal(second.Body.Bytes(), &errResp); err != nil {
+		t.Fatalf("Unmarshal(second connect) error = %v", err)
+	}
+	if errResp.Error != "runtime_lease_held" {
+		t.Fatalf("second-device connect error = %q, want %q", errResp.Error, "runtime_lease_held")
+	}
+}
+
 func TestRuntimeConnectResilientDegradesGracefullyWithoutSessionSvc(t *testing.T) {
 	baseDir := newHarnessBaseDir(t)
 	buildMockAgent(t, baseDir)

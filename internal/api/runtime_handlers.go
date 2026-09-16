@@ -10,6 +10,7 @@ import (
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/catalog"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/pairing"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/runtime"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/session"
 )
 
 // agentsResponse wraps the list of agents with their live runtime state.
@@ -249,6 +250,16 @@ func (s *Server) handleRuntimeConnect(w http.ResponseWriter, r *http.Request) {
 			} else {
 				sess, attachToken, err := s.sessionSvc.Create(r.Context(), runtimeID, credential.DeviceID, descriptor.AgentID)
 				if err != nil {
+					// A second device targeting a runtime already leased by
+					// another device's session must fail loudly (409) so the
+					// client can retry with POST /start {"new":true}. Returning
+					// 200 with empty session credentials leaves the client
+					// guessing between crash and session limit.
+					if errors.Is(err, runtime.ErrRuntimeLeaseHeld) || errors.Is(err, session.ErrRuntimeLeaseHeld) {
+						s.logger.Warn("resilient connect rejected: runtime lease held", "runtimeId", runtimeID)
+						writeError(w, http.StatusConflict, "runtime_lease_held")
+						return
+					}
 					s.logger.Warn("failed to create resilient session", "error", err)
 				} else {
 					resp.SessionID = sess.ID
