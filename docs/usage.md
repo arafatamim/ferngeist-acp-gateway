@@ -21,6 +21,9 @@ The gateway is a self-hosted backend for ACP-compatible agents:
   state inside the project the agent is working on
   (`GET /v1/runtimes/{id}/files`, `/git/status`, `/git/diff`; see
   [docs/api.md](api.md)).
+- **Custom agents** — register your own ACP agent (command + args) from a
+  paired client or from the host with `ferngeist-gateway agents add`; it then
+  lists and starts like any catalog agent.
 
 ## Run the daemon
 
@@ -51,7 +54,17 @@ Then pair the device from the client app.
 ```powershell
 ferngeist-gateway daemon status
 ferngeist-gateway devices list
+ferngeist-gateway agents list
 ```
+
+Commands that read or change gateway state — `pair`, `devices …`, `agents …` —
+drive the running daemon over its local admin API. Run `daemon run` in another
+terminal, or install the background service with `daemon install`. When nothing
+answers, every one of them prints the same hint and exits `2`, so scripts can
+tell "start the daemon" apart from an ordinary failure (`1`). `daemon status`
+still prints its report and exits `2` when the API is unreachable.
+
+First run: `ferngeist-gateway daemon install` → `ferngeist-gateway pair`.
 
 ## Notes
 

@@ -1322,3 +1322,136 @@ func TestEnsureGatewayID(t *testing.T) {
 		t.Fatalf("EnsureGatewayID() not stable across reopen: %q != %q", id3, id1)
 	}
 }
+
+// ========================================================================
+// Custom agents
+// ========================================================================
+
+// TestCustomAgentRoundTrip verifies save, get, not-found, delete, and
+// second-delete-returns-ErrNotFound for a custom agent record.
+func TestCustomAgentRoundTrip(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "custom_agents_rt.db"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	record := CustomAgentRecord{ID: "custom-foo", DisplayName: "Foo", Command: "foo-agent", Args: []string{"--acp"}, Hint: "h", CreatedAt: time.Now().UTC()}
+	if err := store.SaveCustomAgent(ctx, record); err != nil {
+		t.Fatalf("SaveCustomAgent() error = %v", err)
+	}
+	got, err := store.GetCustomAgent(ctx, "custom-foo")
+	if err != nil {
+		t.Fatalf("GetCustomAgent() error = %v", err)
+	}
+	if got.Command != "foo-agent" || len(got.Args) != 1 || got.Args[0] != "--acp" {
+		t.Fatalf("round trip mismatch: %+v", got)
+	}
+	if got.DisplayName != "Foo" || got.Hint != "h" {
+		t.Fatalf("round trip mismatch: %+v", got)
+	}
+	if _, err := store.GetCustomAgent(ctx, "custom-nope"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("GetCustomAgent(missing) = %v, want ErrNotFound", err)
+	}
+	if err := store.DeleteCustomAgent(ctx, "custom-foo"); err != nil {
+		t.Fatalf("DeleteCustomAgent() error = %v", err)
+	}
+	if err := store.DeleteCustomAgent(ctx, "custom-foo"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("second Delete = %v, want ErrNotFound", err)
+	}
+}
+
+// TestCustomAgentUpsertListAndCount verifies re-saving updates the record in
+// place (creation time preserved), ListCustomAgents is ordered by id, nil Args
+// is stored as an empty list, and CountCustomAgents tracks deletes.
+func TestCustomAgentUpsertListAndCount(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "custom_agents_list.db"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	created := time.Date(2026, 9, 16, 12, 0, 0, 0, time.UTC)
+	if err := store.SaveCustomAgent(ctx, CustomAgentRecord{ID: "custom-b", DisplayName: "B", Command: "b-agent", CreatedAt: created}); err != nil {
+		t.Fatalf("SaveCustomAgent(b) error = %v", err)
+	}
+	if err := store.SaveCustomAgent(ctx, CustomAgentRecord{ID: "custom-a", DisplayName: "A", Command: "a-agent", CreatedAt: created}); err != nil {
+		t.Fatalf("SaveCustomAgent(a) error = %v", err)
+	}
+	if err := store.SaveCustomAgent(ctx, CustomAgentRecord{ID: "custom-a", DisplayName: "A2", Command: "a2-agent", Args: []string{"--acp"}, Hint: "h2", CreatedAt: created.Add(time.Hour)}); err != nil {
+		t.Fatalf("SaveCustomAgent(a update) error = %v", err)
+	}
+
+	list, err := store.ListCustomAgents(ctx)
+	if err != nil {
+		t.Fatalf("ListCustomAgents() error = %v", err)
+	}
+	if len(list) != 2 {
+		t.Fatalf("len(list) = %d, want 2", len(list))
+	}
+	if list[0].ID != "custom-a" || list[1].ID != "custom-b" {
+		t.Fatalf("ListCustomAgents() order = [%q %q], want [custom-a custom-b]", list[0].ID, list[1].ID)
+	}
+	if list[0].DisplayName != "A2" || list[0].Command != "a2-agent" || list[0].Hint != "h2" || len(list[0].Args) != 1 {
+		t.Fatalf("upsert did not update record: %+v", list[0])
+	}
+	if !list[0].CreatedAt.Equal(created) {
+		t.Fatalf("CreatedAt after upsert = %v, want original %v", list[0].CreatedAt, created)
+	}
+	if len(list[1].Args) != 0 {
+		t.Fatalf("nil Args round trip = %#v, want empty", list[1].Args)
+	}
+
+	count, err := store.CountCustomAgents(ctx)
+	if err != nil {
+		t.Fatalf("CountCustomAgents() error = %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("CountCustomAgents() = %d, want 2", count)
+	}
+	if err := store.DeleteCustomAgent(ctx, "custom-a"); err != nil {
+		t.Fatalf("DeleteCustomAgent() error = %v", err)
+	}
+	count, err = store.CountCustomAgents(ctx)
+	if err != nil {
+		t.Fatalf("CountCustomAgents(after delete) error = %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("CountCustomAgents() after delete = %d, want 1", count)
+	}
+}
+
+// TestCustomAgentBadStoredData verifies corrupt stored payloads surface as
+// errors rather than silently yielding empty args or a zero created_at,
+// matching the bad-JSON/bad-timestamp coverage the other stored columns have.
+func TestCustomAgentBadStoredData(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "custom_agents_bad.db"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	if _, err := store.db.ExecContext(ctx,
+		`INSERT INTO custom_agents(agent_id, display_name, command, args, hint, created_at) VALUES(?,?,?,?,?,?)`,
+		"custom-bad-json", "Bad", "bad-agent", "{bad json}", "", time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		t.Fatalf("insert bad json: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx,
+		`INSERT INTO custom_agents(agent_id, display_name, command, args, hint, created_at) VALUES(?,?,?,?,?,?)`,
+		"custom-bad-ts", "Bad", "bad-agent", "[]", "", "not-a-timestamp"); err != nil {
+		t.Fatalf("insert bad timestamp: %v", err)
+	}
+
+	if _, err := store.ListCustomAgents(ctx); err == nil {
+		t.Error("ListCustomAgents() with corrupt row = nil error, want error")
+	}
+	if _, err := store.GetCustomAgent(ctx, "custom-bad-json"); err == nil {
+		t.Error("GetCustomAgent(corrupt args) = nil error, want error")
+	}
+	if _, err := store.GetCustomAgent(ctx, "custom-bad-ts"); err == nil {
+		t.Error("GetCustomAgent(corrupt timestamp) = nil error, want error")
+	}
+}

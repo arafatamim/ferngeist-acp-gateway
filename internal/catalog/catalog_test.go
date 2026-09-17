@@ -22,6 +22,9 @@ func TestLoadEmbeddedAgents(t *testing.T) {
 
 	found := false
 	for _, agent := range agents {
+		if agent.Source != "embedded" {
+			t.Fatalf("agent %q Source = %q, want embedded", agent.ID, agent.Source)
+		}
 		if agent.ID == "mock-acp" {
 			found = true
 			if agent.Launch.Command == "" {
@@ -231,6 +234,9 @@ func TestRegistryAgentIsSurfacedAndEnriched(t *testing.T) {
 	}
 	if !agent.ManifestValid {
 		t.Fatalf("ManifestValid = false, validation error = %q", agent.ValidationError)
+	}
+	if agent.Source != "registry" {
+		t.Fatalf("Source = %q, want registry", agent.Source)
 	}
 	if agent.Registry.ValidationStatus != "matched" {
 		t.Fatalf("Registry.ValidationStatus = %q, want %q", agent.Registry.ValidationStatus, "matched")
@@ -689,4 +695,99 @@ type fakeRegistrySource struct {
 
 func (f fakeRegistrySource) Snapshot(context.Context) (acpregistry.Snapshot, error) {
 	return f.snapshot, f.err
+}
+
+// absExeForTest returns the host-absolute path of a real file.
+func absExeForTest(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "foo-agent")
+	if err := os.WriteFile(path, []byte("placeholder"), 0o755); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		t.Fatalf("filepath.Abs() error = %v", err)
+	}
+	return abs
+}
+
+// validCustomTestAgent builds the agent the catalog derives for a user custom.
+func validCustomTestAgent(id, command string) Agent {
+	return customToAgent(CustomAgent{ID: id, DisplayName: "Foo", Command: command})
+}
+
+func TestMergedEmbeddedAdapterKeepsEmbeddedSource(t *testing.T) {
+	service := NewWithBaseDirAndRegistry(t.TempDir(), fakeRegistrySource{
+		snapshot: acpregistry.Snapshot{
+			Version: "1.0.0",
+			Agents: map[string]acpregistry.AgentEntry{
+				"mock-acp": {ID: "mock-acp", Name: "Mock ACP"},
+			},
+		},
+	})
+
+	agent, err := service.Get("mock-acp")
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if agent.Source != "embedded" {
+		t.Fatalf("Source = %q, want embedded for a local adapter merged with registry metadata", agent.Source)
+	}
+}
+
+func TestValidateAbsolutePathLaunch(t *testing.T) {
+	abs := absExeForTest(t)
+	agent := Agent{
+		ID: "custom-foo", DisplayName: "Foo", Protocol: "acp",
+		PlatformSupport: []string{"windows", "darwin", "linux", "android"},
+		Detection:       DetectionConfig{Mode: "path_lookup", Command: abs},
+		Launch:          LaunchConfig{Mode: "external", Command: abs, Args: []string{"--acp"}, Transport: "stdio", Readiness: ReadinessConfig{Mode: "immediate"}, Restart: RestartConfig{Mode: "never"}},
+		HealthCheck:     HealthCheckConfig{Mode: "none"},
+		Security:        SecurityConfig{CuratedLaunch: true, AllowsRemoteStart: true},
+	}
+	if err := validateAgent(agent); err != nil {
+		t.Fatalf("validateAgent(absolute path) = %v, want nil", err)
+	}
+}
+
+func TestValidateRelativePathLaunchRejected(t *testing.T) {
+	agent := validCustomTestAgent("custom-foo", "tools/foo-agent")
+	if err := validateAgent(agent); err == nil {
+		t.Fatal("validateAgent(relative path) = nil, want error")
+	}
+}
+
+func TestSlugCustomID(t *testing.T) {
+	cases := map[string]string{"My Agent!": "custom-my-agent", "  ": "custom-agent"}
+	for in, want := range cases {
+		if got := SlugCustomID(in); got != want {
+			t.Errorf("SlugCustomID(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestRefreshMergesCustomAgents(t *testing.T) {
+	svc := NewWithBaseDirAndRegistry(t.TempDir(), nil)
+	if svc.IsCustomID("custom-foo") {
+		t.Fatal("IsCustomID without a custom provider = true, want false")
+	}
+	svc.SetCustomProvider(func() []CustomAgent {
+		return []CustomAgent{{ID: "custom-foo", DisplayName: "Foo", Command: "definitely-not-installed-xyz", Hint: "h"}}
+	})
+	if !svc.IsCustomID("custom-foo") || svc.IsCustomID("mock-acp") {
+		t.Fatal("IsCustomID must report provider-backed ids only")
+	}
+	agent, err := svc.Get("custom-foo")
+	if err != nil {
+		t.Fatalf("Get(custom-foo) error = %v", err)
+	}
+	if agent.Source != "custom" {
+		t.Errorf("Source = %q, want custom", agent.Source)
+	}
+	if agent.Detected {
+		t.Error("Detected = true, want false for missing binary")
+	}
+	if !agent.ManifestValid {
+		t.Errorf("ManifestValid = false, validation error = %q", agent.ValidationError)
+	}
 }

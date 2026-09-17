@@ -25,6 +25,7 @@ import (
 
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/catalog"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/config"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/customagents"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/discovery"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/gateway"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/logging"
@@ -62,6 +63,12 @@ type Server struct {
 	discovery  *discovery.Service
 	logs       *logging.Service
 	registry   registryStatusProvider
+
+	// customagentsSvc is the write policy behind /v1/agents/custom*, shared with
+	// the admin API. customagentsStore is the store it was bound to, so test
+	// servers that assign store after NewServer get it rebound.
+	customagentsSvc   *customagents.Service
+	customagentsStore *storage.SQLiteStore
 
 	// remoteSetup, when set, returns the daemon's live remote-access
 	// provisioning state (auth pending, setup blockers) for status snapshots.
@@ -125,6 +132,17 @@ type BuildInfo struct {
 // errorResponse is the standard JSON error envelope returned on API errors.
 type errorResponse struct {
 	Error string `json:"error"`
+}
+
+// customAgents returns the custom-agent write policy shared with the admin API.
+// NewServer binds it to the store it was given; test servers assign store after
+// construction, so rebind when it has moved.
+func (s *Server) customAgents() *customagents.Service {
+	if s.customagentsSvc == nil || s.customagentsStore != s.store {
+		s.customagentsSvc = customagents.New(s.store, s.catalog, s.runtime.List, s.logger)
+		s.customagentsStore = s.store
+	}
+	return s.customagentsSvc
 }
 
 // statusResponse is returned by the public /v1/status endpoint with a summary
@@ -229,6 +247,8 @@ func NewServer(
 		store:       store,
 		sessionSvc:  sessionSvc,
 	}
+	server.customagentsSvc = customagents.New(store, catalogSvc, runtimeSvc.List, server.logger)
+	server.customagentsStore = store
 
 	mux := http.NewServeMux()
 	adminMux := http.NewServeMux()
@@ -243,6 +263,9 @@ func NewServer(
 	mux.HandleFunc("GET /v1/pair/status/{challengeId}", server.handlePairStatus)
 	mux.HandleFunc("/v1/runtimes", server.handleRuntimes)
 	mux.HandleFunc("GET /v1/runtimes/{runtimeId}/logs", server.handleRuntimeLogs)
+	mux.HandleFunc("POST /v1/agents/custom", server.handleCustomAgentCreate)
+	mux.HandleFunc("PUT /v1/agents/custom/{id}", server.handleCustomAgentUpdate)
+	mux.HandleFunc("DELETE /v1/agents/custom/{id}", server.handleCustomAgentDelete)
 	mux.HandleFunc("POST /v1/agents/{agentId}/start", server.handleAgentStart)
 	mux.HandleFunc("POST /v1/agents/{agentId}/stop", server.handleAgentStop)
 	mux.HandleFunc("POST /v1/runtimes/{runtimeId}/connect", server.handleRuntimeConnect)
@@ -258,6 +281,10 @@ func NewServer(
 	adminMux.HandleFunc("DELETE /admin/v1/pairings/{challengeId}", server.handleAdminPairingCancel)
 	adminMux.HandleFunc("GET /admin/v1/devices", server.handleAdminDevices)
 	adminMux.HandleFunc("DELETE /admin/v1/devices/{deviceId}", server.handleAdminDeviceRevoke)
+	adminMux.HandleFunc("GET /admin/v1/agents", server.handleAdminCustomAgentList)
+	adminMux.HandleFunc("POST /admin/v1/agents/custom", server.handleAdminCustomAgentCreate)
+	adminMux.HandleFunc("PUT /admin/v1/agents/custom/{id}", server.handleAdminCustomAgentUpdate)
+	adminMux.HandleFunc("DELETE /admin/v1/agents/custom/{id}", server.handleAdminCustomAgentDelete)
 
 	adminAddr := strings.TrimSpace(cfg.AdminListenAddr)
 	if adminAddr == "" {

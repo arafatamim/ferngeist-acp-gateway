@@ -195,14 +195,14 @@ func main() {
 			},
 			{
 				Name:  "pair",
-				Usage: "start an interactive pairing flow",
+				Usage: "start an interactive pairing flow (needs a running daemon)",
 				Action: func(_ context.Context, _ *cli.Command) error {
 					return runPair()
 				},
 			},
 			{
 				Name:  "devices",
-				Usage: "manage paired devices",
+				Usage: "manage paired devices (needs a running daemon)",
 				Action: func(_ context.Context, cmd *cli.Command) error {
 					_ = cli.ShowSubcommandHelp(cmd)
 					return nil
@@ -228,14 +228,122 @@ func main() {
 					},
 				},
 			},
+			{
+				Name:  "agents",
+				Usage: "manage custom agents (needs a running daemon)",
+				Action: func(_ context.Context, cmd *cli.Command) error {
+					_ = cli.ShowSubcommandHelp(cmd)
+					return nil
+				},
+				Commands: []*cli.Command{
+					{
+						Name:  "add",
+						Usage: "register a custom agent",
+						Flags: []cli.Flag{
+							&cli.StringFlag{Name: "name", Usage: "display name (the id is derived as custom-<slug>)"},
+							&cli.StringFlag{Name: "command", Usage: "bare PATH executable name or absolute path"},
+							&cli.StringSliceFlag{Name: "args", Usage: "agent argument (repeatable)"},
+							&cli.StringFlag{Name: "hint", Usage: "optional note shown to clients"},
+						},
+						Action: func(_ context.Context, cmd *cli.Command) error {
+							name := cmd.String("name")
+							command := cmd.String("command")
+							if strings.TrimSpace(name) == "" || strings.TrimSpace(command) == "" {
+								return fmt.Errorf("usage: ferngeist-gateway agents add --name <display name> --command <command> [--args <arg>]... [--hint <text>]")
+							}
+							return runAgentsAdd(name, command, cmd.StringSlice("args"), cmd.String("hint"))
+						},
+					},
+					{
+						Name:  "list",
+						Usage: "list all agents",
+						Action: func(_ context.Context, _ *cli.Command) error {
+							return runAgentsList()
+						},
+					},
+					{
+						Name:      "update",
+						Usage:     "edit a custom agent",
+						ArgsUsage: "<agent-id>",
+						Flags: []cli.Flag{
+							&cli.StringFlag{Name: "name", Usage: "new display name (the id cannot change)"},
+							&cli.StringFlag{Name: "command", Usage: "new bare PATH executable name or absolute path"},
+							&cli.StringSliceFlag{Name: "args", Usage: "replacement argument (repeatable)"},
+							&cli.BoolFlag{Name: "clear-args", Usage: "clear the argument list"},
+							&cli.StringFlag{Name: "hint", Usage: "new hint (an empty string clears it)"},
+						},
+						Action: func(_ context.Context, cmd *cli.Command) error {
+							if cmd.Args().Len() != 1 {
+								return fmt.Errorf("usage: ferngeist-gateway agents update <agent-id> [--name <name>] [--command <command>] [--args <arg>]... [--clear-args] [--hint <text>]")
+							}
+							if cmd.IsSet("args") && cmd.Bool("clear-args") {
+								return fmt.Errorf("usage: ferngeist-gateway agents update: --args and --clear-args cannot be combined")
+							}
+							var name, command, hint *string
+							if cmd.IsSet("name") {
+								value := cmd.String("name")
+								name = &value
+							}
+							if cmd.IsSet("command") {
+								value := cmd.String("command")
+								command = &value
+							}
+							if cmd.IsSet("hint") {
+								value := cmd.String("hint")
+								hint = &value
+							}
+							return runAgentsUpdate(cmd.Args().First(), name, command, cmd.StringSlice("args"), cmd.IsSet("args"), cmd.Bool("clear-args"), hint)
+						},
+					},
+					{
+						Name:      "rm",
+						Usage:     "remove a custom agent",
+						ArgsUsage: "<agent-id>",
+						Action: func(_ context.Context, cmd *cli.Command) error {
+							if cmd.Args().Len() != 1 {
+								return fmt.Errorf("usage: ferngeist-gateway agents rm <agent-id>")
+							}
+							return runAgentsRemove(cmd.Args().First())
+						},
+					},
+				},
+			},
 		},
 	}
 
 	if err := command.Run(context.Background(), os.Args); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		var reported *alreadyReported
+		if !errors.As(err, &reported) {
+			fmt.Fprintln(os.Stderr, err)
+		}
+		os.Exit(exitCodeFor(err))
 	}
 }
+
+// exitDaemonUnreachable is the process status for "the daemon did not answer",
+// so scripts can tell "start the daemon" apart from an ordinary command
+// failure (1). See docs/usage.md.
+const exitDaemonUnreachable = 2
+
+func exitCodeFor(err error) int {
+	if err == nil {
+		return 0
+	}
+	var reported *alreadyReported
+	if errors.As(err, &reported) {
+		return reported.code
+	}
+	if adminclient.IsDaemonUnreachable(err) {
+		return exitDaemonUnreachable
+	}
+	return 1
+}
+
+// alreadyReported carries an exit code for a command that printed its own
+// diagnosis (daemon status prints a table), so main adds no second line.
+type alreadyReported struct{ code int }
+
+func (e *alreadyReported) Error() string { return "" }
 
 func runDaemon(enableLAN bool, listenAddr string, publicBaseURL string, remote bool) error {
 	applyDaemonRunOverrides(enableLAN, listenAddr, publicBaseURL, remote)

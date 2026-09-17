@@ -148,8 +148,23 @@ func runDaemonStatus() error {
 
 	daemonStatus, err := fetchDaemonStatus(context.Background())
 	if err != nil {
-		fmt.Fprintf(writer, "DAEMON API\tunreachable (%s)\n", err)
-		return writer.Flush()
+		// The service rows above are a report worth keeping, so print them and
+		// carry the failure in the exit code instead: 2 when the daemon is down
+		// (the same code every daemon-dependent command uses), 1 when it
+		// answered with an error.
+		if adminclient.IsDaemonUnreachable(err) {
+			fmt.Fprintln(writer, "DAEMON API\tunreachable")
+			fmt.Fprintf(writer, "NEXT STEP\t%s\n", adminclient.DaemonUnreachableHint)
+			if flushErr := writer.Flush(); flushErr != nil {
+				return flushErr
+			}
+			return &alreadyReported{code: exitDaemonUnreachable}
+		}
+		fmt.Fprintf(writer, "DAEMON API\terror (%s)\n", err)
+		if flushErr := writer.Flush(); flushErr != nil {
+			return flushErr
+		}
+		return &alreadyReported{code: 1}
 	}
 
 	fmt.Fprintln(writer, "")

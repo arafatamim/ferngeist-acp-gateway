@@ -116,6 +116,26 @@ func Run(ctx context.Context, build api.BuildInfo) error {
 	registryClient := acpregistry.New(cfg.RegistryURL, 6*time.Hour)
 	catalogSvc := catalog.NewWithBaseDirAndRegistry(".", registryClient)
 	catalogSvc.SetNpmResolver(catalog.ResolveNpmBinaryNames)
+	// Custom agents live in SQLite; the catalog pulls them on every refresh so
+	// client edits show up without a daemon restart.
+	catalogSvc.SetCustomProvider(func() []catalog.CustomAgent {
+		records, err := store.ListCustomAgents(context.Background())
+		if err != nil {
+			logger.Warn("list custom agents failed", slog.String("error", err.Error()))
+			return nil
+		}
+		out := make([]catalog.CustomAgent, 0, len(records))
+		for _, record := range records {
+			out = append(out, catalog.CustomAgent{
+				ID:          record.ID,
+				DisplayName: record.DisplayName,
+				Command:     record.Command,
+				Args:        record.Args,
+				Hint:        record.Hint,
+			})
+		}
+		return out
+	})
 	installer := acquire.New(logger, cfg.ManagedBinDir, store)
 	runtimeSvc := gatewayruntime.NewSupervisorWithBaseDirAndInstaller(logger, ".", store, installer)
 	pairingSvc := pairing.NewServiceWithOptions(logger, store, pairing.Options{

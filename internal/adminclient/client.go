@@ -7,12 +7,27 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/config"
 )
 
+// ErrDaemonUnreachable marks a request that never reached an HTTP response, so
+// the daemon is not running (or not on this address). Callers use IsDaemonUnreachable
+// to report one recovery hint and one exit code everywhere instead of dumping a
+// dial error per command.
+var ErrDaemonUnreachable = errors.New("daemon not reachable")
+
+// DaemonUnreachableHint is the recovery advice every surface prints, so the
+// wording cannot drift between commands.
+const DaemonUnreachableHint = "start the daemon with 'ferngeist-gateway daemon run', or install it as a service with 'ferngeist-gateway daemon install'"
+
+// IsDaemonUnreachable reports whether err means the daemon did not answer.
+func IsDaemonUnreachable(err error) bool { return errors.Is(err, ErrDaemonUnreachable) }
+
+// Client talks to the daemon's loopback admin API.
 type Client struct {
 	baseURL    string
 	httpClient *http.Client
@@ -72,6 +87,40 @@ type devicesResponse struct {
 	Devices []Device `json:"devices"`
 }
 
+// Agent is one gateway-visible agent. catalog.Agent serializes a superset of
+// these fields; this is the subset the CLI acts on.
+type Agent struct {
+	ID          string `json:"id"`
+	DisplayName string `json:"displayName"`
+	Source      string `json:"source"`
+	Detected    bool   `json:"detected"`
+	Hint        string `json:"hint"`
+	Launch      struct {
+		Command string   `json:"command"`
+		Args    []string `json:"args"`
+	} `json:"launch"`
+}
+
+// AgentInput is the client-supplied shape of a custom agent. Empty fields are
+// omitted: on update, omission means "unchanged" and only args are replaced
+// wholesale.
+type AgentInput struct {
+	DisplayName string `json:"displayName,omitempty"`
+	Command     string `json:"command,omitempty"`
+	// Args has no omitempty: the admin API reads an omitted args as "unchanged"
+	// and an empty list as "clear", so an empty list must reach the wire.
+	Args []string `json:"args"`
+	Hint string   `json:"hint,omitempty"`
+}
+
+type agentsResponse struct {
+	Agents []Agent `json:"agents"`
+}
+
+type customAgentDeleteResponse struct {
+	Deleted string `json:"deleted"`
+}
+
 type errorResponse struct {
 	Error string `json:"error"`
 }
@@ -113,6 +162,31 @@ func (c *Client) RevokeDevice(ctx context.Context, deviceID string) (Device, err
 	return doJSON[Device](c, ctx, http.MethodDelete, "/admin/v1/devices/"+deviceID, nil)
 }
 
+// ListAgents returns the full catalog the gateway can launch, custom agents
+// included.
+func (c *Client) ListAgents(ctx context.Context) ([]Agent, error) {
+	response, err := doJSON[agentsResponse](c, ctx, http.MethodGet, "/admin/v1/agents", nil)
+	if err != nil {
+		return nil, err
+	}
+	return response.Agents, nil
+}
+
+func (c *Client) AddCustomAgent(ctx context.Context, in AgentInput) (Agent, error) {
+	return doJSON[Agent](c, ctx, http.MethodPost, "/admin/v1/agents/custom", in)
+}
+
+func (c *Client) UpdateCustomAgent(ctx context.Context, id string, in AgentInput) (Agent, error) {
+	return doJSON[Agent](c, ctx, http.MethodPut, "/admin/v1/agents/custom/"+id, in)
+}
+
+// RemoveCustomAgent deletes a custom agent. A rejected delete (unknown id, cap,
+// live runtime) comes back as the gateway's error message.
+func (c *Client) RemoveCustomAgent(ctx context.Context, id string) error {
+	_, err := doJSON[customAgentDeleteResponse](c, ctx, http.MethodDelete, "/admin/v1/agents/custom/"+id, nil)
+	return err
+}
+
 func doJSON[T any](c *Client, ctx context.Context, method, path string, body any) (T, error) {
 	var zero T
 
@@ -136,7 +210,7 @@ func doJSON[T any](c *Client, ctx context.Context, method, path string, body any
 
 	response, err := c.httpClient.Do(req)
 	if err != nil {
-		return zero, annotateDaemonConnectionError(err)
+		return zero, daemonUnreachable(c.baseURL, err)
 	}
 	defer response.Body.Close()
 
@@ -154,10 +228,31 @@ func doJSON[T any](c *Client, ctx context.Context, method, path string, body any
 	return zero, nil
 }
 
-func annotateDaemonConnectionError(err error) error {
-	lower := strings.ToLower(err.Error())
-	if strings.Contains(lower, "connection refused") || strings.Contains(lower, "actively refused") {
-		return fmt.Errorf("%w\nIs the daemon running?", err)
+// daemonUnreachable wraps a transport-level failure from http.Client.Do. Such
+// an error means no HTTP response was ever produced — the connection was
+// refused, timed out, reset, or the host did not resolve — which for a
+// loopback admin API can only mean the daemon is not answering. Matching on the
+// error type rather than on message substrings covers every one of those cases
+// with one code path and one message.
+func daemonUnreachable(baseURL string, cause error) error {
+	var urlErr *url.Error
+	if !errors.As(cause, &urlErr) {
+		return cause
 	}
-	return err
+	return &unreachableError{baseURL: baseURL, cause: cause}
 }
+
+// unreachableError keeps the transport cause for logs while showing the
+// operator one actionable line.
+type unreachableError struct {
+	baseURL string
+	cause   error
+}
+
+func (e *unreachableError) Error() string {
+	return fmt.Sprintf("%v at %s\nHint: %s", ErrDaemonUnreachable, e.baseURL, DaemonUnreachableHint)
+}
+
+// Unwrap exposes both the sentinel (for IsDaemonUnreachable) and the transport
+// cause.
+func (e *unreachableError) Unwrap() []error { return []error{ErrDaemonUnreachable, e.cause} }

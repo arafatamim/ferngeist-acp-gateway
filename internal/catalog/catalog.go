@@ -26,11 +26,14 @@ const mockAgentExecutablePlaceholder = "__MOCK_AGENT_EXECUTABLE__"
 //go:embed manifests/*.json
 var embeddedManifestFS embed.FS
 
-// Agent is one gateway-visible ACP runtime entry. Entries may come from bundled
-// gateway-owned manifests (such as the mock runtime) or be synthesized directly
-// from the ACP registry when the registry provides a supported launch method.
+// Agent is one gateway-visible ACP runtime entry. Entries come from three
+// sources: bundled gateway-owned manifests (such as the mock runtime), the ACP
+// registry (when it provides a supported launch method), or client-registered
+// custom agents (stored in SQLite, served through the daemon's provider hook —
+// a custom with the same ID shadows the other two).
 type Agent struct {
 	ID              string            `json:"id"`
+	Source          string            `json:"source"` // "embedded" | "registry" | "custom"
 	DisplayName     string            `json:"displayName"`
 	Protocol        string            `json:"protocol"`
 	PlatformSupport []string          `json:"platformSupport,omitempty"`
@@ -110,6 +113,16 @@ type registryLaunchPlan struct {
 	Detection DetectionConfig
 }
 
+// CustomAgent is one user-registered agent. The daemon serves these from
+// SQLite; catalog never imports storage.
+type CustomAgent struct {
+	ID          string
+	DisplayName string
+	Command     string
+	Args        []string
+	Hint        string
+}
+
 type RegistrySource interface {
 	Snapshot(ctx context.Context) (acpregistry.Snapshot, error)
 }
@@ -120,6 +133,7 @@ type Service struct {
 	baseDir            string
 	registry           RegistrySource
 	resolveNpmBinaries func(string) []string
+	customs            func() []CustomAgent
 }
 
 // New returns the default gateway catalog rooted at the current working
@@ -153,6 +167,72 @@ func (s *Service) SetNpmResolver(resolve func(string) []string) {
 	s.resolveNpmBinaries = resolve
 }
 
+// SetCustomProvider serves user-registered agents from storage. Called by the
+// daemon after construction; nil means no custom agents.
+func (s *Service) SetCustomProvider(provide func() []CustomAgent) {
+	s.customs = provide
+}
+
+// IsCustomID reports whether the id is currently served by the custom provider.
+func (s *Service) IsCustomID(id string) bool {
+	if s.customs == nil {
+		return false
+	}
+	for _, c := range s.customs() {
+		if c.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// customToAgent is the single place forcing v1 custom-agent policy: the server
+// derives everything except name, command, args and hint.
+func customToAgent(c CustomAgent) Agent {
+	return Agent{
+		ID:              c.ID,
+		DisplayName:     c.DisplayName,
+		Protocol:        "acp",
+		Source:          "custom",
+		PlatformSupport: []string{"windows", "darwin", "linux", "android"},
+		Detection:       DetectionConfig{Mode: "path_lookup", Command: c.Command},
+		Launch: LaunchConfig{
+			Mode: "external", Command: c.Command, Args: append([]string(nil), c.Args...),
+			Transport: "stdio",
+			Readiness: ReadinessConfig{Mode: "immediate"},
+			Restart:   RestartConfig{Mode: "never"},
+		},
+		HealthCheck: HealthCheckConfig{Mode: "none"},
+		Security:    SecurityConfig{CuratedLaunch: true, AllowsRemoteStart: true},
+		Registry:    RegistryInfo{Required: false, ValidationStatus: "not_required"},
+		Hint:        c.Hint,
+	}
+}
+
+// SlugCustomID derives the immutable custom-<slug> ID from a display name.
+func SlugCustomID(displayName string) string {
+	slug := strings.ToLower(strings.TrimSpace(displayName))
+	var b strings.Builder
+	prevDash := true // collapse + trim in one pass
+	for _, r := range slug {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			prevDash = false
+		} else if !prevDash {
+			b.WriteByte('-')
+			prevDash = true
+		}
+	}
+	slug = strings.Trim(strings.TrimSpace(b.String()), "-")
+	if len(slug) > 48 {
+		slug = strings.Trim(slug[:48], "-")
+	}
+	if slug == "" {
+		slug = "agent"
+	}
+	return "custom-" + slug
+}
+
 func loadEmbeddedAgents() ([]Agent, error) {
 	entries, err := fs.ReadDir(embeddedManifestFS, "manifests")
 	if err != nil {
@@ -181,6 +261,7 @@ func loadEmbeddedAgents() ([]Agent, error) {
 		}
 
 		normalizeManifestPlaceholders(&agent)
+		agent.Source = "embedded"
 		agents = append(agents, agent)
 	}
 	return agents, nil
@@ -289,6 +370,31 @@ func (s *Service) Refresh() {
 		visible = append(visible, agent)
 	}
 
+	if s.customs != nil {
+		for _, custom := range s.customs() {
+			agent := customToAgent(custom)
+			if validationError := validateAgent(agent); validationError != nil {
+				agent.ManifestValid = false
+				agent.ValidationError = validationErrorString(validationError)
+				agent.Detected = false
+			} else {
+				agent.ManifestValid = true
+				agent.Detected = s.detect(agent)
+			}
+			replaced := false
+			for i := range visible {
+				if visible[i].ID == agent.ID {
+					visible[i] = agent // user custom shadows same-ID entry
+					replaced = true
+					break
+				}
+			}
+			if !replaced {
+				visible = append(visible, agent)
+			}
+		}
+	}
+
 	sort.Slice(visible, func(i, j int) bool {
 		return visible[i].ID < visible[j].ID
 	})
@@ -385,6 +491,12 @@ func validateDetection(detection DetectionConfig) error {
 			return errors.New("local_file detection requires path")
 		}
 	case "path_lookup":
+		if isAbsoluteExecutable(detection.Command) {
+			if containsControlChars(detection.Command) {
+				return errors.New("path_lookup detection command cannot contain control characters")
+			}
+			break
+		}
 		if err := validateExecutableName(detection.Command); err != nil {
 			return fmt.Errorf("path_lookup detection requires safe command: %w", err)
 		}
@@ -410,8 +522,12 @@ func validateLaunch(launch LaunchConfig) error {
 			return errors.New("process launch requires readiness mode")
 		}
 	case "external":
-		if err := validateExecutableName(launch.Command); err != nil {
-			return fmt.Errorf("external launch requires safe command: %w", err)
+		if !isAbsoluteExecutable(launch.Command) {
+			if err := validateExecutableName(launch.Command); err != nil {
+				return fmt.Errorf("external launch requires safe command: %w", err)
+			}
+		} else if containsControlChars(launch.Command) {
+			return errors.New("launch command cannot contain control characters")
 		}
 		if launch.Transport != "stdio" {
 			return fmt.Errorf("unsupported external transport %q", launch.Transport)
@@ -459,6 +575,12 @@ func validateDetectionLaunchPair(detection DetectionConfig, launch LaunchConfig)
 		return errors.New("path_lookup detection command must match external launch command")
 	}
 	return nil
+}
+
+// isAbsoluteExecutable reports a host-absolute executable path. Bare PATH
+// names go through validateExecutableName; relatives are rejected outright.
+func isAbsoluteExecutable(command string) bool {
+	return filepath.IsAbs(strings.TrimSpace(command))
 }
 
 func validateExecutableName(command string) error {
@@ -562,6 +684,9 @@ func validationErrorString(err error) string {
 }
 
 func mergeAdapter(base Agent, adapter Agent) Agent {
+	if adapter.Source != "" {
+		base.Source = adapter.Source
+	}
 	base.DisplayName = adapter.DisplayName
 	base.Protocol = adapter.Protocol
 	base.PlatformSupport = append([]string(nil), adapter.PlatformSupport...)
@@ -606,6 +731,7 @@ func registryEntryToAgent(entry acpregistry.AgentEntry, resolveBinaries func(str
 
 	agent := Agent{
 		ID:              entry.ID,
+		Source:          "registry",
 		DisplayName:     displayName,
 		Protocol:        "acp",
 		PlatformSupport: []string{"windows", "darwin", "linux", "android"},

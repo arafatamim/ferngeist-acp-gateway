@@ -59,6 +59,14 @@ Base path: `/v1`
       element is a full runtime object: `id`, `agentId`, `agentName`, `status`,
       `createdAt`, `pid`, `command`, `launchMode`, `transport`, etc.). Empty when the
       agent has no live or recently-stopped runtime.
+    - `source` — `embedded` (gateway-owned manifest), `registry` (ACP registry),
+      or `custom` (client-registered; see [Custom agents](#custom-agents)).
+    - `detected` — `false` when the launch command is not resolvable on the
+      gateway host. For a custom agent — or any agent with no install path —
+      that is terminal: starting it fails with `409`
+      (`agent is not detected on this host`). Registry agents with a supported
+      distribution install on start, so their `detected: false` is transient
+      (see `424` below).
 
 ### Pairing
 
@@ -127,6 +135,73 @@ Base path: `/v1`
   - Requires `control` scope.
   - Error responses:
     - `404` — agent has no runtimes (none are tracked for this agent)
+
+### Custom agents
+
+Paired clients can register their own ACP agents (display name + command +
+args). Custom agents appear in `GET /v1/agents` with `"source": "custom"` and
+start/stop through the same `POST /v1/agents/{agentId}/start` /
+`POST /v1/agents/{agentId}/stop` endpoints as catalog agents.
+
+> **Trusted devices only.** These endpoints execute host programs, and pairing
+> grants **every** paired device `read` + `control` — no read-only credential can
+> be issued, so there is no scope-level mitigation to withhold. Any paired device
+> can register an executable and start it as the gateway user. Pair only devices
+> you trust with the gateway host, and treat pairing as equivalent to shell
+> access for the gateway user.
+
+- `POST /v1/agents/custom`
+  - Registers a custom agent. Requires `control` scope.
+  - Request body:
+    ```json
+    {
+      "displayName": "My Agent",
+      "command": "my-agent",
+      "args": ["--acp"],
+      "hint": "optional note shown to clients"
+    }
+    ```
+  - `command` is either a bare executable name resolved on the daemon's `PATH`
+    or an absolute path to an executable. Relative paths containing separators
+    (`tools/my-agent`, `..\my-agent`) are rejected. Everything else about the
+    agent (protocol, transport, readiness, restart policy, allowed platforms) is
+    derived server-side.
+  - `args` is optional (at most 20 entries, 1024 characters each). There is no
+    per-agent environment variable support in v1.
+  - The `id` is derived from `displayName` as `custom-<slug>` and is
+    **immutable**; on collision the gateway appends `-2`, `-3`, … Duplicate
+    commands are allowed.
+  - Returns `201` with the created agent object (including `id` and
+    `source: "custom"`).
+  - Error responses:
+    - `400` — invalid request (missing/oversized fields, relative path, unsafe command)
+    - `409` — custom agent limit reached (50 per gateway)
+    - `503` — custom agent storage unavailable
+
+- `PUT /v1/agents/custom/{id}`
+  - Updates a custom agent. Requires `control` scope. The `id` cannot change.
+  - Same body as create. Omitted `displayName`/`command`/`args` keep their
+    current values; send `"args": []` to clear the argument list, and `hint` is
+    always overwritten (send `""` to clear it).
+  - Returns `200` with the updated agent object. An update that fails validation
+    is rejected and the previous definition is kept.
+  - Error responses:
+    - `400` — invalid request
+    - `404` — unknown custom agent id
+    - `503` — custom agent storage unavailable
+
+- `DELETE /v1/agents/custom/{id}`
+  - Removes a custom agent. Requires `control` scope.
+  - Returns `200` with `{"deleted": "<id>"}`.
+  - Error responses:
+    - `404` — unknown custom agent id
+    - `409` — the agent has a live runtime; stop it first
+    - `503` — custom agent storage unavailable
+
+On the gateway host the same agents can be managed without a paired device
+through the CLI: `ferngeist-gateway agents add|list|update|rm`
+(`ferngeist-gateway agents --help`; see
+[Admin API → Custom agent management](#custom-agent-management)).
 
 ### Runtime control
 
@@ -474,6 +549,28 @@ The admin API is bound to localhost and is meant for local management only.
 
 - `DELETE /admin/v1/devices/{deviceId}`
   - Revokes a paired device.
+
+### Custom agent management
+
+Custom agents are managed from the gateway host with the same semantics as the
+public [Custom agents](#custom-agents) endpoints — same request body, same
+validation, same status codes (`400` invalid, `404` unknown id, `409` cap
+reached or live runtime, `503` storage unavailable) — so a locally registered
+agent behaves identically to one registered by a paired client. The list
+returns the catalog view (embedded + registry + custom) without live runtime
+state.
+
+- `GET /admin/v1/agents`
+  - Lists every agent the gateway can launch, custom agents included.
+- `POST /admin/v1/agents/custom`
+  - Registers a custom agent.
+- `PUT /admin/v1/agents/custom/{id}`
+  - Updates a custom agent. The `id` cannot change.
+- `DELETE /admin/v1/agents/custom/{id}`
+  - Removes a custom agent.
+
+CLI users can drive all four with `ferngeist-gateway agents add|list|update|rm`
+(`ferngeist-gateway agents --help`).
 
 ## Common response patterns
 

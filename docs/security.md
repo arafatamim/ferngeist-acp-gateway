@@ -26,6 +26,12 @@ Some endpoints require additional scopes such as:
 - `read`
 - `control`
 
+Pairing grants **every** paired device both `read` and `control`; there is no
+read-only credential. `gateway.diagnostics.export` and
+`gateway.runtime.restart_env` are granted only when
+`FERNGEIST_GATEWAY_ALLOW_REMOTE_DIAGNOSTICS_EXPORT` /
+`FERNGEIST_GATEWAY_ALLOW_REMOTE_RUNTIME_RESTART_ENV` are enabled.
+
 ## Proof of possession
 
 In public mode, the gateway can require proof-of-possession.

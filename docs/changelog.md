@@ -98,6 +98,20 @@ that runtime's existing session rather than creating a second one. No
 `protocolVersion` bump: every change above is additive and ignored by older
 clients.
 
+- `[additive]` `POST /v1/agents/custom`, `PUT /v1/agents/custom/{id}`,
+  `DELETE /v1/agents/custom/{id}` — paired clients holding `control` scope can
+  register, edit and remove their own ACP agents (display name + command +
+  args). The `id` is derived server-side as `custom-<slug>` and is immutable;
+  `command` is a bare `PATH` name or an absolute path. Starting a custom agent
+  whose command is not resolvable on the host returns `409`
+  (`agent is not detected on this host`), and `DELETE` returns `409` while the
+  agent has a live runtime. Existing endpoints and response shapes are
+  unchanged. (2026-09-16)
+- `[additive]` `GET /v1/agents` — each per-agent object gains a `source` field
+  (`embedded` | `registry` | `custom`), and client-registered custom agents
+  appear in the list alongside catalog agents. Older clients ignore the field
+  and see the same catalog they saw before. (2026-09-16)
+
 ## History
 
 - `v0.8.0` (latest tagged release) — self-hosted signed apt/rpm/pacman repos,
