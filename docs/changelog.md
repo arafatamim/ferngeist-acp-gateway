@@ -42,7 +42,7 @@ Format:
 
 The **build** version (the daemon binary's `--version` and the mDNS
 `gateway_version` TXT record) is separate from the **contract** version above.
-Releases are tagged with semver (`v0.6.0` … `v0.8.0` so far); the Taskfile
+Releases are tagged with semver (`v0.6.0` … `v0.11.0` so far); the Taskfile
 derives the build version from `git describe`. They are independent and should
 not be coupled. Full release notes live in GitHub Releases.
 
@@ -114,7 +114,11 @@ clients.
 
 ## History
 
-- `v0.8.0` (latest tagged release) — self-hosted signed apt/rpm/pacman repos,
+- `v0.10.0` (latest tagged release) — multiple concurrent gateway sessions per
+  agent (one agent process each, one resilient session each), with the legacy
+  single-runtime fields on `GET /v1/agents` kept as a newest-runtime shorthand.
+  Protocol version remains `v1`.
+- `v0.8.0` — self-hosted signed apt/rpm/pacman repos,
   Homebrew/Linuxbrew formula, universal installer for macOS/Linux/Windows, and
   the Windows PowerShell installer. Protocol version remains `v1`.
 - `v0.7.3` — resilient sessions and push
