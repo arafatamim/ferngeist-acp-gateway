@@ -113,6 +113,9 @@ type Service struct {
 	armedUntil  time.Time
 	challenges  map[string]challengeRecord
 	credentials map[string]Credential
+	// byTokenHash indexes TokenHash -> deviceID so Validate is O(1):
+	// one SHA-256 per request instead of one per device.
+	byTokenHash map[string]string
 	store       *storage.SQLiteStore
 }
 
@@ -152,6 +155,7 @@ func NewServiceWithOptions(logger *slog.Logger, store *storage.SQLiteStore, opti
 		baseScopes:  defaultCredentialScopes(options.AllowDiagnosticsExport, options.AllowRuntimeRestartEnv),
 		challenges:  make(map[string]challengeRecord),
 		credentials: make(map[string]Credential),
+		byTokenHash: make(map[string]string),
 		store:       store,
 	}
 	service.loadPersistedCredentials()
@@ -293,6 +297,7 @@ func (s *Service) CompletePairingWithProofKey(challengeID, code, deviceName, pro
 	}
 	credential.TokenHash = hashCredentialToken(credential.Token)
 	s.credentials[credential.DeviceID] = credential
+	s.indexCredentialLocked(credential)
 	if s.store != nil {
 		if err := s.store.SavePairing(context.Background(), storage.PairingRecord{
 			DeviceID:       credential.DeviceID,
@@ -360,6 +365,7 @@ func (s *Service) ActiveDeviceCount() int {
 
 // ValidateCredential is a simple token lookup because gateway-issued device
 // credentials are already random opaque tokens scoped to this daemon.
+// O(1) via the TokenHash index: one SHA-256 per call, no per-device scan.
 func (s *Service) ValidateCredential(token string) (Credential, error) {
 	if token == "" {
 		return Credential{}, ErrCredentialMissing
@@ -370,8 +376,23 @@ func (s *Service) ValidateCredential(token string) (Credential, error) {
 
 	now := s.now().UTC()
 
+	if id, ok := s.byTokenHash[hashCredentialToken(token)]; ok {
+		credential := s.credentials[id]
+		if now.After(credential.ExpiresAt) {
+			if s.gracePeriod <= 0 {
+				s.deleteCredentialLocked(id)
+				return Credential{}, ErrCredentialExpired
+			}
+			expiredAt := now
+			credential.ExpiredAt = &expiredAt
+			s.credentials[id] = credential
+			return Credential{}, ErrCredentialExpired
+		}
+		return credential, nil
+	}
+	// Legacy fallback: unhashed tokens (pre-migration) have no index entry.
 	for id, credential := range s.credentials {
-		if credentialMatchesToken(credential, token) {
+		if credential.TokenHash == "" && credential.Token == token {
 			if now.After(credential.ExpiresAt) {
 				if s.gracePeriod <= 0 {
 					s.deleteCredentialLocked(id)
@@ -396,45 +417,61 @@ func (s *Service) RefreshCredential(token string) (Credential, error) {
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	now := s.now().UTC()
-	for id, credential := range s.credentials {
-		if !credentialMatchesToken(credential, token) {
-			continue
-		}
-		if now.After(credential.ExpiresAt) {
-			if s.gracePeriod <= 0 {
-				s.deleteCredentialLocked(id)
-				return Credential{}, ErrCredentialExpired
-			}
-			if now.Sub(credential.ExpiresAt) > s.gracePeriod {
-				s.deleteCredentialLocked(id)
-				return Credential{}, ErrCredentialGraceExpired
+	id, ok := s.byTokenHash[hashCredentialToken(token)]
+	if !ok {
+		// Legacy unhashed fallback.
+		for legacyID, credential := range s.credentials {
+			if credential.TokenHash == "" && credential.Token == token {
+				id, ok = legacyID, true
+				break
 			}
 		}
-		credential.Token = randomToken(32)
-		credential.TokenHash = hashCredentialToken(credential.Token)
-		credential.ExpiresAt = now.Add(s.tokenTTL)
-		credential.ExpiredAt = nil
-		s.credentials[id] = credential
-		if s.store != nil {
-			if err := s.store.SavePairing(context.Background(), storage.PairingRecord{
-				DeviceID:       credential.DeviceID,
-				DeviceName:     credential.DeviceName,
-				Token:          credential.TokenHash,
-				ExpiresAt:      credential.ExpiresAt,
-				Scopes:         credential.Scopes,
-				ProofPublicKey: credential.ProofPublicKey,
-			}); err != nil {
-				s.logger.Error("persist refreshed pairing failed", "error", err)
-			}
+		if !ok {
+			s.pruneExpiredCredentialsLocked(now)
+			s.mu.Unlock()
+			return Credential{}, ErrCredentialInvalid
 		}
-		return credential, nil
 	}
-
-	s.pruneExpiredCredentialsLocked(now)
-	return Credential{}, ErrCredentialInvalid
+	credential := s.credentials[id]
+	if now.After(credential.ExpiresAt) {
+		if s.gracePeriod <= 0 {
+			s.deleteCredentialLocked(id)
+			s.mu.Unlock()
+			return Credential{}, ErrCredentialExpired
+		}
+		if now.Sub(credential.ExpiresAt) > s.gracePeriod {
+			s.deleteCredentialLocked(id)
+			s.mu.Unlock()
+			return Credential{}, ErrCredentialGraceExpired
+		}
+	}
+	oldHash := credential.TokenHash
+	credential.Token = randomToken(32)
+	credential.TokenHash = hashCredentialToken(credential.Token)
+	credential.ExpiresAt = now.Add(s.tokenTTL)
+	credential.ExpiredAt = nil
+	s.credentials[id] = credential
+	if oldHash != "" && oldHash != credential.TokenHash {
+		delete(s.byTokenHash, oldHash)
+	}
+	s.indexCredentialLocked(credential)
+	store := s.store
+	s.mu.Unlock()
+	if store != nil {
+		if err := store.SavePairing(context.Background(), storage.PairingRecord{
+			DeviceID:       credential.DeviceID,
+			DeviceName:     credential.DeviceName,
+			Token:          credential.TokenHash,
+			ExpiresAt:      credential.ExpiresAt,
+			Scopes:         credential.Scopes,
+			ProofPublicKey: credential.ProofPublicKey,
+		}); err != nil {
+			s.logger.Error("persist refreshed pairing failed", "error", err)
+		}
+	}
+	return credential, nil
 }
 
 // LookupCredentialByToken returns the credential matching the token regardless
@@ -446,8 +483,13 @@ func (s *Service) LookupCredentialByToken(token string) (Credential, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if id, ok := s.byTokenHash[hashCredentialToken(token)]; ok {
+		if credential, ok := s.credentials[id]; ok {
+			return credential, nil
+		}
+	}
 	for _, credential := range s.credentials {
-		if credentialMatchesToken(credential, token) {
+		if credential.TokenHash == "" && credential.Token == token {
 			return credential, nil
 		}
 	}
@@ -533,12 +575,24 @@ func (s *Service) shouldReapCredential(credential Credential, now time.Time) boo
 }
 
 func (s *Service) deleteCredentialLocked(deviceID string) {
+	if cred, ok := s.credentials[deviceID]; ok && cred.TokenHash != "" {
+		if mapped, ok := s.byTokenHash[cred.TokenHash]; ok && mapped == deviceID {
+			delete(s.byTokenHash, cred.TokenHash)
+		}
+	}
 	delete(s.credentials, deviceID)
 	if s.store == nil {
 		return
 	}
 	if err := s.store.DeletePairing(context.Background(), deviceID); err != nil && !errors.Is(err, storage.ErrNotFound) {
 		s.logger.Error("delete pairing failed", "device_id", deviceID, "error", err)
+	}
+}
+
+// indexCredentialLocked records TokenHash -> deviceID. Caller holds s.mu.
+func (s *Service) indexCredentialLocked(c Credential) {
+	if c.TokenHash != "" {
+		s.byTokenHash[c.TokenHash] = c.DeviceID
 	}
 }
 
@@ -620,6 +674,7 @@ func (s *Service) loadPersistedCredentials() {
 			credential.ExpiredAt = &expiredAt
 		}
 		s.credentials[record.DeviceID] = credential
+		s.indexCredentialLocked(credential)
 		if !isHashedCredentialToken(record.Token) && s.store != nil {
 			if err := s.store.SavePairing(context.Background(), storage.PairingRecord{
 				DeviceID:       record.DeviceID,

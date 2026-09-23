@@ -54,7 +54,8 @@ func (s *Server) verifyCredentialProof(r *http.Request, rawToken string, credent
 	if timestamp.Before(now.Add(-proofSkewWindow)) || timestamp.After(now.Add(proofSkewWindow)) {
 		return errors.New("gateway credential proof expired")
 	}
-	if s.proofNonces != nil && !s.proofNonces.use(credential.DeviceID+":"+nonce, now) {
+	nonceKey := credential.DeviceID + ":" + nonce
+	if s.proofNonces != nil && s.proofNonces.seen(nonceKey, now) {
 		return errors.New("gateway credential proof replayed")
 	}
 	bodyHash, err := requestBodyHash(r, jsonBodyLimit)
@@ -62,7 +63,7 @@ func (s *Server) verifyCredentialProof(r *http.Request, rawToken string, credent
 		return errors.New("gateway credential proof invalid")
 	}
 	message := buildProofMessage(r.Method, requestPathWithRawQuery(r), rawToken, timestampText, nonce, bodyHash)
-	publicKey, err := parseProofPublicKey(credential.ProofPublicKey)
+	publicKey, err := cachedProofPublicKey(credential.ProofPublicKey)
 	if err != nil {
 		return errors.New("gateway credential proof invalid")
 	}
@@ -73,6 +74,9 @@ func (s *Server) verifyCredentialProof(r *http.Request, rawToken string, credent
 	digest := sha256.Sum256([]byte(message))
 	if !ecdsa.VerifyASN1(publicKey, digest[:], signature) {
 		return errors.New("gateway credential proof invalid")
+	}
+	if s.proofNonces != nil && !s.proofNonces.use(nonceKey, now) {
+		return errors.New("gateway credential proof replayed")
 	}
 	return nil
 }
@@ -164,8 +168,9 @@ func decodeProofBase64(value string) ([]byte, error) {
 // proofNonceTracker prevents replay attacks by tracking used nonces per device
 // and rejecting any nonce that has been seen within the replay window.
 type proofNonceTracker struct {
-	mu     sync.Mutex
-	nonces map[string]time.Time
+	mu        sync.Mutex
+	nonces    map[string]time.Time
+	lastSweep time.Time
 }
 
 // newProofNonceTracker creates an empty nonce tracker.
@@ -175,16 +180,34 @@ func newProofNonceTracker() *proofNonceTracker {
 
 // use checks whether a nonce has been used before. If not, it records the
 // nonce with an expiry time of now + proofReplayWindow. Expired nonces are
-// lazily cleaned up on each call. Returns false if the nonce is a replay.
+// swept at most once per minute (amortized): a full-map scan on every request
+// is O(request-rate x window) and attacker-amplifiable. Returns false if the
+// nonce is a replay.
 func (t *proofNonceTracker) use(key string, now time.Time) bool {
 	if key == "" {
 		return false
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	for existingKey, expiresAt := range t.nonces {
-		if !expiresAt.After(now) {
-			delete(t.nonces, existingKey)
+	if now.Sub(t.lastSweep) >= time.Minute {
+		t.lastSweep = now
+		for existingKey, expiresAt := range t.nonces {
+			if !expiresAt.After(now) {
+				delete(t.nonces, existingKey)
+			}
+		}
+		// Hard cap: a flood of distinct nonces within one sweep window must
+		// not grow the map without bound.
+		const maxProofNonces = 16384
+		if len(t.nonces) > maxProofNonces {
+			// Evict arbitrary oldest-expired-ish entries; correctness holds
+			// because eviction only widens the replay window slightly.
+			for existingKey := range t.nonces {
+				delete(t.nonces, existingKey)
+				if len(t.nonces) <= maxProofNonces {
+					break
+				}
+			}
 		}
 	}
 	if expiresAt, ok := t.nonces[key]; ok && expiresAt.After(now) {
@@ -192,4 +215,39 @@ func (t *proofNonceTracker) use(key string, now time.Time) bool {
 	}
 	t.nonces[key] = now.Add(proofReplayWindow)
 	return true
+}
+
+// seen reports whether a nonce was already consumed without mutating state.
+// Used to fail fast before the ECDSA verify; the nonce is consumed by use()
+// only after a valid signature.
+func (t *proofNonceTracker) seen(key string, now time.Time) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	expiresAt, ok := t.nonces[key]
+	return ok && expiresAt.After(now)
+}
+
+// proofKeyCache memoizes x509 parses keyed by the encoded key itself
+// (content-addressed, so no invalidation needed): one parse per unique
+// device key instead of one per request.
+var proofKeyCache = struct {
+	sync.RWMutex
+	keys map[string]*ecdsa.PublicKey
+}{keys: make(map[string]*ecdsa.PublicKey)}
+
+func cachedProofPublicKey(encoded string) (*ecdsa.PublicKey, error) {
+	proofKeyCache.RLock()
+	if key, ok := proofKeyCache.keys[encoded]; ok {
+		proofKeyCache.RUnlock()
+		return key, nil
+	}
+	proofKeyCache.RUnlock()
+	parsed, err := parseProofPublicKey(encoded)
+	if err != nil {
+		return nil, err
+	}
+	proofKeyCache.Lock()
+	proofKeyCache.keys[encoded] = parsed
+	proofKeyCache.Unlock()
+	return parsed, nil
 }
