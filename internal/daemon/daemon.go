@@ -114,6 +114,7 @@ func Run(ctx context.Context, build api.BuildInfo) error {
 	cfg = ApplyPersistedSettings(logger, store, cfg)
 
 	registryClient := acpregistry.New(cfg.RegistryURL, 6*time.Hour)
+	defer registryClient.Close()
 	catalogSvc := catalog.NewWithBaseDirAndRegistry(".", registryClient)
 	catalogSvc.SetNpmResolver(catalog.ResolveNpmBinaryNames)
 	// Custom agents live in SQLite; the catalog pulls them on every refresh so
@@ -267,11 +268,16 @@ func Run(ctx context.Context, build api.BuildInfo) error {
 
 	// Apply the asynchronously provisioned public URL to the server once it
 	// arrives: status must report the live remote URL without a restart.
+	// Scoped to Run's lifetime (not the caller's ctx): a caller may pass a
+	// never-cancelled context, and the watcher must still exit when Run
+	// returns instead of parking on ctx.Done() forever.
+	watchCtx, stopWatch := context.WithCancel(ctx)
+	defer stopWatch()
 	go func() {
 		select {
 		case publicURL := <-remoteURLCh:
 			server.SetPublicURL(publicURL)
-		case <-ctx.Done():
+		case <-watchCtx.Done():
 		}
 	}()
 
@@ -286,20 +292,28 @@ func Run(ctx context.Context, build api.BuildInfo) error {
 		errCh <- server.ListenAndServe()
 	}()
 
+	// A ListenAndServe failure must still drain through the shutdown sequence
+	// below (HTTP drain, remote close, session + runtime shutdown) instead of
+	// returning early: an early return orphans child agent processes and
+	// leaks session goroutines/leases. The serve error is reported after
+	// cleanup completes.
+	var serveErr error
 	select {
 	case <-ctx.Done():
 		logger.Info("shutdown requested")
-	case err = <-errCh:
+	case err := <-errCh:
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			return err
+			logger.Error("api server failed; draining before exit", slog.String("error", err.Error()))
+			serveErr = err
 		}
 	}
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
+	var shutdownErr error
 	if err := server.Shutdown(shutdownCtx); err != nil {
-		return fmt.Errorf("graceful shutdown failed: %w", err)
+		shutdownErr = fmt.Errorf("graceful shutdown failed: %w", err)
 	}
 	// Stop remote access first so no new inbound traffic arrives while the API
 	// server drains. An in-flight successful provisioning gets a short grace
@@ -320,12 +334,13 @@ func Run(ctx context.Context, build api.BuildInfo) error {
 	// session pumps) while the backing runtimes are still alive, then stop the
 	// runtimes. Skipping this leaks the reaper and inbound-writer goroutines.
 	sessionSvc.Shutdown()
+	var runtimeErr error
 	if err := runtimeSvc.Shutdown(shutdownCtx); err != nil {
-		return fmt.Errorf("runtime shutdown failed: %w", err)
+		runtimeErr = fmt.Errorf("runtime shutdown failed: %w", err)
 	}
 
 	logger.Info("gateway daemon stopped")
-	return nil
+	return errors.Join(serveErr, shutdownErr, runtimeErr)
 }
 
 // portOf extracts the TCP port from a listen address like "127.0.0.1:5788".

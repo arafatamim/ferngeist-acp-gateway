@@ -58,6 +58,7 @@ type Status struct {
 type Client struct {
 	url        string
 	httpClient *http.Client
+	transport  *http.Transport
 	ttl        time.Duration
 	now        func() time.Time
 
@@ -89,14 +90,31 @@ func New(url string, ttl time.Duration) *Client {
 		ttl = 6 * time.Hour
 	}
 
+	// Each client owns a dedicated transport (cloned from the defaults) so
+	// idle keep-alive connections have an owner: Close shuts them down.
+	// Sharing http.DefaultTransport would leave its HTTP/2 readLoop running
+	// with no one able to close it.
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+
 	return &Client{
 		url: url,
 		httpClient: &http.Client{
-			Timeout: 10 * time.Second,
+			Timeout:   10 * time.Second,
+			Transport: transport,
 		},
-		ttl: ttl,
-		now: time.Now,
+		transport: transport,
+		ttl:       ttl,
+		now:       time.Now,
 	}
+}
+
+// Close releases idle keep-alive connections held by the client's transport.
+// Safe on zero-value Clients and idempotent.
+func (c *Client) Close() {
+	if c == nil || c.transport == nil {
+		return
+	}
+	c.transport.CloseIdleConnections()
 }
 
 // Snapshot returns the cached registry snapshot when it is still fresh and only

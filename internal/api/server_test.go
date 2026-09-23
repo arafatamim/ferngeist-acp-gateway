@@ -2659,6 +2659,7 @@ func TestRuntimeConnectResilientReturnsSessionIDAndAttachToken(t *testing.T) {
 		MaxPerDevice:    3,
 	})
 	server.sessionSvc = sessionSvc
+	t.Cleanup(sessionSvc.Shutdown)
 
 	startReq := httptest.NewRequest(http.MethodPost, "/v1/agents/mock-acp/start", nil)
 	startReq.Header.Set("Authorization", "Bearer "+bearerToken)
@@ -2723,6 +2724,7 @@ func TestRuntimeConnectResilientLeaseHeldReturnsConflict(t *testing.T) {
 		MaxPerDevice:    3,
 	})
 	server.sessionSvc = sessionSvc
+	t.Cleanup(sessionSvc.Shutdown)
 
 	// Device A starts the agent and takes the runtime lease via resilient connect.
 	startReq := httptest.NewRequest(http.MethodPost, "/v1/agents/mock-acp/start", nil)
