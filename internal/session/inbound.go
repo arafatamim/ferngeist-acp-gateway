@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"sync"
 
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/storage"
 )
@@ -26,6 +27,11 @@ type inboundDiagnostic struct {
 type inboundWriter struct {
 	store *storage.SQLiteStore
 	ch    chan inboundDiagnostic
+
+	// mu guards closed so a send racing stop()/Shutdown can never touch a
+	// closed channel. A closed writer drops (returns false), like overflow.
+	mu     sync.Mutex
+	closed bool
 }
 
 func newInboundWriter(store *storage.SQLiteStore) *inboundWriter {
@@ -38,6 +44,11 @@ func newInboundWriter(store *storage.SQLiteStore) *inboundWriter {
 }
 
 func (w *inboundWriter) send(d inboundDiagnostic) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed {
+		return false
+	}
 	select {
 	case w.ch <- d:
 		return true
@@ -53,5 +64,11 @@ func (w *inboundWriter) drain(ctx context.Context) {
 }
 
 func (w *inboundWriter) stop() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed {
+		return
+	}
+	w.closed = true
 	close(w.ch)
 }

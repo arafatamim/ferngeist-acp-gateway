@@ -35,10 +35,11 @@ func TestPumpDrainNotBlockedBySlowClient(t *testing.T) {
 	defer s.Close()
 
 	wsURL := "ws://" + s.Listener.Addr().String() + "/"
-	_, _, err := websocket.Dial(context.Background(), wsURL, nil)
+	clientConn, _, err := websocket.Dial(context.Background(), wsURL, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
+	defer clientConn.Close(websocket.StatusNormalClosure, "")
 
 	sc := <-serverCh
 	if sc == nil {
@@ -49,6 +50,7 @@ func TestPumpDrainNotBlockedBySlowClient(t *testing.T) {
 	// Never read from sc — the client is alive but slow/not reading.
 
 	r, w := io.Pipe()
+	defer w.Close()
 	pump := &StdioPump{
 		pipes: &runtime.LeasedPipes{
 			Stdin:  nopWriteCloser{},

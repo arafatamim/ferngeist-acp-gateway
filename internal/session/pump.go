@@ -19,6 +19,52 @@ import (
 	"github.com/coder/websocket"
 )
 
+// frameProbe is the single-parse view of an agent stdout frame. The hot path
+// previously paid 5-6 json.Unmarshal scans per line (markTurnActivity,
+// isTurnComplete, isPermissionRequest, isJSONRPCError, isProgressEvent, plus
+// load-recovery buffering), each with its own []byte(line) copy. Parsing once
+// into this superset struct cuts per-frame CPU/GC to one scan + one copy;
+// rare paths (typed initialize capabilities, load-success synthesis) keep
+// their second parse off the hot path.
+type frameProbe struct {
+	Method string           `json:"method"`
+	ID     *json.RawMessage `json:"id"`
+	Result *struct {
+		ProtocolVersion *int            `json:"protocolVersion"`
+		SessionID       string          `json:"sessionId"`
+		StopReason      acp.StopReason `json:"stopReason"`
+		Usage           *acp.Usage     `json:"usage"`
+	} `json:"result"`
+	Error *struct {
+		Message string `json:"message"`
+	} `json:"error"`
+	Params *struct {
+		SessionID string `json:"sessionId"`
+		Update    *struct {
+			Discriminator string          `json:"sessionUpdate"`
+			ToolCallID    string          `json:"toolCallId"`
+			Status        string          `json:"status"`
+			Title         string          `json:"title"`
+			Kind          string          `json:"kind"`
+			// Content is RawMessage because agents emit both a single
+			// object and an array; a typed slice would fail the whole
+			// probe parse on the object shape (history buffering must
+			// never depend on content shape).
+			Content json.RawMessage `json:"content"`
+		} `json:"update"`
+	} `json:"params"`
+}
+
+// parseFrameProbe parses one stdout frame once. ok=false means invalid JSON;
+// callers treat it as opaque (forward, no notifications).
+func parseFrameProbe(data []byte) (frameProbe, bool) {
+	var probe frameProbe
+	if err := json.Unmarshal(data, &probe); err != nil {
+		return frameProbe{}, false
+	}
+	return probe, true
+}
+
 // acpWebSocketWriteTimeout is the write deadline per WebSocket frame — keep in
 // sync with api/server.go:acpWebSocketWriteTimeout (same value, separate context
 // ownership: API package uses its own context for handler frames; pump creates
@@ -136,58 +182,37 @@ type StdioPump struct {
 // fire on notable events regardless of whether a client is attached. The loop
 // stops when the context is cancelled.
 func (p *StdioPump) StdoutDrainLoop(ctx context.Context) {
-	// Streaming newline reader instead of bufio.Scanner. A Scanner has a hard
-	// per-line cap (default 64 KiB; 1 MiB here) and silently exits with
-	// ErrTooLong when an agent emits a larger single line — a big session/update
-	// or session/load response with chat history / tool output. That silent
-	// exit closed the client WebSocket with no log, making the agent look dead
-	// ("connection dropped while loading a session"). A Reader accumulates
-	// lines across reads, so any practical frame passes through; the only cap
-	// is a pathological-agent safety bound far above real traffic.
+	// ReadSlice, not ReadString. ReadString copies every byte until the newline
+	// before returning, so a newline-less stream grows without bound inside
+	// bufio — the old cap only set a flag after that copy. A Scanner is also
+	// wrong here: its hard line cap (previously 1 MiB) returns ErrTooLong and
+	// the drain loop exits, which closed the client WebSocket with no log
+	// ("connection dropped while loading a session"). readStdoutFrame keeps
+	// frames up to maxAgentFrameBytes and discards the rest of a longer line.
 	reader := bufio.NewReader(p.pipes.Stdout)
-	var line strings.Builder
-	// overCap marks that the current line exceeded the safety cap; the rest of
-	// the line is discarded until its terminating newline so an oversized line
-	// is never split into a bogus partial frame.
-	overCap := false
-
+drain:
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			// Session teardown must run the same exit path as EOF below
+			// (stop writer, flush, close conn): returning here would orphan
+			// a bound clientWriterLoop parked in select with a live ctx.
+			break drain
 		default:
 		}
-		fragment, err := reader.ReadString('\n')
-		if fragment != "" {
-			line.WriteString(fragment)
+		frame, dropped, err := readStdoutFrame(reader, maxAgentFrameBytes)
+		if dropped {
+			p.logger.Warn("agent stdout frame exceeds safety cap; dropping",
+				"runtime_id", p.runtimeID, "cap", maxAgentFrameBytes)
+		} else if err == nil || frame != "" {
+			p.handleStdoutLine(frame)
 		}
 		if err != nil {
-			// io.EOF with a non-empty buffer means the agent closed stdout
-			// mid-line (or exited); process the tail as a final frame.
-			if line.Len() > 0 {
-				p.handleStdoutLine(strings.TrimSuffix(line.String(), "\n"))
-				line.Reset()
-			}
 			if !errors.Is(err, io.EOF) {
 				p.logger.Warn("agent stdout read failed",
 					"runtime_id", p.runtimeID, "error", err)
 			}
 			break
-		}
-		if line.Len() > maxAgentFrameBytes && !overCap {
-			p.logger.Warn("agent stdout frame exceeds safety cap; dropping",
-				"runtime_id", p.runtimeID, "bytes", line.Len())
-			overCap = true
-		}
-		if strings.HasSuffix(fragment, "\n") {
-			// Strip the delimiter so frames match the old scanner's Text()
-			// semantics (no trailing newline in log/history/snoop paths).
-			frame := strings.TrimSuffix(line.String(), "\n")
-			if !overCap {
-				p.handleStdoutLine(frame)
-			}
-			line.Reset()
-			overCap = false
 		}
 	}
 
@@ -227,6 +252,56 @@ func (p *StdioPump) stopWriterLocked() {
 	p.writerDone = nil
 }
 
+// readStdoutFrame reads one newline-delimited stdout frame.
+//
+// The payload (bytes before the delimiter) is kept only up to max. Exactly
+// max is a valid frame; one byte more is dropped. Once past the cap, the
+// rest of the line is discarded until the newline or EOF and is not retained,
+// so a newline-less stream cannot grow the buffer. The delimiter itself does
+// not count toward max and is not part of frame. An oversized line is never
+// returned in pieces — a partial frame would be parsed as ACP.
+//
+// ReadString cannot implement this. It copies every byte of the line into one
+// string before returning, so the cap would run only after the allocation.
+func readStdoutFrame(r *bufio.Reader, max int) (frame string, dropped bool, err error) {
+	var buf strings.Builder
+	for {
+		// ReadSlice's slice is invalid after the next read; copy kept bytes
+		// before continuing.
+		frag, readErr := r.ReadSlice('\n')
+		if !dropped {
+			payload := frag
+			if n := len(frag); n > 0 && frag[n-1] == '\n' {
+				payload = frag[:n-1]
+			}
+			room := max - buf.Len()
+			if room < 0 {
+				room = 0
+			}
+			if len(payload) > room {
+				dropped = true
+				buf.Reset()
+			} else if len(payload) > 0 {
+				buf.Write(payload)
+			}
+		}
+		switch {
+		case errors.Is(readErr, bufio.ErrBufferFull):
+			continue
+		case readErr != nil:
+			if dropped {
+				return "", true, readErr
+			}
+			return buf.String(), false, readErr
+		default:
+			if dropped {
+				return "", true, nil
+			}
+			return buf.String(), false, nil
+		}
+	}
+}
+
 // handleStdoutLine processes a single complete agent stdout frame: log append,
 // session snooping, notification, history buffering, and forwarding to the
 // attached WebSocket (with load-recovery replacement).
@@ -243,14 +318,28 @@ func (p *StdioPump) handleStdoutLine(line string) {
 	if p.frameLog != nil {
 		p.frameLog.append(p.agentID, p.runtimeID, p.sessionID, "out", []byte(line))
 	}
-	p.snoopInitialize(line)
-	p.snoopSessionID(line)
-	if replacement, handled := p.markTurnActivity(line); handled {
+	// Single parse for the whole frame: one []byte copy + one scan. All
+	// downstream classifiers read the probe instead of re-parsing.
+	// Invalid JSON stays opaque (snoop/notify/recovery skip, frame forwards).
+	frameBytes := []byte(line)
+	probe, probeOK := parseFrameProbe(frameBytes)
+	if !probeOK {
+		probe = frameProbe{}
+	}
+	p.snoopInitializeProbe(probe, line, frameBytes)
+	p.snoopSessionIDProbe(probe)
+	if replacement, handled := p.markTurnActivityProbe(probe); handled {
 		line = replacement
+		// Replacement is a synthesized error frame; re-probe it cheaply so
+		// the push below classifies the frame actually forwarded.
+		if rp, ok := parseFrameProbe([]byte(line)); ok {
+			probe = rp
+			probeOK = true
+		}
 	}
 
 	// Fire a push on notable events regardless of client attachment — the
-	p.checkAndNotify(line)
+	p.checkAndNotifyProbe(probe, probeOK)
 
 	// Buffer conversation history so a reconnecting client can be re-hydrated
 	// even when the agent rejects a duplicate session/load as "already loaded".
@@ -262,7 +351,7 @@ func (p *StdioPump) handleStdoutLine(line string) {
 	// triggering the detach flow; the client's reconnect logic handles it.
 	outFrames := []string{line}
 	if p.loadRecovery != nil {
-		if replacements, handled := p.loadRecovery.OnFrame(line); handled {
+		if replacements, handled := p.loadRecovery.OnFrameProbe(line, probe, probeOK); handled {
 			outFrames = replacements
 		}
 	}
@@ -294,15 +383,27 @@ func (p *StdioPump) checkAndNotify(line string) {
 	if p.onPushNotification == nil {
 		return
 	}
+	probe, ok := parseFrameProbe([]byte(line))
+	if !ok {
+		return
+	}
+	p.checkAndNotifyProbe(probe, true)
+}
+
+// checkAndNotifyProbe is the single-parse variant reading the shared probe.
+func (p *StdioPump) checkAndNotifyProbe(probe frameProbe, ok bool) {
+	if p.onPushNotification == nil || !ok {
+		return
+	}
 	switch {
-	case isTurnComplete([]byte(line)):
+	case probe.Result != nil && probe.Result.StopReason != "":
 		p.onPushNotification(PushEvent{SessionID: p.sessionID, AcpSessionID: p.AcpSessionID(), Category: push.CategoryTurnComplete, Title: "Turn Complete", Body: "Your agent has finished processing."})
-	case isPermissionRequest([]byte(line)):
+	case probe.Method == "session/request_permission":
 		p.onPushNotification(PushEvent{SessionID: p.sessionID, AcpSessionID: p.AcpSessionID(), Category: push.CategoryPermissionRequest, Title: "Permission Required", Body: "Your agent needs approval to run a tool."})
-	case isJSONRPCError([]byte(line)):
+	case probe.Error != nil:
 		p.onPushNotification(PushEvent{SessionID: p.sessionID, AcpSessionID: p.AcpSessionID(), Category: push.CategoryError, Title: "Agent Error", Body: "Your agent encountered an unexpected error."})
 	default:
-		if ev := isProgressEvent(line); ev != nil {
+		if ev := progressEventFromProbe(probe); ev != nil {
 			p.maybeNotifyProgress(ev)
 		}
 	}
@@ -343,27 +444,31 @@ func (p *StdioPump) maybeNotifyProgress(ev *progressEvent) {
 // A response is identified by the presence of result.protocolVersion, which only
 // initialize responses carry.
 func (p *StdioPump) snoopInitialize(line string) {
+	frameBytes := []byte(line)
+	probe, ok := parseFrameProbe(frameBytes)
+	if !ok {
+		return
+	}
+	p.snoopInitializeProbe(probe, line, frameBytes)
+}
+
+// snoopInitializeProbe is the single-parse variant: no re-parse on the hot path.
+func (p *StdioPump) snoopInitializeProbe(probe frameProbe, line string, frameBytes []byte) {
 	if p.initResponseCached() {
 		return
 	}
-	var probe struct {
-		Result *struct {
-			ProtocolVersion *int `json:"protocolVersion"`
-		} `json:"result"`
-	}
-	if err := json.Unmarshal([]byte(line), &probe); err != nil ||
-		probe.Result == nil || probe.Result.ProtocolVersion == nil {
+	if probe.Result == nil || probe.Result.ProtocolVersion == nil {
 		return
 	}
 
 	p.initMu.Lock()
-	p.initResponse = append([]byte(nil), line...)
+	p.initResponse = append([]byte(nil), frameBytes...)
 	p.initMu.Unlock()
 
 	var typed struct {
 		Result *acp.InitializeResponse `json:"result"`
 	}
-	if err := json.Unmarshal([]byte(line), &typed); err == nil &&
+	if err := json.Unmarshal(frameBytes, &typed); err == nil &&
 		typed.Result != nil &&
 		typed.Result.AgentCapabilities.SessionCapabilities.Close != nil {
 		p.supportsClose.Store(true)
@@ -383,19 +488,22 @@ func (p *StdioPump) initResponseCached() bool {
 // it is sent as the push SessionID so notifications match the id the client
 // navigates and suppresses by.
 func (p *StdioPump) snoopSessionID(line string) {
+	probe, ok := parseFrameProbe([]byte(line))
+	if !ok {
+		return
+	}
+	p.snoopSessionIDProbe(probe)
+}
+
+// snoopSessionIDProbe is the single-parse variant.
+func (p *StdioPump) snoopSessionIDProbe(probe frameProbe) {
 	p.acpMu.Lock()
 	cached := p.acpSessionID != ""
 	p.acpMu.Unlock()
 	if cached {
 		return
 	}
-	var probe struct {
-		Result *struct {
-			SessionID string `json:"sessionId"`
-		} `json:"result"`
-	}
-	if err := json.Unmarshal([]byte(line), &probe); err != nil ||
-		probe.Result == nil || probe.Result.SessionID == "" {
+	if probe.Result == nil || probe.Result.SessionID == "" {
 		return
 	}
 	p.acpMu.Lock()
@@ -495,24 +603,15 @@ func (p *StdioPump) markTurnStart(payload []byte) {
 // the client sees the turn as failed instead of an empty success; handled
 // reports whether the caller must substitute the frame.
 func (p *StdioPump) markTurnActivity(line string) (out string, handled bool) {
-	var probe struct {
-		Method string           `json:"method"`
-		ID     *json.RawMessage `json:"id"`
-		Result *struct {
-			StopReason acp.StopReason `json:"stopReason"`
-			Usage      *acp.Usage     `json:"usage"`
-		} `json:"result"`
-		Error  json.RawMessage `json:"error"`
-		Params *struct {
-			Update *struct {
-				Discriminator string `json:"sessionUpdate"`
-			} `json:"update"`
-		} `json:"params"`
-	}
-	if err := json.Unmarshal([]byte(line), &probe); err != nil {
+	probe, ok := parseFrameProbe([]byte(line))
+	if !ok {
 		return "", false
 	}
+	return p.markTurnActivityProbe(probe)
+}
 
+// markTurnActivityProbe is the single-parse variant (no re-parse).
+func (p *StdioPump) markTurnActivityProbe(probe frameProbe) (out string, handled bool) {
 	p.turnMu.Lock()
 
 	if probe.Params != nil && probe.Params.Update != nil {
@@ -527,7 +626,7 @@ func (p *StdioPump) markTurnActivity(line string) (out string, handled bool) {
 	// Prompt result: only judge when a turn was tracked and the response is a
 	// clean success (no JSON-RPC error — that path already pushes via
 	// isJSONRPCError).
-	if !p.turnActive || probe.ID == nil || probe.Result == nil || len(probe.Error) > 0 {
+	if !p.turnActive || probe.ID == nil || probe.Result == nil || probe.Error != nil {
 		p.turnMu.Unlock()
 		return "", false
 	}
@@ -568,7 +667,7 @@ func (p *StdioPump) markTurnActivity(line string) (out string, handled bool) {
 	outBytes, err := json.Marshal(errFrame)
 	if err != nil {
 		p.logger.Error("failed to marshal swallowed-failure error frame", "error", err)
-		return line, false // forward the original empty success rather than dropping the response
+		return "", false // forward path treats ""+false as no replacement
 	}
 	return string(outBytes), true
 }
@@ -628,24 +727,16 @@ type progressEvent struct {
 // first text content block, then a verb derived from `kind`. A frame with no
 // resolvable summary, or a non-tool session/update variant, yields nil.
 func isProgressEvent(line string) *progressEvent {
-	var probe struct {
-		Method string `json:"method"`
-		Params *struct {
-			Update *struct {
-				Discriminator string `json:"sessionUpdate"`
-				ToolCallID    string `json:"toolCallId"`
-				Status        string `json:"status"`
-				Title         string `json:"title"`
-				Kind          string `json:"kind"`
-				Content       []struct {
-					Type string `json:"type"`
-					Text string `json:"text"`
-				} `json:"content"`
-			} `json:"update"`
-		} `json:"params"`
+	probe, ok := parseFrameProbe([]byte(line))
+	if !ok {
+		return nil
 	}
-	if err := json.Unmarshal([]byte(line), &probe); err != nil ||
-		probe.Method != "session/update" ||
+	return progressEventFromProbe(probe)
+}
+
+// progressEventFromProbe is the single-parse variant.
+func progressEventFromProbe(probe frameProbe) *progressEvent {
+	if probe.Method != "session/update" ||
 		probe.Params == nil || probe.Params.Update == nil {
 		return nil
 	}
@@ -659,8 +750,8 @@ func isProgressEvent(line string) *progressEvent {
 		return nil
 	}
 	summary := u.Title
-	if summary == "" && len(u.Content) > 0 {
-		summary = u.Content[0].Text
+	if summary == "" {
+		summary = firstContentText(u.Content)
 	}
 	if summary == "" {
 		summary = verbForKind(u.Kind)
@@ -673,6 +764,27 @@ func isProgressEvent(line string) *progressEvent {
 		terminal:   u.Status == "completed" || u.Status == "failed",
 		toolCallID: u.ToolCallID,
 	}
+}
+
+// firstContentText extracts the first text block from session/update content,
+// accepting both the array shape and the legacy single-object shape.
+func firstContentText(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var arr []struct {
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(raw, &arr); err == nil && len(arr) > 0 {
+		return arr[0].Text
+	}
+	var single struct {
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(raw, &single); err == nil {
+		return single.Text
+	}
+	return ""
 }
 
 // verbForKind maps a ToolKind to a generic progress verb, or "" for unknown/other.

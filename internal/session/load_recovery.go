@@ -72,7 +72,17 @@ func (r *LoadRecovery) OnOutbound(payload []byte) {
 // followed by a synthesized success — and reports handled=true so the caller
 // suppresses the original error. Otherwise the frame passes through unchanged.
 func (r *LoadRecovery) OnFrame(line string) ([]string, bool) {
-	r.bufferHistory(line)
+	probe, ok := parseFrameProbe([]byte(line))
+	if !ok {
+		probe = frameProbe{}
+	}
+	return r.OnFrameProbe(line, probe, ok)
+}
+
+// OnFrameProbe is the single-parse variant: history buffering and the
+// load-response check read the shared probe instead of re-parsing.
+func (r *LoadRecovery) OnFrameProbe(line string, probe frameProbe, ok bool) ([]string, bool) {
+	r.bufferHistoryProbe(line, probe, ok)
 
 	r.mu.Lock()
 	noPending := len(r.pendingLoads) == 0
@@ -81,16 +91,10 @@ func (r *LoadRecovery) OnFrame(line string) ([]string, bool) {
 		return nil, false
 	}
 
-	var resp struct {
-		ID    json.RawMessage `json:"id"`
-		Error *struct {
-			Message string `json:"message"`
-		} `json:"error"`
-	}
-	if err := json.Unmarshal([]byte(line), &resp); err != nil || len(resp.ID) == 0 {
+	if !ok || probe.ID == nil || len(*probe.ID) == 0 {
 		return nil, false
 	}
-	key := responseIDKey(resp.ID)
+	key := responseIDKey(*probe.ID)
 
 	r.mu.Lock()
 	sid, pending := r.pendingLoads[key]
@@ -106,7 +110,7 @@ func (r *LoadRecovery) OnFrame(line string) ([]string, bool) {
 	// delay the same failure to the next response.
 
 	// Success: remember the response shape and let it reach the client unchanged.
-	if resp.Error == nil {
+	if probe.Error == nil {
 		if r.response == nil {
 			r.response = make(map[string][]byte)
 		}
@@ -116,7 +120,7 @@ func (r *LoadRecovery) OnFrame(line string) ([]string, bool) {
 	}
 
 	// A load error unrelated to re-load (e.g. unknown session) is surfaced as-is.
-	if !strings.Contains(strings.ToLower(resp.Error.Message), "already loaded") {
+	if !strings.Contains(strings.ToLower(probe.Error.Message), "already loaded") {
 		r.mu.Unlock()
 		return nil, false
 	}
@@ -125,7 +129,7 @@ func (r *LoadRecovery) OnFrame(line string) ([]string, bool) {
 	cached := r.response[sid]
 	r.mu.Unlock()
 
-	success, ok := synthesizeLoadSuccess(cached, resp.ID)
+	success, ok := synthesizeLoadSuccess(cached, *probe.ID)
 	if !ok {
 		return nil, false // could not build a safe success; surface the original error
 	}
@@ -140,13 +144,16 @@ func (r *LoadRecovery) OnFrame(line string) ([]string, bool) {
 // (permission prompts, rpc results) are not, so a reconnecting client never
 // replays a stale, since-resolved request.
 func (r *LoadRecovery) bufferHistory(line string) {
-	var probe struct {
-		Method string `json:"method"`
-		Params *struct {
-			SessionID string `json:"sessionId"`
-		} `json:"params"`
+	probe, ok := parseFrameProbe([]byte(line))
+	if !ok {
+		return
 	}
-	if err := json.Unmarshal([]byte(line), &probe); err != nil ||
+	r.bufferHistoryProbe(line, probe, ok)
+}
+
+// bufferHistoryProbe is the single-parse variant.
+func (r *LoadRecovery) bufferHistoryProbe(line string, probe frameProbe, ok bool) {
+	if !ok ||
 		probe.Method != "session/update" || probe.Params == nil || probe.Params.SessionID == "" {
 		return
 	}

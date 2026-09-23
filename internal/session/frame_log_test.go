@@ -8,6 +8,7 @@ import (
 	goruntime "runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/runtime"
 )
@@ -25,6 +26,7 @@ func TestFrameLogManagerAppends(t *testing.T) {
 
 	m.append("claude", "rt-1", "sess-1", "out", []byte(`{"jsonrpc":"2.0","id":"1","result":{}}`))
 	m.append("claude", "rt-1", "sess-1", "in", []byte(`{"jsonrpc":"2.0","id":"2","method":"session/prompt"}`))
+	m.flushForTest(5 * time.Second)
 
 	raw, err := os.ReadFile(filepath.Join(dir, "claude-agent.log"))
 	if err != nil {
@@ -84,6 +86,7 @@ func TestFrameLogManagerPerAgentFiles(t *testing.T) {
 
 	m.append("claude", "rt-1", "sess-1", "out", []byte(`{"a":1}`))
 	m.append("copilot", "rt-2", "sess-2", "out", []byte(`{"b":2}`))
+	m.flushForTest(5 * time.Second)
 
 	if _, err := os.Stat(filepath.Join(dir, "claude-agent.log")); err != nil {
 		t.Errorf("claude-agent.log missing: %v", err)
@@ -115,6 +118,7 @@ func TestFrameLogManagerRotates(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		m.append("claude", "rt", "sess", "out", frame)
 	}
+	m.flushForTest(5 * time.Second)
 
 	if _, err := os.Stat(filepath.Join(dir, "claude-agent.log")); err != nil {
 		t.Fatalf("active frame log missing: %v", err)
@@ -151,6 +155,7 @@ func TestFrameLogPumpTaps(t *testing.T) {
 	if err := pump.WriteToAgent([]byte(`{"jsonrpc":"2.0","id":"2","method":"session/new","params":{"cwd":"/proj"}}`)); err != nil {
 		t.Fatalf("WriteToAgent: %v", err)
 	}
+	m.flushForTest(5 * time.Second)
 
 	raw, err := os.ReadFile(filepath.Join(dir, "claude-agent.log"))
 	if err != nil {

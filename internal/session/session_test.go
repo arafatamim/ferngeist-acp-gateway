@@ -1927,6 +1927,12 @@ func TestReapExpired(t *testing.T) {
 		t.Fatalf("DetachClient: %v", err)
 	}
 
+	// Backdate the disconnect so reapExpired(0) is deterministic: Detach sets
+	// DisconnectedAt=now and reap compares with time.Now(), which can land on
+	// the same tick (Sub==0, not > 0) and flake.
+	past := time.Now().UTC().Add(-time.Hour)
+	sess.DisconnectedAt = &past
+
 	rs.reapExpired(0)
 
 	_, err = rs.GetSessionStatus(sess.ID)
@@ -1993,6 +1999,10 @@ func TestReapExpiredReapsIdleAgent(t *testing.T) {
 	sess.pump.lastStdoutMu.Lock()
 	sess.pump.lastStdoutAt = time.Now().Add(-1 * time.Hour)
 	sess.pump.lastStdoutMu.Unlock()
+
+	// Same determinism fix as TestReapExpired: backdate the disconnect.
+	pastIdle := time.Now().UTC().Add(-time.Hour)
+	sess.DisconnectedAt = &pastIdle
 
 	rs.reapExpired(0)
 
