@@ -19,6 +19,11 @@ import (
 
 var ErrNotFound = errors.New("record not found")
 
+// maxRuntimeFailureRecords bounds the runtime_failures table: every process
+// exit appends a row, so without retention the table grows forever. Summary
+// only reads the newest handful, so evicting the oldest is diagnostics-safe.
+const maxRuntimeFailureRecords = 200
+
 type PairingRecord struct {
 	DeviceID       string
 	DeviceName     string
@@ -125,6 +130,23 @@ func Open(path string) (*SQLiteStore, error) {
 	// ON DELETE CASCADE on session_inbound_log automatically removes
 	// child rows when a session is deleted.
 	if _, err := db.ExecContext(context.Background(), "PRAGMA foreign_keys=ON"); err != nil {
+		// sql.Open is lazy: it already spawned the connection-opener
+		// goroutine, so a bare return here leaks it (goleak-clean tests
+		// and repeated open-fail loops would accumulate them).
+		_ = db.Close()
+		return nil, err
+	}
+	// WAL + busy_timeout: the inbound diagnostic path does one autocommit
+	// INSERT per frame. In rollback-journal mode that is an fsync per frame;
+	// WAL moves it to a sequential log append. busy_timeout avoids
+	// SQLITE_BUSY flakes under the single-writer + readers contention.
+	if _, err := db.ExecContext(context.Background(), "PRAGMA journal_mode=WAL"); err != nil {
+		return nil, err
+	}
+	if _, err := db.ExecContext(context.Background(), "PRAGMA synchronous=NORMAL"); err != nil {
+		return nil, err
+	}
+	if _, err := db.ExecContext(context.Background(), "PRAGMA busy_timeout=5000"); err != nil {
 		return nil, err
 	}
 
@@ -362,6 +384,18 @@ func (s *SQLiteStore) SaveRuntimeFailure(ctx context.Context, record RuntimeFail
 		record.FailedAt.UTC().Format(time.RFC3339Nano),
 		record.LogPreview,
 		boolToSQLiteInt(record.CleanExit),
+	)
+	if err != nil {
+		return err
+	}
+	// Retention: every exit appends a row, so evict everything past the
+	// newest cap or the table grows without bound.
+	_, err = s.db.ExecContext(
+		ctx,
+		`DELETE FROM runtime_failures WHERE id NOT IN (
+			SELECT id FROM runtime_failures ORDER BY failed_at DESC, id DESC LIMIT ?
+		)`,
+		maxRuntimeFailureRecords,
 	)
 	return err
 }
@@ -890,6 +924,7 @@ func (s *SQLiteStore) migrate(ctx context.Context) error {
 			FOREIGN KEY (session_id) REFERENCES gateway_sessions(session_id) ON DELETE CASCADE
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_inbound_session_seq ON session_inbound_log(session_id, seq)`,
+		`CREATE INDEX IF NOT EXISTS idx_runtime_failures_failed_at ON runtime_failures(failed_at DESC)`,
 		`CREATE TABLE IF NOT EXISTS device_push_tokens (
 			device_id TEXT PRIMARY KEY,
 			token TEXT NOT NULL,
