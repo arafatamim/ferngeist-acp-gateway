@@ -13,6 +13,7 @@ import (
 	goruntime "runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -128,13 +129,23 @@ type RegistrySource interface {
 }
 
 type Service struct {
-	agents             []Agent
-	adapters           []Agent
-	baseDir            string
-	registry           RegistrySource
+	// mu guards agents and every field Refresh reads or writes: HTTP
+	// handlers call List/Get concurrently on the shared Service, and each
+	// of those re-runs Refresh (which replaces the agents slice).
+	mu               sync.RWMutex
+	agents           []Agent
+	adapters         []Agent
+	baseDir          string
+	registry         RegistrySource
 	resolveNpmBinaries func(string) []string
-	customs            func() []CustomAgent
+	customs          func() []CustomAgent
+	lastRefresh      time.Time
 }
+
+// catalogRefreshInterval avoids ~5 LookPath/Stat per agent + SQLite on every
+// HTTP call: detection results are cached briefly. Explicit Refresh() still
+// forces a rescan.
+const catalogRefreshInterval = 30 * time.Second
 
 // New returns the default gateway catalog rooted at the current working
 // directory.
@@ -164,17 +175,25 @@ func NewWithBaseDirAndRegistry(baseDir string, registrySource RegistrySource) *S
 // package metadata. Called by the daemon after construction; tests that
 // construct Service directly or through daemon.Run() skip npm lookups.
 func (s *Service) SetNpmResolver(resolve func(string) []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.resolveNpmBinaries = resolve
+	s.lastRefresh = time.Time{}
 }
 
 // SetCustomProvider serves user-registered agents from storage. Called by the
 // daemon after construction; nil means no custom agents.
 func (s *Service) SetCustomProvider(provide func() []CustomAgent) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.customs = provide
+	s.lastRefresh = time.Time{}
 }
 
 // IsCustomID reports whether the id is currently served by the custom provider.
 func (s *Service) IsCustomID(id string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	if s.customs == nil {
 		return false
 	}
@@ -277,7 +296,21 @@ func normalizeManifestPlaceholders(agent *Agent) {
 }
 
 func (s *Service) List() []Agent {
-	s.Refresh()
+	// Fast path: fresh cache served under RLock, no PATH scans / SQLite.
+	s.mu.RLock()
+	if time.Since(s.lastRefresh) < catalogRefreshInterval && s.lastRefresh.After(time.Time{}) {
+		out := make([]Agent, len(s.agents))
+		copy(out, s.agents)
+		s.mu.RUnlock()
+		return out
+	}
+	s.mu.RUnlock()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if time.Since(s.lastRefresh) >= catalogRefreshInterval || s.lastRefresh.IsZero() {
+		s.refreshLocked()
+	}
 
 	out := make([]Agent, len(s.agents))
 	copy(out, s.agents)
@@ -285,39 +318,77 @@ func (s *Service) List() []Agent {
 }
 
 func (s *Service) Get(id string) (Agent, error) {
-	s.Refresh()
-
-	for _, agent := range s.agents {
-		if agent.ID == id {
-			// If the agent would be launched via npm exec and we have a
-			// metadata resolver, try to find a locally-installed binary
-			// whose name differs from the registry ID (e.g., @github/copilot
-			// installs binary "copilot"). This avoids an unnecessary npm
-			// install when the binary is already on PATH.
-			if s.resolveNpmBinaries != nil && agent.Launch.Command == "npm" && agent.Registry.NpxPackage != "" {
-				for _, name := range s.resolveNpmBinaries(agent.Registry.NpxPackage) {
-					if _, err := exec.LookPath(name); err == nil {
-						agent.Launch.Command = name
-						agent.Launch.Args = append([]string(nil), agent.Registry.NpxArgs...)
-						agent.Detection = DetectionConfig{
-							Mode:    "path_lookup",
-							Command: name,
-						}
-						break
-					}
-				}
+	// Snapshot under RLock; npm `view` (10s network) runs outside the lock.
+	var agent Agent
+	var resolver func(string) []string
+	var pkg, cmd string
+	s.mu.RLock()
+	if time.Since(s.lastRefresh) >= catalogRefreshInterval || s.lastRefresh.IsZero() {
+		s.mu.RUnlock()
+		s.mu.Lock()
+		if time.Since(s.lastRefresh) >= catalogRefreshInterval || s.lastRefresh.IsZero() {
+			s.refreshLocked()
+		}
+		for _, a := range s.agents {
+			if a.ID == id {
+				agent, resolver, pkg, cmd = a, s.resolveNpmBinaries, a.Registry.NpxPackage, a.Launch.Command
+				break
 			}
-			return agent, nil
+		}
+		if agent.ID == "" {
+			s.mu.Unlock()
+			return Agent{}, ErrAgentNotFound
+		}
+		s.mu.Unlock()
+	} else {
+		for _, a := range s.agents {
+			if a.ID == id {
+				agent, resolver, pkg, cmd = a, s.resolveNpmBinaries, a.Registry.NpxPackage, a.Launch.Command
+				break
+			}
+		}
+		s.mu.RUnlock()
+		if agent.ID == "" {
+			return Agent{}, ErrAgentNotFound
 		}
 	}
-	return Agent{}, ErrAgentNotFound
+	if resolver != nil && cmd == "npm" && pkg != "" {
+		for _, name := range resolver(pkg) {
+			if _, err := exec.LookPath(name); err == nil {
+				agent.Launch.Command = name
+				agent.Launch.Args = append([]string(nil), agent.Registry.NpxArgs...)
+				agent.Detection = DetectionConfig{
+					Mode:    "path_lookup",
+					Command: name,
+				}
+				break
+			}
+		}
+	}
+	return agent, nil
 }
 
 // Refresh revalidates built-in manifests, merges ACP registry metadata, and
 // then reruns host detection. The gateway does this eagerly because the catalog
 // is small and the API should reflect current host state.
 func (s *Service) Refresh() {
-	registrySnapshot, registryErr, registryEnabled := s.loadRegistry()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.refreshLocked()
+}
+
+// Invalidate drops the TTL cache so the next List/Get rescans. Write paths
+// that change catalog-visible state outside Refresh (custom agent
+// create/update/delete) must call it, otherwise a 30s window serves stale
+// results (e.g. create → 404 on read-back).
+func (s *Service) Invalidate() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lastRefresh = time.Time{}
+}
+
+// refreshLocked is Refresh without locking; caller holds s.mu (write).
+func (s *Service) refreshLocked() {	registrySnapshot, registryErr, registryEnabled := s.loadRegistry()
 	adapterByID := make(map[string]Agent, len(s.adapters))
 	for _, adapter := range s.adapters {
 		adapterByID[adapter.ID] = adapter
@@ -399,6 +470,7 @@ func (s *Service) Refresh() {
 		return visible[i].ID < visible[j].ID
 	})
 	s.agents = visible
+	s.lastRefresh = time.Now()
 }
 
 func (s *Service) detect(agent Agent) bool {

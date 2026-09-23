@@ -130,11 +130,14 @@ func (s *Service) Create(ctx context.Context, in Create) (catalog.Agent, error) 
 	if err := s.store.SaveCustomAgent(ctx, record); err != nil {
 		return catalog.Agent{}, err
 	}
+	s.catalog.Invalidate()
 	agent, err := s.customAgentFromCatalog(ctx, id)
 	if err != nil {
 		// A rejected agent must never be served: drop the row again.
 		if deleteErr := s.store.DeleteCustomAgent(ctx, id); deleteErr != nil && !errors.Is(deleteErr, storage.ErrNotFound) {
 			s.logger.Warn("failed to roll back invalid custom agent", "agentId", id, "error", deleteErr)
+		} else {
+			s.catalog.Invalidate()
 		}
 		return catalog.Agent{}, err
 	}
@@ -171,11 +174,14 @@ func (s *Service) Update(ctx context.Context, id string, in Update) (catalog.Age
 	if err := s.store.SaveCustomAgent(ctx, updated); err != nil {
 		return catalog.Agent{}, err
 	}
+	s.catalog.Invalidate()
 	agent, err := s.customAgentFromCatalog(ctx, id)
 	if err != nil {
 		// Roll back to the last accepted record so an invalid edit never sticks.
 		if rollbackErr := s.store.SaveCustomAgent(ctx, existing); rollbackErr != nil {
 			s.logger.Warn("failed to roll back custom agent update", "agentId", id, "error", rollbackErr)
+		} else {
+			s.catalog.Invalidate()
 		}
 		return catalog.Agent{}, err
 	}
@@ -200,7 +206,11 @@ func (s *Service) Delete(ctx context.Context, id string) error {
 			return Error{status: http.StatusConflict, message: "agent has running runtimes"}
 		}
 	}
-	return s.store.DeleteCustomAgent(ctx, id)
+	if err := s.store.DeleteCustomAgent(ctx, id); err != nil {
+		return err
+	}
+	s.catalog.Invalidate()
+	return nil
 }
 
 // ready guards the nil store of test servers and admin-only builds, mirroring
