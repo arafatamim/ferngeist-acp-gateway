@@ -33,6 +33,7 @@ type pairingRateLimiter struct {
 	globalBurst    int                    // max tokens for global bucket
 	startRefill    time.Duration          // refill interval for start buckets
 	completeRefill time.Duration          // refill interval for complete buckets
+	lastSweep      time.Time              // last amortized sweep of idle per-IP buckets
 }
 
 // newPairingRateLimiter creates a rate limiter with configuration-aware defaults.
@@ -64,6 +65,7 @@ func newPairingRateLimiter(cfg config.Config) *pairingRateLimiter {
 		globalBurst:    globalBurst,
 		startRefill:    startRefill,
 		completeRefill: completeRefill,
+		lastSweep:      now,
 	}
 }
 
@@ -77,22 +79,95 @@ func (l *pairingRateLimiter) allow(ip string, isStart bool, now time.Time) bool 
 		ip = "unknown"
 	}
 	now = now.UTC()
+	l.maybeSweep(now)
 	if isStart {
-		bucket := l.ipStartBuckets[ip]
+		bucket, store := l.loadBucket(l.ipStartBuckets, ip, now)
 		if !takeToken(&bucket, now, l.burstPerIP, l.startRefill) {
-			l.ipStartBuckets[ip] = bucket
+			if store {
+				l.ipStartBuckets[ip] = bucket
+			}
 			return false
 		}
-		l.ipStartBuckets[ip] = bucket
+		if store {
+			l.ipStartBuckets[ip] = bucket
+		}
 		return takeToken(&l.globalStart, now, l.globalBurst, l.startRefill)
 	}
-	bucket := l.ipDoneBuckets[ip]
+	bucket, store := l.loadBucket(l.ipDoneBuckets, ip, now)
 	if !takeToken(&bucket, now, l.burstPerIP, l.completeRefill) {
-		l.ipDoneBuckets[ip] = bucket
+		if store {
+			l.ipDoneBuckets[ip] = bucket
+		}
 		return false
 	}
-	l.ipDoneBuckets[ip] = bucket
+	if store {
+		l.ipDoneBuckets[ip] = bucket
+	}
 	return takeToken(&l.globalDone, now, l.globalBurst, l.completeRefill)
+}
+
+// loadBucket returns the per-IP bucket for ip, or a zero (full-after-refill)
+// bucket for a new key. store reports whether the caller must write the
+// bucket back: when the map is at pairingMaxIPBuckets and the key is new, an
+// idle-entry sweep runs first, and if the map is still full the key is left
+// untracked (the global bucket is still enforced) so attacker-influenced keys
+// cannot grow the map without bound.
+func (l *pairingRateLimiter) loadBucket(buckets map[string]tokenBucket, ip string, now time.Time) (tokenBucket, bool) {
+	if b, ok := buckets[ip]; ok {
+		return b, true
+	}
+	if len(buckets) >= pairingMaxIPBuckets {
+		l.sweepBuckets(now)
+		if b, ok := buckets[ip]; ok {
+			return b, true
+		}
+		if len(buckets) >= pairingMaxIPBuckets {
+			return tokenBucket{}, false
+		}
+	}
+	return tokenBucket{}, true
+}
+
+// maybeSweep evicts idle per-IP buckets at most every pairingBucketSweepEvery.
+// Amortized (no goroutine, no per-request O(n) scan): steady-state memory is
+// bounded to IPs seen since the last sweep plus one sweep interval of churn.
+func (l *pairingRateLimiter) maybeSweep(now time.Time) {
+	if now.Sub(l.lastSweep) < pairingBucketSweepEvery {
+		return
+	}
+	l.lastSweep = now
+	l.sweepBuckets(now)
+}
+
+// sweepBuckets deletes per-IP buckets idle longer than twice their full-refill
+// window (capacity x refill interval). Such a bucket would refill to capacity
+// on next use anyway, so eviction is rate-limit neutral — the next request
+// simply starts from a full bucket again.
+func (l *pairingRateLimiter) sweepBuckets(now time.Time) {
+	if ttl := bucketIdleTTL(l.burstPerIP, l.startRefill); ttl > 0 {
+		for ip, b := range l.ipStartBuckets {
+			if now.Sub(b.last) >= ttl {
+				delete(l.ipStartBuckets, ip)
+			}
+		}
+	}
+	if ttl := bucketIdleTTL(l.burstPerIP, l.completeRefill); ttl > 0 {
+		for ip, b := range l.ipDoneBuckets {
+			if now.Sub(b.last) >= ttl {
+				delete(l.ipDoneBuckets, ip)
+			}
+		}
+	}
+}
+
+// bucketIdleTTL returns the idle duration after which a bucket is guaranteed
+// full and therefore safe to drop. Zero means never expire: without refill,
+// deleting would mint fresh tokens and weaken the limiter.
+func bucketIdleTTL(capacity int, refillEvery time.Duration) time.Duration {
+	if capacity <= 0 || refillEvery <= 0 {
+		return 0
+	}
+	return 2 * time.Duration(capacity) * refillEvery
 }
 
 // takeToken attempts to consume one token from the bucket. If the bucket is

@@ -108,6 +108,8 @@ const (
 	pairingCompleteRefill    = 2 * time.Second           // token bucket refill interval for /pair/complete
 	pairingBurstPerIP        = 5                         // burst allowance per source IP
 	pairingBurstGlobal       = 30                        // global burst allowance across all IPs
+	pairingBucketSweepEvery  = time.Minute               // amortized sweep interval for idle per-IP buckets
+	pairingMaxIPBuckets      = 4096                      // hard cap per per-IP bucket map (flood bound)
 	proofSkewWindow          = 5 * time.Minute           // allowed clock drift for proof timestamps
 	proofReplayWindow        = 10 * time.Minute          // nonce validity window to prevent replay
 	proofDomain              = "FERNGEIST-HTTP-PROOF-V1" // domain separator for proof signatures
