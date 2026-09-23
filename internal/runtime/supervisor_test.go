@@ -978,6 +978,7 @@ func TestSummaryIncludesRecentFailures(t *testing.T) { // TestSummaryIncludesRec
 		Status:    StatusFailed,
 		LastError: "process exited with status 1",
 		CreatedAt: now,
+		LastFailureAt: now,
 	}
 	supervisor.runtimes["run-running"] = Runtime{
 		ID:        "run-running",
@@ -1023,8 +1024,8 @@ func TestSummaryCountsLifecycleTransitions(t *testing.T) { // TestSummaryCountsL
 	supervisor.runtimes["run-running"] = Runtime{ID: "run-running", AgentID: "b", AgentName: "B", Status: StatusRunning, CreatedAt: now}
 	supervisor.runtimes["run-stopping"] = Runtime{ID: "run-stopping", AgentID: "c", AgentName: "C", Status: StatusStopping, CreatedAt: now}
 	supervisor.runtimes["run-stopped"] = Runtime{ID: "run-stopped", AgentID: "d", AgentName: "D", Status: StatusStopped, CreatedAt: now}
-	supervisor.runtimes["run-failed"] = Runtime{ID: "run-failed", AgentID: "e", AgentName: "E", Status: StatusFailed, LastError: "boom", CreatedAt: now}
-	supervisor.runtimes["run-open"] = Runtime{ID: "run-open", AgentID: "f", AgentName: "F", Status: StatusFailed, LastError: "loop", CircuitOpen: true, CreatedAt: now}
+	supervisor.runtimes["run-failed"] = Runtime{ID: "run-failed", AgentID: "e", AgentName: "E", Status: StatusFailed, LastError: "boom", CreatedAt: now, LastFailureAt: time.Now().UTC()}
+	supervisor.runtimes["run-open"] = Runtime{ID: "run-open", AgentID: "f", AgentName: "F", Status: StatusFailed, LastError: "loop", CircuitOpen: true, CreatedAt: now, LastFailureAt: time.Now().UTC()}
 
 	summary := supervisor.Summary()
 	if summary.Total != 6 {

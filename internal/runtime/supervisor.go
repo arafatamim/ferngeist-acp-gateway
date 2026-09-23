@@ -70,6 +70,10 @@ var (
 	// ErrRuntimeLeaseHeld is returned when attempting to acquire a lease on a
 	// runtime that already has an active lease from a different leaseholder.
 	ErrRuntimeLeaseHeld = errors.New("runtime lease is held by another session")
+
+	// ErrSupervisorShutdown is returned when a launch is refused because the
+	// supervisor has already been shut down.
+	ErrSupervisorShutdown = errors.New("supervisor is shut down")
 )
 
 // Status constants represent the possible lifecycle states of a runtime.
@@ -249,6 +253,14 @@ type Supervisor struct {
 
 	// onExitCallbacks maps runtime ID to a callback invoked when the process exits.
 	onExitCallbacks map[string]func(string)
+
+	// shutdown is set when Shutdown drains the supervisor; no new processes
+	// may launch afterwards (notably pending restart backoffs).
+	shutdown bool
+
+	// shutdownCh is closed when Shutdown drains the supervisor so pending
+	// restart backoffs wake immediately instead of sleeping out the delay.
+	shutdownCh chan struct{}
 }
 
 // processHandle holds the OS process and lifecycle state for a running runtime.
@@ -320,6 +332,7 @@ func NewSupervisorWithBaseDirAndInstaller(logger *slog.Logger, baseDir string, s
 		store:           store,
 		installer:       installer,
 		onExitCallbacks: make(map[string]func(string)),
+		shutdownCh:      make(chan struct{}),
 	}
 }
 
@@ -443,6 +456,12 @@ func (s *Supervisor) StartNew(agent catalog.Agent) (Runtime, error) {
 // records it immediately for diagnostics, then performs readiness and health
 // checks before exposing it as running.
 func (s *Supervisor) launchRuntime(agent catalog.Agent, previous *Runtime, envOverrides map[string]string) (Runtime, error) {
+	// Refuse to spawn once Shutdown has drained the supervisor; without this
+	// a restart racing Shutdown would leave an orphan process behind.
+	if s.isShutdown() {
+		return Runtime{}, ErrSupervisorShutdown
+	}
+
 	// Resolve the executable path and working directory from the launch config
 	commandPath, workingDir, err := s.resolveLaunch(agent.Launch)
 	if err != nil {
@@ -515,8 +534,17 @@ func (s *Supervisor) launchRuntime(agent catalog.Agent, previous *Runtime, envOv
 		close(handle.done)
 	}()
 
-	// Register the runtime in the supervisor's maps while holding the lock
+	// Register the runtime in the supervisor's maps while holding the lock.
+	// Re-check shutdown under the same lock: Shutdown may have run between the
+	// pre-spawn check and here, in which case the just-started process is
+	// killed instead of being registered as an orphan.
 	s.mu.Lock()
+	if s.shutdown {
+		s.mu.Unlock()
+		_ = cmd.Process.Kill()
+		<-handle.done
+		return Runtime{}, ErrSupervisorShutdown
+	}
 	s.addRuntimeByAgentLocked(agent.ID, runtimeInfo.ID)
 	s.runtimes[runtimeInfo.ID] = runtimeInfo
 	s.processes[runtimeInfo.ID] = handle
@@ -527,9 +555,15 @@ func (s *Supervisor) launchRuntime(agent catalog.Agent, previous *Runtime, envOv
 	go s.captureLogs(runtimeInfo.ID, "stderr", stderrPipe, os.Stderr)
 	go s.watchProcess(runtimeInfo.ID, agent.ID, handle)
 
-	// Perform readiness check - kill process immediately if it fails
+	// Perform readiness check - kill process immediately if it fails.
+	// stopping is set under s.mu: the watcher goroutine reads it in
+	// handleProcessExit under the same lock, so an unlocked write here
+	// would race and could misclassify the kill as a crash (spurious
+	// restart + circuit trip).
 	if err := waitForLaunchReadiness(agent.Launch); err != nil {
+		s.mu.Lock()
 		handle.stopping = true
+		s.mu.Unlock()
 		_ = cmd.Process.Kill()
 		<-handle.done // Wait for process to fully exit
 		checkErr := fmt.Errorf("runtime readiness check failed: %w", err)
@@ -537,9 +571,12 @@ func (s *Supervisor) launchRuntime(agent catalog.Agent, previous *Runtime, envOv
 		return Runtime{}, checkErr
 	}
 
-	// Perform health check - kill process immediately if it fails
+	// Perform health check - kill process immediately if it fails (same
+	// locking discipline as above).
 	if err := runHealthCheck(agent.Launch, agent.HealthCheck); err != nil {
+		s.mu.Lock()
 		handle.stopping = true
+		s.mu.Unlock()
 		_ = cmd.Process.Kill()
 		<-handle.done // Wait for process to fully exit
 		checkErr := fmt.Errorf("runtime health check failed: %w", err)
@@ -730,6 +767,13 @@ func (s *Supervisor) watchProcess(runtimeID, agentID string, handle *processHand
 func (s *Supervisor) Shutdown(ctx context.Context) error {
 	s.mu.Lock()
 
+	// Flag shutdown first so pending restart backoffs abort instead of
+	// relaunching into maps being drained here.
+	if !s.shutdown {
+		s.shutdown = true
+		close(s.shutdownCh)
+	}
+
 	// Snapshot all runtimes under lock, then clear the maps immediately
 	targets := make([]shutdownTarget, 0, len(s.runtimes))
 	for runtimeID, runtime := range s.runtimes {
@@ -741,6 +785,8 @@ func (s *Supervisor) Shutdown(ctx context.Context) error {
 		delete(s.processes, runtimeID)
 		s.deleteRuntimeByAgentIfMatchesLocked(runtime.AgentID, runtimeID)
 		delete(s.runtimes, runtimeID)
+		delete(s.logs, runtimeID)
+		delete(s.onExitCallbacks, runtimeID)
 	}
 	s.mu.Unlock()
 
@@ -768,6 +814,13 @@ func (s *Supervisor) Shutdown(ctx context.Context) error {
 		return fmt.Errorf("runtime shutdown failed: %s", strings.Join(failures, "; "))
 	}
 	return nil
+}
+
+// isShutdown reports whether Shutdown has drained the supervisor.
+func (s *Supervisor) isShutdown() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.shutdown
 }
 
 // List returns all runtimes currently managed by the supervisor, sorted by
@@ -865,8 +918,10 @@ func (s *Supervisor) AppendLog(runtimeID, stream, message string) {
 // diagnostic context. Failures are sourced from both in-memory state and
 // persisted records if a store is configured.
 func (s *Supervisor) Summary() Summary {
+	// Snapshot under lock, SQLite after unlock: holding s.mu across
+	// ListRecentRuntimeFailures serializes every per-frame appendLog behind
+	// disk I/O. Prune + copy here, merge persisted rows below lock-free.
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.pruneStoppedRuntimesLocked(s.now().UTC())
 
 	summary := Summary{}
@@ -905,10 +960,12 @@ func (s *Supervisor) Summary() Summary {
 			summary.Stopped++
 		}
 	}
+	store := s.store
+	s.mu.Unlock()
 
 	// Merge persisted failures from SQLite store (for runtimes that were pruned)
-	if s.store != nil {
-		persistedFailures, err := s.store.ListRecentRuntimeFailures(context.Background(), 5)
+	if store != nil {
+		persistedFailures, err := store.ListRecentRuntimeFailures(context.Background(), 5)
 		if err != nil {
 			s.logger.Warn("load runtime failures failed", "error", err)
 		} else {
@@ -1160,28 +1217,63 @@ func (s *Supervisor) handleProcessExit(runtimeID, agentID string, handle *proces
 	})
 }
 
-// pruneStoppedRuntimesLocked removes stopped runtimes after the retention
-// window so live runtime listings do not grow without bound.
+// pruneStoppedRuntimesLocked removes terminal runtimes after the retention
+// window so live runtime listings do not grow without bound. Both clean stops
+// and failures are pruned: failure diagnostics survive in the persisted store
+// (merged into Summary), so there is no need to keep them in memory forever.
+// Failed entries are aged by LastFailureAt (falling back to CreatedAt when the
+// failure timestamp is missing); each eviction also drops its log ring,
+// process handle, agent index, and exit callback.
 func (s *Supervisor) pruneStoppedRuntimesLocked(now time.Time) {
 	cutoff := now.Add(-stoppedRuntimeRetention)
 	for runtimeID, runtime := range s.runtimes {
-		if runtime.Status != StatusStopped {
-			continue
-		}
-		if runtime.StoppedAt.IsZero() || runtime.StoppedAt.After(cutoff) {
+		switch runtime.Status {
+		case StatusStopped:
+			if runtime.StoppedAt.IsZero() || runtime.StoppedAt.After(cutoff) {
+				continue
+			}
+		case StatusFailed:
+			failedAt := runtime.LastFailureAt
+			if failedAt.IsZero() {
+				failedAt = runtime.CreatedAt
+			}
+			if failedAt.IsZero() || failedAt.After(cutoff) {
+				continue
+			}
+		default:
 			continue
 		}
 		delete(s.runtimes, runtimeID)
 		delete(s.logs, runtimeID)
 		delete(s.processes, runtimeID)
+		delete(s.onExitCallbacks, runtimeID)
+		s.deleteRuntimeByAgentIfMatchesLocked(runtime.AgentID, runtimeID)
 	}
 }
 
 // restartAfterBackoff preserves the existing runtime identity while retrying
 // the launch. That keeps diagnostics stable across a short crash loop.
 func (s *Supervisor) restartAfterBackoff(runtimeInfo Runtime, agent catalog.Agent, envOverrides map[string]string) {
-	// Wait for configured backoff duration before retrying
-	time.Sleep(restartBackoff(agent.Launch.Restart))
+	// Wait for configured backoff duration before retrying, waking early when
+	// the supervisor shuts down. Sleeping through Shutdown and relaunching
+	// afterwards would spawn an orphan process into maps Shutdown just
+	// drained, with no owner and no stdout drain.
+	if backoff := restartBackoff(agent.Launch.Restart); backoff > 0 {
+		select {
+		case <-s.shutdownCh:
+			return
+		case <-time.After(backoff):
+		}
+	}
+	// The runtime may have been stopped, pruned, or shut down while waiting;
+	// relaunching anyway would resurrect it with nobody owning it.
+	s.mu.Lock()
+	_, alive := s.runtimes[runtimeInfo.ID]
+	shut := s.shutdown
+	s.mu.Unlock()
+	if shut || !alive {
+		return
+	}
 
 	// Attempt to relaunch using the same runtime ID for diagnostic continuity
 	restarted, err := s.launchRuntime(agent, &runtimeInfo, envOverrides)
@@ -1224,7 +1316,9 @@ func (s *Supervisor) restartAfterBackoff(runtimeInfo Runtime, agent catalog.Agen
 }
 
 // cleanupFailedLaunch removes a runtime that never reached running state and
-// persists it as a failure for post-mortem diagnostics.
+// persists it as a failure for post-mortem diagnostics. The failure line is
+// appended and snapshotted before the maps are dropped so no orphaned log ring
+// is left behind for a runtime that no longer exists.
 func (s *Supervisor) cleanupFailedLaunch(runtimeID, agentID string, err error) {
 	s.mu.Lock()
 	runtimeInfo, ok := s.runtimes[runtimeID]
@@ -1232,24 +1326,33 @@ func (s *Supervisor) cleanupFailedLaunch(runtimeID, agentID string, err error) {
 		s.mu.Unlock()
 		return
 	}
+	s.mu.Unlock()
+
+	failedAt := s.now().UTC()
+	s.appendLog(runtimeID, LogEntry{
+		Timestamp: failedAt,
+		Stream:    "gateway",
+		Message:   fmt.Sprintf("agent process launch failed: %s", err.Error()),
+	})
+	logPreview := s.recentLogs(runtimeID, 5)
+
+	s.mu.Lock()
 	delete(s.processes, runtimeID)
 	s.deleteRuntimeByAgentIfMatchesLocked(agentID, runtimeID)
 	delete(s.runtimes, runtimeID)
+	delete(s.logs, runtimeID)
+	delete(s.onExitCallbacks, runtimeID)
 	s.mu.Unlock()
 
 	runtimeInfo.Status = StatusFailed
 	runtimeInfo.LastError = err.Error()
 	runtimeInfo.PID = 0
+	runtimeInfo.LastFailureAt = failedAt
 	s.persistRuntime(runtimeInfo)
-	s.persistFailure(runtimeID, runtimeInfo, s.recentLogs(runtimeID, 5), s.now().UTC())
+	s.persistFailure(runtimeID, runtimeInfo, logPreview, failedAt)
 	s.logger.Error("agent process launch failed",
 		"runtime_id", runtimeID, "agent_id", agentID,
 		"error", err.Error())
-	s.appendLog(runtimeID, LogEntry{
-		Timestamp: s.now().UTC(),
-		Stream:    "gateway",
-		Message:   fmt.Sprintf("agent process launch failed: %s", err.Error()),
-	})
 }
 
 // captureLogs copies process output into the in-memory ring buffer while also
@@ -1280,6 +1383,13 @@ func (s *Supervisor) captureLogs(runtimeID, stream string, source io.Reader, sin
 }
 
 func (s *Supervisor) appendLog(runtimeID string, entry LogEntry) {
+	// Byte-cap: a single 64MiB agent frame must not land verbatim in the
+	// ring (200 x 64MiB = 12GiB/runtime pathological). Truncate to 8KiB;
+	// full frames remain in the frame log / SQLite audit path.
+	const maxLogMessageBytes = 8 * 1024
+	if len(entry.Message) > maxLogMessageBytes {
+		entry.Message = entry.Message[:maxLogMessageBytes] + "…[truncated]"
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
