@@ -71,11 +71,13 @@ func (m *linuxManager) Install(options InstallOptions) error {
 
 	// A reinstall with a different binary must stop the running daemon first:
 	// the old process holds targetPath open for execution, and Linux refuses
-	// to overwrite an executing file (ETXTBSY). Best-effort — a fresh
-	// install or stopped service makes stop a no-op. The daemon is brought
-	// back by the enable/restart below.
+	// to overwrite an executing file (ETXTBSY). Best-effort — a fresh install
+	// or stopped service makes stop a no-op. systemd reports a unit it has
+	// never loaded as "Unit ferngeist-gateway.service not loaded.", which is
+	// exactly the fresh-install case and must not abort the install. The
+	// daemon is brought back by the enable/restart below.
 	if err := m.systemctl("stop", linuxUnitName); err != nil {
-		if !isSystemctlUnitNotFound(err) {
+		if !isSystemctlUnitMissing(err) {
 			return err
 		}
 	}
@@ -118,7 +120,7 @@ func (m *linuxManager) Uninstall(purge bool) error {
 	}
 
 	if err := m.systemctl("disable", "--now", linuxUnitName); err != nil {
-		if !isSystemctlUnitNotFound(err) {
+		if !isSystemctlUnitMissing(err) {
 			return err
 		}
 	}
@@ -177,7 +179,7 @@ func (m *linuxManager) Status() (Status, error) {
 
 	out, err := m.systemctlOutput("show", linuxUnitName, "--property=LoadState,ActiveState,SubState,UnitFileState", "--value")
 	if err != nil {
-		if isSystemctlUnitNotFound(err) {
+		if isSystemctlUnitMissing(err) {
 			paths, pathErr := resolveLinuxPaths()
 			if pathErr != nil {
 				return Status{}, pathErr
@@ -255,7 +257,7 @@ func (m *linuxManager) systemctlOutput(args ...string) (string, error) {
 		if message == "" {
 			message = err.Error()
 		}
-		return "", fmt.Errorf("systemctl --user %s failed: %s", strings.Join(args, " "), message)
+		return "", newSystemctlError(args, linuxUnitName, message)
 	}
 	return string(out), nil
 }
@@ -370,13 +372,4 @@ func writeLinuxUnitFile(paths linuxPaths) error {
 
 func escapeSystemdValue(value string) string {
 	return strings.ReplaceAll(value, "%", "%%")
-}
-
-func isSystemctlUnitNotFound(err error) bool {
-	if err == nil {
-		return false
-	}
-	message := strings.ToLower(err.Error())
-	return strings.Contains(message, "unit "+linuxUnitName+" could not be found") ||
-		strings.Contains(message, "not-found")
 }
