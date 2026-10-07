@@ -184,6 +184,9 @@ func TestLinuxInstallSkipsSelfCopy(t *testing.T) {
 	if err := os.MkdirAll(paths.binDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(paths.binaryPath, []byte("running"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 
 	// Simulate the running daemon: the copy source IS the service binary.
 	prev := installCopySource
