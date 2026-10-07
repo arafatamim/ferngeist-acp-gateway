@@ -194,25 +194,9 @@ brews:
     ids:
       - brew
     post_install: |
-      system "ferngeist-gateway", "daemon", "install", "--lan"
-      # Silence the periodic update-available notification: brew-managed
-      # installs update via `brew upgrade`, never self-update. Mirror
-      # packaging/postinstall.sh's env append (runs as the invoking user,
-      # so the env file is user-writable). Wrapped so a path/parse hiccup
-      # never fails the formula install (post_install failures abort).
-      begin
-        linux_env = File.expand_path("~/.local/share/ferngeist-gateway/config/daemon.env")
-        mac_env = File.expand_path("~/Library/Application Support/Ferngeist Gateway/config/daemon.plist.env")
-        env = File.file?(linux_env) ? linux_env : mac_env
-        if File.file?(env)
-          content = File.read(env)
-          unless content.include?("FERNGEIST_GATEWAY_UPDATE_CHECK_ENABLED=")
-            File.open(env, "a") { |f| f.puts "FERNGEIST_GATEWAY_UPDATE_CHECK_ENABLED=0" }
-          end
-        end
-      rescue StandardError
-        nil
-      end
+      # --keep-settings: upgrades reapply the existing install's options
+      # (--remote/--port/...); --lan only sets first-install defaults.
+      system "ferngeist-gateway", "daemon", "install", "--keep-settings", "--lan"
 
 # .deb (Ubuntu/Debian) and .rpm (Fedora/RHEL) packages. postinstall runs
 # `daemon install` so a per-user systemd user service is created on first

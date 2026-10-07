@@ -58,6 +58,12 @@ Ferngeist Gateway is configured through environment variables and persisted stat
 - `daemon install` registers the extracted binary as a background service.
 - `daemon install --lan` listens on `0.0.0.0` and enables LAN access (default is
   localhost-only). `--host 0.0.0.0` is the explicit equivalent.
+- `daemon install --keep-settings` reuses the options of the existing install
+  (the other flags then only apply to a first install); package upgrades use it.
+- On Linux, `daemon install` rewrites `config/daemon.env` every time. Put custom
+  variables (for example `FERNGEIST_GATEWAY_TAILSCALE_AUTH_KEY`) in
+  `config/daemon.override.env` next to it: the unit loads it after `daemon.env`
+  (so it wins) and it is never overwritten.
 - `daemon install --remote` (or `daemon run --remote`) writes
   `FERNGEIST_GATEWAY_TAILSCALE_MODE=auto` into the service environment. See
   [docs/remote-access.md](docs/remote-access.md).

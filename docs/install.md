@@ -88,7 +88,7 @@ brew tap arafatamim/ferngeist-acp-gateway https://github.com/arafatamim/ferngeis
 brew install ferngeist-gateway
 ```
 
-The formula installs the binary and runs the daemon install (`daemon install --lan`)
+The formula installs the binary and runs the daemon install (`daemon install --keep-settings --lan`)
 as a per-user service — same as the Linux packages. On macOS it is a LaunchAgent;
 on Linux (Linuxbrew) a systemd user unit. Updates: `brew upgrade ferngeist-gateway`.
 
@@ -122,10 +122,17 @@ sudo apt update
 sudo apt install ferngeist-gateway
 ```
 
-The package postinstall runs `daemon install` for the invoking user. By default
-the service listens on `127.0.0.1` (localhost only). To make the gateway
-reachable from other devices on your network, run
-`ferngeist-gateway daemon install --lan` (equivalent to `--host 0.0.0.0`).
+The package postinstall runs `daemon install --keep-settings --lan` for the
+invoking user: a first install listens on `0.0.0.0` (LAN), and upgrades reapply
+the options of your existing install (`--remote`, `--port`, `--host`,
+`--public-url`) instead of resetting them. Re-run
+`ferngeist-gateway daemon install` with the flags you want to change them.
+
+To keep the gateway running after logout and at boot, enable lingering once:
+`sudo loginctl enable-linger $USER`. Put custom environment variables (for
+example `FERNGEIST_GATEWAY_TAILSCALE_AUTH_KEY`) in
+`~/.local/share/ferngeist-gateway/config/daemon.override.env`; unlike
+`daemon.env` it is never rewritten by `daemon install`.
 
 ### Fedora / RHEL
 
@@ -185,7 +192,8 @@ tar -xzf ferngeist-gateway_<ver>_linux_amd64.tar.gz
 
 `ferngeist-gateway daemon uninstall` stops the daemon and removes the
 background-service registration. Run it from the same binary you installed
-(or any copy), elevated:
+(or any copy). On Windows, run it from an elevated terminal; on Linux and
+macOS run it as your own user (no `sudo`):
 
 ```powershell
 ferngeist-gateway daemon uninstall
