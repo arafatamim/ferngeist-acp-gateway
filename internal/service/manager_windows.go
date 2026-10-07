@@ -97,7 +97,7 @@ func (m *windowsManager) Install(options InstallOptions) error {
 		return copyErr
 	}
 
-	// schtasks /Run returns success as soon as the scheduler accepts the
+	// Start-ScheduledTask returns success as soon as the scheduler accepts the
 	// request; right after a re-registration the run can be dropped while the
 	// scheduler reconciles the task. Retry until the task is actually Running,
 	// so install leaves a live daemon instead of a Ready task.
@@ -109,7 +109,7 @@ func (m *windowsManager) Install(options InstallOptions) error {
 		if state == "running" {
 			return nil
 		}
-		if err := m.schtasks("/Run", "/TN", windowsTaskName); err != nil {
+		if err := m.taskCmdlet("Start-ScheduledTask"); err != nil {
 			return err
 		}
 		time.Sleep(500 * time.Millisecond)
@@ -140,7 +140,7 @@ func (m *windowsManager) registerTask(paths windowsPaths) error {
 	if err := os.WriteFile(xmlPath, encodeTaskXML(windowsTaskXML(current.Username, paths.launcherScriptPath)), 0o644); err != nil {
 		return fmt.Errorf("write scheduled task definition: %w", err)
 	}
-	return m.schtasks("/Create", "/TN", windowsTaskName, "/XML", xmlPath, "/F")
+	return m.taskCmdlet("Register-ScheduledTask", "-Force", "-Xml (Get-Content -LiteralPath '"+escapePowerShellSingleQuoted(xmlPath)+"' -Raw)")
 }
 
 // windowsTaskXML builds the Task Scheduler definition. Launching goes through
@@ -191,7 +191,7 @@ func windowsTaskXML(userID, launcherPath string) string {
 `
 }
 
-// encodeTaskXML encodes s as UTF-16 LE with a BOM, which schtasks /XML expects.
+// encodeTaskXML encodes s as UTF-16 LE with a BOM, which the Task Scheduler XML loader expects.
 func encodeTaskXML(s string) []byte {
 	units := utf16.Encode([]rune(s))
 	out := make([]byte, 2, 2+2*len(units))
@@ -222,7 +222,7 @@ func (m *windowsManager) Uninstall(purge bool) error {
 	if _, found, err := m.taskState(); err != nil {
 		return err
 	} else if found {
-		if err := m.schtasks("/Delete", "/TN", windowsTaskName, "/F"); err != nil {
+		if err := m.taskCmdlet("Unregister-ScheduledTask", "-Confirm:$false"); err != nil {
 			return err
 		}
 	}
@@ -266,7 +266,7 @@ func (m *windowsManager) stopDaemon(paths windowsPaths) error {
 	if state, _, err := m.taskState(); err != nil {
 		return err
 	} else if state == "running" {
-		if err := m.schtasks("/End", "/TN", windowsTaskName); err != nil {
+		if err := m.taskCmdlet("Stop-ScheduledTask"); err != nil {
 			return err
 		}
 	}
@@ -338,7 +338,7 @@ func (m *windowsManager) Start() error {
 	if state == "running" {
 		return nil
 	}
-	return m.schtasks("/Run", "/TN", windowsTaskName)
+	return m.taskCmdlet("Start-ScheduledTask")
 }
 
 func (m *windowsManager) Stop() error {
@@ -393,9 +393,6 @@ func (m *windowsManager) Status() (Status, error) {
 }
 
 func (m *windowsManager) ensureTaskSchedulerAvailable() error {
-	if _, err := exec.LookPath("schtasks"); err != nil {
-		return fmt.Errorf("%w: schtasks is not available", ErrServiceUnsupportedConfig)
-	}
 	if _, err := exec.LookPath("powershell"); err != nil {
 		return fmt.Errorf("%w: powershell is not available", ErrServiceUnsupportedConfig)
 	}
@@ -419,7 +416,7 @@ func (m *windowsManager) ensureInstalled() error {
 // language: enum names and HRESULTs are never localized.
 func (m *windowsManager) taskState() (state string, found bool, err error) {
 	out, err := runPowerShell("try { $t = Get-ScheduledTask -TaskName '" + windowsTaskName + "' -ErrorAction SilentlyContinue; " +
-		"if ($null -eq $t) { 'FG_NOTFOUND' } else { 'FG_STATE=' + $t.State } } catch { 'FG_ERR=' + $_.Exception.HResult }")
+		"if ($null -eq $t) { 'FG_NOTFOUND' } else { 'FG_STATE=' + $t.State } } " + taskErrCatch)
 	if err != nil {
 		return "", false, fmt.Errorf("query scheduled task: %w", err)
 	}
@@ -436,12 +433,7 @@ func parseTaskState(out string) (string, bool, error) {
 		case strings.HasPrefix(line, "FG_STATE="):
 			return strings.ToLower(strings.TrimPrefix(line, "FG_STATE=")), true, nil
 		case strings.HasPrefix(line, "FG_ERR="):
-			code := strings.TrimPrefix(line, "FG_ERR=")
-			// 0x80070005 (E_ACCESSDENIED) as a signed 32-bit value.
-			if code == "-2147024891" {
-				return "", false, fmt.Errorf("%w: task scheduler access was denied for the current user", ErrServicePermissionDenied)
-			}
-			return "", false, fmt.Errorf("query scheduled task failed (HRESULT %s)", code)
+			return "", false, taskHRESULTError("query scheduled task", strings.TrimPrefix(line, "FG_ERR="))
 		}
 	}
 	return "", false, fmt.Errorf("query scheduled task: unexpected output %q", strings.TrimSpace(out))
@@ -455,25 +447,38 @@ func runPowerShell(script string) (string, error) {
 	return string(out), nil
 }
 
-func (m *windowsManager) schtasks(args ...string) error {
-	_, err := m.schtasksOutput(args...)
-	return err
+// taskErrCatch reports a failed cmdlet as FG_ERR=<hex HRESULT>. The
+// ScheduledTasks cmdlets throw CimExceptions whose .HResult is a generic
+// COMException code; the scheduler's real HRESULT is in error_Code. HRESULTs
+// are never localized, unlike schtasks' "Access is denied." text.
+const taskErrCatch = "catch { $c = $_.Exception.HResult; $d = $_.Exception.ErrorData; " +
+	"if ($d -and $d.CimInstanceProperties['error_Code']) { $c = $d.CimInstanceProperties['error_Code'].Value }; " +
+	"'FG_ERR={0:X8}' -f $c }"
+
+func taskHRESULTError(op, code string) error {
+	if strings.EqualFold(code, "80070005") { // E_ACCESSDENIED
+		return fmt.Errorf("%w: task scheduler access was denied for the current user", ErrServicePermissionDenied)
+	}
+	return fmt.Errorf("%s failed (HRESULT 0x%s)", op, code)
 }
 
-func (m *windowsManager) schtasksOutput(args ...string) (string, error) {
-	cmd := exec.Command("schtasks", args...)
-	out, err := cmd.CombinedOutput()
+// taskCmdlet runs one ScheduledTasks cmdlet against the daemon task, e.g.
+// taskCmdlet("Start-ScheduledTask").
+func (m *windowsManager) taskCmdlet(cmdlet string, extra ...string) error {
+	script := "try { " + cmdlet + " -TaskName '" + windowsTaskName + "' " + strings.Join(extra, " ") +
+		" -ErrorAction Stop | Out-Null; 'FG_OK' } " + taskErrCatch
+	out, err := runPowerShell(script)
 	if err != nil {
-		message := strings.TrimSpace(string(out))
-		if message == "" {
-			message = err.Error()
-		}
-		if isTaskAccessDeniedMessage(message) {
-			return "", fmt.Errorf("%w: task scheduler access was denied for the current user", ErrServicePermissionDenied)
-		}
-		return "", fmt.Errorf("schtasks %s failed: %s", strings.Join(args, " "), message)
+		return fmt.Errorf("%s: %w", cmdlet, err)
 	}
-	return string(out), nil
+	out = strings.TrimSpace(out)
+	if code, ok := strings.CutPrefix(out, "FG_ERR="); ok {
+		return taskHRESULTError(cmdlet, code)
+	}
+	if out != "FG_OK" {
+		return fmt.Errorf("%s: unexpected output %q", cmdlet, out)
+	}
+	return nil
 }
 
 type windowsPaths struct {
@@ -679,9 +684,4 @@ func writeWindowsOverridesTemplate(paths windowsPaths) error {
 
 func escapePowerShellSingleQuoted(value string) string {
 	return strings.ReplaceAll(value, "'", "''")
-}
-
-func isTaskAccessDeniedMessage(message string) bool {
-	lower := strings.ToLower(strings.TrimSpace(message))
-	return strings.Contains(lower, "access is denied")
 }

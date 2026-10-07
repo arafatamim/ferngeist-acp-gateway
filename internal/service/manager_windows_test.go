@@ -56,7 +56,7 @@ func TestParseTaskState(t *testing.T) {
 	if _, found, err := parseTaskState("FG_NOTFOUND\r\n"); found || err != nil {
 		t.Errorf("notfound: %v %v", found, err)
 	}
-	if _, _, err := parseTaskState("FG_ERR=-2147024891"); !errors.Is(err, ErrServicePermissionDenied) {
+	if _, _, err := parseTaskState("FG_ERR=80070005"); !errors.Is(err, ErrServicePermissionDenied) {
 		t.Errorf("access denied: %v", err)
 	}
 	if _, _, err := parseTaskState("garbage"); err == nil {
