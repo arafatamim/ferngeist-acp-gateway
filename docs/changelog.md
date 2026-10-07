@@ -42,7 +42,7 @@ Format:
 
 The **build** version (the daemon binary's `--version` and the mDNS
 `gateway_version` TXT record) is separate from the **contract** version above.
-Releases are tagged with semver (`v0.6.0` … `v0.11.3` so far); the Taskfile
+Releases are tagged with semver (`v0.6.0` … `v0.12.0` so far); the Taskfile
 derives the build version from `git describe`. They are independent and should
 not be coupled. Full release notes live in GitHub Releases.
 
@@ -181,7 +181,18 @@ clients.
 
 ## History
 
-- `v0.11.3` (latest tagged release) — reconnect and long-transcript stability:
+- `v0.12.0` (latest tagged release) — push notifications move from FCM HTTP v1
+  to Web Push, encrypted end to end and signed with a VAPID key the gateway
+  generates on first boot (`GET /v1/devices/push-config` hands the public key
+  out); `FERNGEIST_GATEWAY_FCM_CREDENTIALS_FILE` is gone. ACP
+  `elicitation/create` (unstable) is forwarded to clients and pushed as
+  `permission_request`, and a session whose agent awaits an unanswered request
+  survives up to 24 h. Session and stream reliability: no dropped frames on a
+  `session/load` burst, replays that carry the user's own turns, no false crash
+  pushes or duplicate notifications, and clean cross-platform install, update,
+  and package-upgrade behavior. Protocol version remains `v1`: every change is
+  additive or preserves existing client behavior.
+- `v0.11.3` — reconnect and long-transcript stability:
   a reattached client's `session/load` replay now carries the user's own turns,
   a prompt issued on an earlier connection ends with the new
   `_ferngeist/turn_ended` notification rather than an unmatchable reply, and a
