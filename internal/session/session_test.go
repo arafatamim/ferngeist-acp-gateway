@@ -2421,3 +2421,31 @@ func TestCloseDoesNotHoldRegistryLockDuringBlockedWrite(t *testing.T) {
 		t.Error("expected runtime to be stopped despite the blocked write")
 	}
 }
+
+// A disconnected session whose agent waits on an unanswered request outlives
+// MaxDisconnected; once answered it is reaped as usual.
+func TestReapSparesSessionAwaitingClient(t *testing.T) {
+	rs, store, _, _, ctx := setupTest(t, Config{})
+	defer rs.Shutdown()
+	defer store.Close()
+
+	sess, _, err := rs.Create(ctx, "rt-wait", "dev-wait", "agent-wait")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sess.pump.handleStdoutLine(permissionRequest)
+	past := time.Now().UTC().Add(-2 * time.Hour)
+	sess.DisconnectedAt = &past
+	sess.pump.lastStdoutAt = past
+
+	rs.reapExpired(time.Hour)
+	if _, err := rs.GetSessionStatus(sess.ID); err != nil {
+		t.Fatalf("session awaiting the client was reaped: %v", err)
+	}
+
+	sess.pump.reqIDs.outbound(1, []byte(`{"jsonrpc":"2.0","id":7,"result":{"outcome":{"outcome":"cancelled"}}}`))
+	rs.reapExpired(time.Hour)
+	if _, err := rs.GetSessionStatus(sess.ID); err != ErrSessionNotFound {
+		t.Fatalf("answered session not reaped: %v", err)
+	}
+}

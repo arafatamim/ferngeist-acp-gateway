@@ -30,8 +30,8 @@ type frameProbe struct {
 	Method string           `json:"method"`
 	ID     *json.RawMessage `json:"id"`
 	Result *struct {
-		ProtocolVersion *int            `json:"protocolVersion"`
-		SessionID       string          `json:"sessionId"`
+		ProtocolVersion *int           `json:"protocolVersion"`
+		SessionID       string         `json:"sessionId"`
 		StopReason      acp.StopReason `json:"stopReason"`
 		Usage           *acp.Usage     `json:"usage"`
 	} `json:"result"`
@@ -40,12 +40,14 @@ type frameProbe struct {
 	} `json:"error"`
 	Params *struct {
 		SessionID string `json:"sessionId"`
+		// The client request a request-scoped elicitation/create is tied to.
+		RequestID json.RawMessage `json:"requestId"`
 		Update    *struct {
-			Discriminator string          `json:"sessionUpdate"`
-			ToolCallID    string          `json:"toolCallId"`
-			Status        string          `json:"status"`
-			Title         string          `json:"title"`
-			Kind          string          `json:"kind"`
+			Discriminator string `json:"sessionUpdate"`
+			ToolCallID    string `json:"toolCallId"`
+			Status        string `json:"status"`
+			Title         string `json:"title"`
+			Kind          string `json:"kind"`
 			// Content is RawMessage because agents emit both a single
 			// object and an array; a typed slice would fail the whole
 			// probe parse on the object shape (history buffering must
@@ -455,6 +457,7 @@ func (p *StdioPump) handleStdoutLine(line string) {
 	}
 	p.reqIDs.trackAgentRequest(probe, line, deliveredGen)
 	if bound {
+		outFrames = p.reqIDs.scopeElicitation(p.connGen, probe, outFrames)
 		for i, frame := range outFrames {
 			if p.writerQ.push(frame) {
 				continue
@@ -501,6 +504,9 @@ func (p *StdioPump) checkAndNotifyProbe(probe frameProbe, ok bool) {
 		p.onPushNotification(PushEvent{SessionID: p.sessionID, AcpSessionID: acpID, Category: push.CategoryTurnComplete, Title: "Turn Complete", Body: "Your agent has finished processing."})
 	case probe.Method == "session/request_permission":
 		p.onPushNotification(PushEvent{SessionID: p.sessionID, AcpSessionID: acpID, Category: push.CategoryPermissionRequest, Title: "Permission Required", Body: "Your agent needs approval to run a tool."})
+	case probe.Method == elicitationMethod:
+		// ponytail: shares the permission category so clients route it without a new case.
+		p.onPushNotification(PushEvent{SessionID: p.sessionID, AcpSessionID: acpID, Category: push.CategoryPermissionRequest, Title: "Input Required", Body: "Your agent needs your input."})
 	case probe.Error != nil:
 		// Only a failed prompt is worth a push: errors for optional methods,
 		// replies to an earlier connection, and the "already loaded" rejection
@@ -1178,6 +1184,12 @@ func (p *StdioPump) SupportsClose() bool {
 // LastStdoutAt returns the timestamp of the agent's most recent stdout line.
 // Zero time means the pump has never received any output — the reaper falls
 // back to DisconnectedAt in that case.
+// AwaitingClient reports whether the agent is waiting on the client to answer
+// one of its requests (a permission prompt, an elicitation, ...).
+func (p *StdioPump) AwaitingClient() bool {
+	return p.reqIDs.hasAgentRequests()
+}
+
 func (p *StdioPump) LastStdoutAt() time.Time {
 	p.lastStdoutMu.Lock()
 	defer p.lastStdoutMu.Unlock()

@@ -40,6 +40,11 @@ const (
 	// closeWriteTimeout bounds how long Close waits for the agent to accept the
 	// session/close frame before stopping the runtime anyway.
 	closeWriteTimeout = 2 * time.Second
+
+	// awaitingClientGrace is how long a disconnected session survives while the
+	// agent waits on a request the client has not answered. ponytail: a fixed
+	// bound, move it to Config if it needs tuning.
+	awaitingClientGrace = 24 * time.Hour
 )
 
 var (

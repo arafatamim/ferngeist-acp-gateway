@@ -12,6 +12,9 @@ import (
 // transcript streaming forever. Underscore-prefixed per ACP's extension rule.
 const turnEndedMethod = "_ferngeist/turn_ended"
 
+// elicitationMethod is ACP's (unstable) agent->client request for user input.
+const elicitationMethod = "elicitation/create"
+
 // requestIDs gives every client request a gateway-unique id on its way to the
 // agent and restores the client's own id on the reply.
 //
@@ -189,6 +192,39 @@ func (r *requestIDs) dropSessionAgentRequestsLocked(sessionID string) {
 		}
 	}
 	r.agentReqs = kept
+}
+
+func (r *requestIDs) hasAgentRequests() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.agentReqs) > 0
+}
+
+// scopeElicitation points a request-scoped elicitation/create (the frame in
+// frames that probe describes) at the id the client gave the request it is tied
+// to. The agent only knows the translated id, which the client never issued.
+// Elicitations tied to an earlier connection's request pass unchanged.
+func (r *requestIDs) scopeElicitation(gen int64, probe frameProbe, frames []string) []string {
+	if probe.Method != elicitationMethod || probe.Params == nil || probe.Params.RequestID == nil || len(frames) != 1 {
+		return frames
+	}
+	r.mu.Lock()
+	origin, ok := r.pending[responseIDKey(probe.Params.RequestID)]
+	r.mu.Unlock()
+	if !ok || origin.gen != gen {
+		return frames
+	}
+	var msg, params map[string]json.RawMessage
+	if json.Unmarshal([]byte(frames[0]), &msg) != nil || json.Unmarshal(msg["params"], &params) != nil {
+		return frames
+	}
+	params["requestId"] = origin.clientID
+	raw, err := json.Marshal(params)
+	if err != nil {
+		return frames
+	}
+	msg["params"] = raw
+	return []string{string(marshalOr(msg, []byte(frames[0])))}
 }
 
 // redeliver appends, after a session/load reply, every unanswered agent request

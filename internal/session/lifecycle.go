@@ -671,7 +671,13 @@ func (rs *RuntimeSession) reapExpired(maxDisc time.Duration) {
 			if lastStdout := sess.pump.LastStdoutAt(); !lastStdout.IsZero() && lastStdout.After(discTime) {
 				discTime = lastStdout
 			}
-			if now.Sub(discTime) > maxDisc {
+			grace := maxDisc
+			if sess.pump.AwaitingClient() {
+				// A prompt the user has not answered yet is likely why they will
+				// come back (the push told them); keep the agent waiting longer.
+				grace = max(grace, awaitingClientGrace)
+			}
+			if now.Sub(discTime) > grace {
 				sess.mu.Lock()
 				sess.Status = StatusClosing
 				sess.mu.Unlock()

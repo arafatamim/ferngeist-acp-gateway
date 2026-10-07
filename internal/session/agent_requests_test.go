@@ -252,3 +252,27 @@ func TestAgentRequestsDroppedWhenTheirTurnEnds(t *testing.T) {
 		t.Fatalf("redeliver after turn ended = %v, want none", got)
 	}
 }
+
+// An elicitation pushes like a permission prompt, and a request-scoped one names
+// the id the client used rather than the gateway's translated id.
+func TestElicitationPushesAndNamesTheClientRequest(t *testing.T) {
+	pump := newPump()
+	events := pushCollector(pump)
+	gen, c := connect(t, pump)
+
+	auth := pump.reqIDs.outbound(gen, []byte(`{"jsonrpc":"2.0","id":"auth-1","method":"authenticate","params":{"methodId":"x"}}`))
+	pump.handleStdoutLine(fmt.Sprintf(`{"jsonrpc":"2.0","id":"e1","method":"elicitation/create","params":{"requestId":%s,"mode":"form","message":"key?","requestedSchema":{}}}`, agentIDOf(t, auth)))
+	got := readFrames(t, pump, c, 1)
+	if got[0] != `{"id":"e1","jsonrpc":"2.0","method":"elicitation/create","params":{"message":"key?","mode":"form","requestId":"auth-1","requestedSchema":{}}}` {
+		t.Fatalf("request-scoped elicitation = %s", got[0])
+	}
+
+	session := `{"jsonrpc":"2.0","id":"e2","method":"elicitation/create","params":{"sessionId":"ses_a","mode":"url","elicitationId":"x","url":"https://example.com","message":"sign in"}}`
+	pump.handleStdoutLine(session)
+	if got := readFrames(t, pump, c, 1); got[0] != session {
+		t.Fatalf("session-scoped elicitation altered: %s", got[0])
+	}
+	if len(*events) != 2 || (*events)[1].Category != push.CategoryPermissionRequest || (*events)[1].AcpSessionID != "ses_a" {
+		t.Fatalf("elicitation pushes = %+v", *events)
+	}
+}
