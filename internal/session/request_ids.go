@@ -24,14 +24,35 @@ type requestIDs struct {
 	next    int64
 	pending map[string]pendingRequest // agent-side id -> origin
 	byOwner map[string]string         // owner key -> agent-side id, for $/cancel_request
+
+	// The agent's own requests (permission, fs/*, terminal/*) the client has not
+	// answered yet, oldest first. See trackAgentRequest.
+	agentReqs []agentRequest
+}
+
+// maxPendingAgentRequests bounds agentReqs. An agent has a handful of requests
+// open at once; past the cap the oldest is forgotten (and so not re-sent).
+// ponytail: a plain cap, not a per-session budget.
+const maxPendingAgentRequests = 64
+
+// agentRequest is an agent->client request awaiting the client's response.
+type agentRequest struct {
+	key       string // responseIDKey of the agent's id
+	frame     string
+	sessionID string
+	// The connection generation the frame was last written to; 0 if never.
+	deliveredGen int64
 }
 
 type pendingRequest struct {
 	gen      int64
 	clientID json.RawMessage
 	owner    string
+	method   string
 	// The ACP session a session/prompt drives; empty for every other method.
 	promptSession string
+	// The ACP session a session/load restores; empty for every other method.
+	loadSession string
 }
 
 func ownerKey(gen int64, clientID json.RawMessage) string {
@@ -49,6 +70,9 @@ func (r *requestIDs) outbound(gen int64, payload []byte) []byte {
 	}
 	var method string
 	if json.Unmarshal(msg["method"], &method) != nil || method == "" {
+		if id, answers := msg["id"]; answers {
+			r.answerAgentRequest(id)
+		}
 		return payload
 	}
 	clientID, isRequest := msg["id"]
@@ -63,9 +87,12 @@ func (r *requestIDs) outbound(gen int64, payload []byte) []byte {
 		SessionID string `json:"sessionId"`
 	}
 	_ = json.Unmarshal(msg["params"], &params)
-	origin := pendingRequest{gen: gen, clientID: clientID, owner: ownerKey(gen, clientID)}
-	if method == "session/prompt" {
+	origin := pendingRequest{gen: gen, clientID: clientID, owner: ownerKey(gen, clientID), method: method}
+	switch method {
+	case "session/prompt":
 		origin.promptSession = params.SessionID
+	case "session/load":
+		origin.loadSession = params.SessionID
 	}
 
 	r.mu.Lock()
@@ -103,6 +130,83 @@ func (r *requestIDs) retargetCancel(gen int64, msg map[string]json.RawMessage) b
 	return true
 }
 
+// peek returns the translated request a reply answers without consuming it, so
+// classifiers that run before reply can tell what the reply is for. ok is false
+// for anything that is not a reply to a translated request.
+func (r *requestIDs) peek(probe frameProbe) (origin pendingRequest, ok bool) {
+	if probe.Method != "" || probe.ID == nil {
+		return pendingRequest{}, false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	origin, ok = r.pending[responseIDKey(*probe.ID)]
+	return origin, ok
+}
+
+// trackAgentRequest remembers a request the agent sent so it can be re-sent if
+// the client was away or left without answering. deliveredGen is the connection
+// generation it was just written to, or 0 when no client was attached. Frames
+// that are not requests are ignored.
+func (r *requestIDs) trackAgentRequest(probe frameProbe, line string, deliveredGen int64) {
+	if probe.Method == "" || probe.ID == nil {
+		return
+	}
+	req := agentRequest{key: responseIDKey(*probe.ID), frame: line, deliveredGen: deliveredGen}
+	if probe.Params != nil {
+		req.sessionID = probe.Params.SessionID
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.dropAgentRequestLocked(req.key)
+	if len(r.agentReqs) >= maxPendingAgentRequests {
+		r.agentReqs = r.agentReqs[1:]
+	}
+	r.agentReqs = append(r.agentReqs, req)
+}
+
+// answerAgentRequest forgets the agent request a client response (result or
+// error) answers.
+func (r *requestIDs) answerAgentRequest(id json.RawMessage) {
+	r.mu.Lock()
+	r.dropAgentRequestLocked(responseIDKey(id))
+	r.mu.Unlock()
+}
+
+func (r *requestIDs) dropAgentRequestLocked(key string) {
+	for i, req := range r.agentReqs {
+		if req.key == key {
+			r.agentReqs = append(r.agentReqs[:i], r.agentReqs[i+1:]...)
+			return
+		}
+	}
+}
+
+func (r *requestIDs) dropSessionAgentRequestsLocked(sessionID string) {
+	kept := r.agentReqs[:0]
+	for _, req := range r.agentReqs {
+		if req.sessionID != sessionID {
+			kept = append(kept, req)
+		}
+	}
+	r.agentReqs = kept
+}
+
+// redeliver appends, after a session/load reply, every unanswered agent request
+// for sessionID that connection gen has not been sent yet, and marks them sent.
+// Requests are not part of load history: a client that was away (or dropped
+// before answering) would otherwise leave the agent waiting forever.
+func (r *requestIDs) redeliver(gen int64, sessionID string, frames []string) []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i := range r.agentReqs {
+		if req := &r.agentReqs[i]; req.sessionID == sessionID && req.deliveredGen != gen {
+			req.deliveredGen = gen
+			frames = append(frames, req.frame)
+		}
+	}
+	return frames
+}
+
 // reply routes the agent's reply to a translated request. frames is what the
 // pump would send for it, the reply last. A reply for the connection that asked
 // gets its client id back; one for an earlier connection is withheld, and a
@@ -118,6 +222,11 @@ func (r *requestIDs) reply(currentGen int64, probe frameProbe, frames []string) 
 	if ok {
 		delete(r.pending, agentID)
 		delete(r.byOwner, origin.owner)
+		if origin.promptSession != "" {
+			// The turn is over, so requests it raised can no longer be answered
+			// usefully; re-sending them on a later load would show stale prompts.
+			r.dropSessionAgentRequestsLocked(origin.promptSession)
+		}
 	}
 	r.mu.Unlock()
 	if !ok {

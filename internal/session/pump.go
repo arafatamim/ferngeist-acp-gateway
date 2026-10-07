@@ -420,9 +420,11 @@ func (p *StdioPump) handleStdoutLine(line string) {
 	// sees history frames but no terminal success. The connection closes,
 	// triggering the detach flow; the client's reconnect logic handles it.
 	outFrames := []string{line}
+	recovered := false
 	if p.loadRecovery != nil {
 		if replacements, handled := p.loadRecovery.OnFrameProbe(line, probe, probeOK); handled {
 			outFrames = replacements
+			recovered = true
 		}
 	}
 
@@ -437,8 +439,22 @@ func (p *StdioPump) handleStdoutLine(line string) {
 	var evict *websocket.Conn
 	p.clientMu.Lock()
 	// Under clientMu: a reply routed for one generation must not reach the next.
+	origin, isReply := p.reqIDs.peek(probe)
 	outFrames = p.reqIDs.reply(p.connGen, probe, outFrames)
-	if p.client != nil && p.writerQ != nil {
+	bound := p.client != nil && p.writerQ != nil
+	// The agent's unanswered requests are not in load history, so the reply that
+	// restores their session carries them. Only for the connection that asked,
+	// and only once the load succeeded (a recovered "already loaded" counts).
+	if isReply && origin.method == "session/load" && origin.gen == p.connGen &&
+		bound && (recovered || probe.Error == nil) {
+		outFrames = p.reqIDs.redeliver(p.connGen, origin.loadSession, outFrames)
+	}
+	var deliveredGen int64
+	if bound {
+		deliveredGen = p.connGen
+	}
+	p.reqIDs.trackAgentRequest(probe, line, deliveredGen)
+	if bound {
 		for i, frame := range outFrames {
 			if p.writerQ.push(frame) {
 				continue
@@ -478,18 +494,40 @@ func (p *StdioPump) checkAndNotifyProbe(probe frameProbe, ok bool) {
 	if p.onPushNotification == nil || !ok {
 		return
 	}
+	origin, isReply := p.reqIDs.peek(probe)
+	acpID := p.pushAcpSessionID(probe, origin)
 	switch {
 	case probe.Result != nil && probe.Result.StopReason != "":
-		p.onPushNotification(PushEvent{SessionID: p.sessionID, AcpSessionID: p.AcpSessionID(), Category: push.CategoryTurnComplete, Title: "Turn Complete", Body: "Your agent has finished processing."})
+		p.onPushNotification(PushEvent{SessionID: p.sessionID, AcpSessionID: acpID, Category: push.CategoryTurnComplete, Title: "Turn Complete", Body: "Your agent has finished processing."})
 	case probe.Method == "session/request_permission":
-		p.onPushNotification(PushEvent{SessionID: p.sessionID, AcpSessionID: p.AcpSessionID(), Category: push.CategoryPermissionRequest, Title: "Permission Required", Body: "Your agent needs approval to run a tool."})
+		p.onPushNotification(PushEvent{SessionID: p.sessionID, AcpSessionID: acpID, Category: push.CategoryPermissionRequest, Title: "Permission Required", Body: "Your agent needs approval to run a tool."})
 	case probe.Error != nil:
-		p.onPushNotification(PushEvent{SessionID: p.sessionID, AcpSessionID: p.AcpSessionID(), Category: push.CategoryError, Title: "Agent Error", Body: "Your agent encountered an unexpected error."})
+		// Only a failed prompt is worth a push: errors for optional methods,
+		// replies to an earlier connection, and the "already loaded" rejection
+		// load recovery hides from the client are not.
+		if isReply && origin.method == "session/prompt" {
+			p.onPushNotification(PushEvent{SessionID: p.sessionID, AcpSessionID: acpID, Category: push.CategoryError, Title: "Agent Error", Body: "Your agent encountered an unexpected error."})
+		}
 	default:
 		if ev := progressEventFromProbe(probe); ev != nil {
+			ev.acpSessionID = acpID
 			p.maybeNotifyProgress(ev)
 		}
 	}
+}
+
+// pushAcpSessionID picks the ACP session a frame's push should deep-link to: the
+// session the frame names, else the session of the prompt it answers, else the
+// cached id. One agent process can host several chats, so the cached id alone
+// would send every push to the first one.
+func (p *StdioPump) pushAcpSessionID(probe frameProbe, origin pendingRequest) string {
+	if probe.Params != nil && probe.Params.SessionID != "" {
+		return probe.Params.SessionID
+	}
+	if origin.promptSession != "" {
+		return origin.promptSession
+	}
+	return p.AcpSessionID()
 }
 
 // maybeNotifyProgress fires a progress push, throttled by ProgressInterval and
@@ -498,6 +536,9 @@ func (p *StdioPump) checkAndNotifyProbe(probe frameProbe, ok bool) {
 func (p *StdioPump) maybeNotifyProgress(ev *progressEvent) {
 	p.progressMu.Lock()
 	defer p.progressMu.Unlock()
+	if ev.acpSessionID == "" {
+		ev.acpSessionID = p.AcpSessionID()
+	}
 
 	if !ev.terminal {
 		// Dedupe: same tool call, same summary → skip.
@@ -514,7 +555,7 @@ func (p *StdioPump) maybeNotifyProgress(ev *progressEvent) {
 	p.lastProgressSummary = ev.summary
 	p.onPushNotification(PushEvent{
 		SessionID:    p.sessionID,
-		AcpSessionID: p.AcpSessionID(),
+		AcpSessionID: ev.acpSessionID,
 		Category:     push.CategoryProgress,
 		Title:        "Agent working",
 		Body:         ev.summary,
@@ -695,6 +736,7 @@ func (p *StdioPump) markTurnActivity(line string) (out string, handled bool) {
 
 // markTurnActivityProbe is the single-parse variant (no re-parse).
 func (p *StdioPump) markTurnActivityProbe(probe frameProbe) (out string, handled bool) {
+	origin, isReply := p.reqIDs.peek(probe)
 	p.turnMu.Lock()
 
 	if probe.Params != nil && probe.Params.Update != nil {
@@ -708,8 +750,9 @@ func (p *StdioPump) markTurnActivityProbe(probe frameProbe) (out string, handled
 
 	// Prompt result: only judge when a turn was tracked and the response is a
 	// clean success (no JSON-RPC error — that path already pushes via
-	// isJSONRPCError).
-	if !p.turnActive || probe.ID == nil || probe.Result == nil || probe.Error != nil {
+	// isJSONRPCError). A reply known to answer another request (a set_mode
+	// reply mid-turn) is not the prompt result; an unknown id is still judged.
+	if !p.turnActive || (isReply && origin.method != "session/prompt") || probe.ID == nil || probe.Result == nil || probe.Error != nil {
 		p.turnMu.Unlock()
 		return "", false
 	}
@@ -733,7 +776,7 @@ func (p *StdioPump) markTurnActivityProbe(probe frameProbe) (out string, handled
 	if p.onPushNotification != nil {
 		p.onPushNotification(PushEvent{
 			SessionID:    p.sessionID,
-			AcpSessionID: p.AcpSessionID(),
+			AcpSessionID: p.pushAcpSessionID(probe, origin),
 			Category:     push.CategoryError,
 			Body:         "The agent finished without producing anything. This usually means the model call failed (rate limit or invalid setting). Check the gateway logs for details.",
 		})
@@ -801,6 +844,8 @@ type progressEvent struct {
 	summary    string
 	terminal   bool
 	toolCallID string
+	// The ACP session the push deep-links to; filled in by the notifier.
+	acpSessionID string
 }
 
 // isProgressEvent parses a stdout line for an ACP session/update tool_call or
