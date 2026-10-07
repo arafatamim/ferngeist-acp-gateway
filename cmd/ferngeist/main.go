@@ -356,10 +356,11 @@ func runDaemon(enableLAN bool, listenAddr string, publicBaseURL string, remote b
 	defer stop()
 
 	return daemon.Run(ctx, api.BuildInfo{
-		Version:   buildVersion,
-		Commit:    buildCommit,
-		BuiltAt:   buildTime,
-		GoVersion: goruntime.Version(),
+		Version:       buildVersion,
+		Commit:        buildCommit,
+		BuiltAt:       buildTime,
+		GoVersion:     goruntime.Version(),
+		UpdateChannel: updateChannel,
 	})
 }
 

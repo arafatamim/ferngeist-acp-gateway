@@ -129,6 +129,9 @@ type BuildInfo struct {
 	Commit    string `json:"commit,omitempty"`
 	BuiltAt   string `json:"builtAt,omitempty"`
 	GoVersion string `json:"goVersion,omitempty"`
+	// UpdateChannel is the install channel baked in at build time ("", "self",
+	// "apt", "pacman", "brew"). Not exposed over the API.
+	UpdateChannel string `json:"-"`
 }
 
 // errorResponse is the standard JSON error envelope returned on API errors.

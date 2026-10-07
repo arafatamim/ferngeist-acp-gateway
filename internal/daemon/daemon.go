@@ -218,7 +218,10 @@ func Run(ctx context.Context, build api.BuildInfo) error {
 	// Periodic update-available check: fetch the latest stable release and push
 	// a notification to paired devices when a newer version exists. Never
 	// applies the update — the user runs `ferngeist-gateway update`.
-	if cfg.UpdateCheckEnabled {
+	// Package-manager builds (apt, pacman, brew) are updated by their package
+	// manager, so they never announce `ferngeist-gateway update`.
+	selfUpdating := build.UpdateChannel == "" || build.UpdateChannel == "self"
+	if cfg.UpdateCheckEnabled && selfUpdating {
 		checker := update.NewChecker("arafatamim/ferngeist-acp-gateway")
 		notifier := update.NewNotifier(checker, pushSvc, store.GetPairedDeviceIDs)
 		notifier.Interval = cfg.UpdateCheckInterval
