@@ -25,7 +25,7 @@ import (
 type mockProcessManager struct {
 	mu            sync.Mutex
 	leases        map[string]string
-	exitCallbacks map[string]func(string)
+	exitCallbacks map[string]func(string, bool)
 	stopped       map[string]bool
 	logs          []string
 }
@@ -33,7 +33,7 @@ type mockProcessManager struct {
 func newMockPM() *mockProcessManager {
 	return &mockProcessManager{
 		leases:        make(map[string]string),
-		exitCallbacks: make(map[string]func(string)),
+		exitCallbacks: make(map[string]func(string, bool)),
 		stopped:       make(map[string]bool),
 	}
 }
@@ -62,7 +62,7 @@ func (m *mockProcessManager) ReleaseLease(runtimeID, leaseholder string) error {
 	return nil
 }
 
-func (m *mockProcessManager) OnProcessExit(runtimeID string, callback func(string)) {
+func (m *mockProcessManager) OnProcessExit(runtimeID string, callback func(string, bool)) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.exitCallbacks[runtimeID] = callback
@@ -81,12 +81,23 @@ func (m *mockProcessManager) AppendLog(runtimeID, stream, message string) {
 	m.logs = append(m.logs, runtimeID+"/"+stream+": "+message)
 }
 
+// triggerExit simulates the agent dying on its own (a crash).
 func (m *mockProcessManager) triggerExit(runtimeID string) {
 	m.mu.Lock()
 	cb, ok := m.exitCallbacks[runtimeID]
 	m.mu.Unlock()
 	if ok {
-		cb(runtimeID)
+		cb(runtimeID, false)
+	}
+}
+
+// triggerIntentionalExit simulates a stop or restart reported by the supervisor.
+func (m *mockProcessManager) triggerIntentionalExit(runtimeID string) {
+	m.mu.Lock()
+	cb, ok := m.exitCallbacks[runtimeID]
+	m.mu.Unlock()
+	if ok {
+		cb(runtimeID, true)
 	}
 }
 
@@ -339,8 +350,8 @@ func TestCreateReturnsSessionWithID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSession: %v", err)
 	}
-	if rec.Status != StatusActive {
-		t.Errorf("expected status active in store, got %s", rec.Status)
+	if rec.Status != StatusDisconnected {
+		t.Errorf("expected status disconnected in store (not yet attached), got %s", rec.Status)
 	}
 }
 
@@ -788,8 +799,8 @@ func TestGetSessionStatus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSessionStatus: %v", err)
 	}
-	if status != StatusActive {
-		t.Errorf("expected active, got %s", status)
+	if status != StatusDisconnected {
+		t.Errorf("expected disconnected (not yet attached), got %s", status)
 	}
 
 	if err := rs.DetachClient(sess.ID, 0); err != nil {
@@ -1897,9 +1908,12 @@ func TestReapExpiredSkipsActive(t *testing.T) {
 	defer rs.Shutdown()
 	defer store.Close()
 
-	sess, _, err := rs.Create(ctx, "rt-reap-skip", "dev-reap-skip", "agent-reap-skip")
+	sess, tok, err := rs.Create(ctx, "rt-reap-skip", "dev-reap-skip", "agent-reap-skip")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
+	}
+	if _, _, err := rs.AttachClient(ctx, sess.ID, tok); err != nil {
+		t.Fatalf("AttachClient: %v", err)
 	}
 
 	rs.reapExpired(0)
@@ -2252,4 +2266,158 @@ func TestPumpAttachBindRaceFencesEvictedConn(t *testing.T) {
 		t.Fatal("pump still holds the evicted connection after takeover race")
 	}
 	pump.clientMu.Unlock()
+}
+
+// TestCreateNeverAttachedIsReaped verifies a session whose client never attaches
+// (the app died before opening the WebSocket) is born disconnected, so the
+// reaper reclaims its process, lease and quota slot after MaxDisconnected.
+func TestCreateNeverAttachedIsReaped(t *testing.T) {
+	rs, store, mockPM, _, ctx := setupTest(t, Config{})
+	defer rs.Shutdown()
+	defer store.Close()
+
+	sess, _, err := rs.Create(ctx, "rt-never", "dev-never", "agent-never")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	rec, err := store.GetSession(ctx, sess.ID)
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	if rec.Status != StatusDisconnected || rec.DisconnectedSince == nil {
+		t.Fatalf("stored record = status %q, DisconnectedSince %v; want disconnected with a timestamp", rec.Status, rec.DisconnectedSince)
+	}
+
+	// Within the grace period the session survives.
+	rs.reapExpired(time.Hour)
+	if _, err := rs.GetSessionStatus(sess.ID); err != nil {
+		t.Fatalf("session reaped before MaxDisconnected: %v", err)
+	}
+
+	past := time.Now().UTC().Add(-time.Hour)
+	sess.mu.Lock()
+	sess.DisconnectedAt = &past
+	sess.mu.Unlock()
+	rs.reapExpired(time.Minute)
+
+	if _, err := rs.GetSessionStatus(sess.ID); err != ErrSessionNotFound {
+		t.Errorf("expected never-attached session to be reaped, got %v", err)
+	}
+	if !mockPM.stopped["rt-never"] {
+		t.Error("expected runtime to be stopped")
+	}
+	if _, err := store.GetSession(ctx, sess.ID); err == nil {
+		t.Error("expected session to be deleted from store")
+	}
+}
+
+// TestProcessExitIntentionalReclaimsWithoutPush verifies that a stop or restart
+// reported by the supervisor (intentional exit of a non-closing session) frees
+// the session and its lease exactly like a crash, but sends no "Agent Crashed" push.
+func TestProcessExitIntentionalReclaimsWithoutPush(t *testing.T) {
+	rs, mockPM, pushSvc := setupPushTest(t)
+	ctx := context.Background()
+
+	sess, _, err := rs.Create(ctx, "rt-stop", "dev-stop", "agent-stop")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	mockPM.triggerIntentionalExit("rt-stop")
+
+	if _, err := rs.GetSessionStatus(sess.ID); err != ErrSessionNotFound {
+		t.Fatalf("expected session reclaimed (ErrSessionNotFound), got %v", err)
+	}
+	if _, _, err := rs.Create(ctx, "rt-stop", "dev-stop", "agent-fresh"); err != nil {
+		t.Fatalf("expected lease released so Create succeeds, got %v", err)
+	}
+	// The push, if erroneously sent, is dispatched asynchronously.
+	time.Sleep(150 * time.Millisecond)
+	if c := pushSvc.count(); c != 0 {
+		t.Fatalf("expected no push for an intentional stop, got %d", c)
+	}
+}
+
+// blockedWriteCloser models an agent that stopped reading stdin: Write blocks
+// until released (as a full pipe buffer would, until the process is killed).
+type blockedWriteCloser struct{ release chan struct{} }
+
+func (b blockedWriteCloser) Write(p []byte) (int, error) { <-b.release; return len(p), nil }
+func (b blockedWriteCloser) Close() error                { return nil }
+
+// TestCloseDoesNotHoldRegistryLockDuringBlockedWrite verifies a session/close
+// write stuck on an unresponsive agent does not freeze the registry shared by
+// every other session, and that Close still completes once the wait is bounded.
+func TestCloseDoesNotHoldRegistryLockDuringBlockedWrite(t *testing.T) {
+	rs, store, mockPM, _, ctx := setupTest(t, Config{})
+	defer rs.Shutdown()
+	defer store.Close()
+
+	release := make(chan struct{})
+	defer close(release)
+	pump := &StdioPump{
+		pipes: &runtime.LeasedPipes{
+			Stdin:     blockedWriteCloser{release: release},
+			Stdout:    io.NopCloser(strings.NewReader("")),
+			RuntimeID: "rt-stuck",
+		},
+		runtimeID:    "rt-stuck",
+		sessionID:    "sess-stuck",
+		logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		appendLog:    rs.pm.AppendLog,
+		loadRecovery: newLoadRecovery(rs.logger),
+	}
+	pump.supportsClose.Store(true)
+	stuck := &Session{
+		ID: "sess-stuck", RuntimeID: "rt-stuck", DeviceID: "dev-stuck", AgentID: "agent-stuck",
+		Status: StatusActive, Leaseholder: "sess-stuck", CreatedAt: time.Now().UTC(), pump: pump,
+	}
+	rs.mu.Lock()
+	rs.sessions[stuck.ID] = stuck
+	rs.mu.Unlock()
+
+	other, _, err := rs.Create(ctx, "rt-other", "dev-other", "agent-other")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	closed := make(chan error, 1)
+	go func() { closed <- rs.Close(ctx, stuck.ID, "dev-stuck") }()
+
+	// Wait until the stuck session has left the registry (Close is past its
+	// locked section and blocked in the write), then use the registry.
+	deadline := time.Now().Add(time.Second)
+	for {
+		if _, err := rs.GetPump(stuck.ID); err == ErrSessionNotFound {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("Close never removed the session from the registry")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	done := make(chan struct{})
+	go func() {
+		_, _ = rs.GetSessionStatus(other.ID)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(closeWriteTimeout / 2):
+		t.Fatal("registry lock held while session/close write is blocked")
+	}
+
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	case <-time.After(closeWriteTimeout + 3*time.Second):
+		t.Fatal("Close did not return after the bounded wait")
+	}
+	mockPM.mu.Lock()
+	defer mockPM.mu.Unlock()
+	if !mockPM.stopped["rt-stuck"] {
+		t.Error("expected runtime to be stopped despite the blocked write")
+	}
 }

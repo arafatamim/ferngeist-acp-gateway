@@ -328,8 +328,9 @@ func TestResilientSession_FullLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSession() error = %v", err)
 	}
-	if rec.Status != session.StatusActive {
-		t.Fatalf("session status = %s, want %s", rec.Status, session.StatusActive)
+	// Born disconnected until the client attaches, so a never-attached session is reapable.
+	if rec.Status != session.StatusDisconnected {
+		t.Fatalf("session status = %s, want %s", rec.Status, session.StatusDisconnected)
 	}
 
 	conn := h.dialSessionWS(connectResp.SessionID, connectResp.AttachToken)

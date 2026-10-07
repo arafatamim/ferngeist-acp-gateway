@@ -827,7 +827,12 @@ func main() {
 	}
 
 	exitCh := make(chan string, 1)
-	supervisor.OnProcessExit(rt.ID, func(id string) { exitCh <- id })
+	supervisor.OnProcessExit(rt.ID, func(id string, intentional bool) {
+		if intentional {
+			t.Error("crash reported as intentional exit")
+		}
+		exitCh <- id
+	})
 
 	// Simulate an unexpected crash: kill the OS process directly rather than via
 	// StopByRuntimeID, so handle.stopping stays false and waitErr is non-nil —
@@ -972,12 +977,12 @@ func TestSummaryIncludesRecentFailures(t *testing.T) { // TestSummaryIncludesRec
 	supervisor.now = func() time.Time { return now }
 
 	supervisor.runtimes["run-failed"] = Runtime{
-		ID:        "run-failed",
-		AgentID:   "mock-acp",
-		AgentName: "Mock ACP",
-		Status:    StatusFailed,
-		LastError: "process exited with status 1",
-		CreatedAt: now,
+		ID:            "run-failed",
+		AgentID:       "mock-acp",
+		AgentName:     "Mock ACP",
+		Status:        StatusFailed,
+		LastError:     "process exited with status 1",
+		CreatedAt:     now,
 		LastFailureAt: now,
 	}
 	supervisor.runtimes["run-running"] = Runtime{
@@ -1372,7 +1377,9 @@ func TestOnProcessExitCallback(t *testing.T) { // TestOnProcessExitCallback veri
 	}
 
 	callbackCh := make(chan string, 1)
-	supervisor.OnProcessExit(rt.ID, func(runtimeID string) {
+	intentionalCh := make(chan bool, 1)
+	supervisor.OnProcessExit(rt.ID, func(runtimeID string, intentional bool) {
+		intentionalCh <- intentional
 		callbackCh <- runtimeID
 	})
 
@@ -1385,6 +1392,9 @@ func TestOnProcessExitCallback(t *testing.T) { // TestOnProcessExitCallback veri
 	case got := <-callbackCh:
 		if got != rt.ID {
 			t.Fatalf("callback received runtimeID = %q, want %q", got, rt.ID)
+		}
+		if !<-intentionalCh {
+			t.Fatal("StopByRuntimeID exit reported as a crash, want intentional")
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for OnProcessExit callback")
@@ -2924,4 +2934,22 @@ func namedBinary(name string) string {
 		return name + ".exe"
 	}
 	return name
+}
+
+// TestStartIgnoresRuntimeWithoutProcessHandle verifies Start does not hand back
+// a runtime that has no process (e.g. waiting out a restart backoff): reusing it
+// would give the caller a runtime that cannot be leased.
+func TestStartIgnoresRuntimeWithoutProcessHandle(t *testing.T) {
+	supervisor := NewSupervisor(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	supervisor.runtimes["rt-backoff"] = Runtime{
+		ID: "rt-backoff", AgentID: "agent-x", AgentName: "Agent X",
+		Status: StatusStarting, CreatedAt: time.Now(),
+	}
+	supervisor.addRuntimeByAgentLocked("agent-x", "rt-backoff")
+
+	// The undetected agent makes the fall-through to a fresh launch fail fast.
+	rt, err := supervisor.Start(catalog.Agent{ID: "agent-x"})
+	if !errors.Is(err, ErrAgentNotDetected) {
+		t.Fatalf("Start() = %+v, %v; want ErrAgentNotDetected (no reuse of handle-less runtime)", rt, err)
+	}
 }

@@ -31,7 +31,7 @@ func TestFailedRuntimesPrunedAfterRetention(t *testing.T) {
 		}
 		supervisor.logs[id] = []LogEntry{{Timestamp: now, Stream: "stderr", Message: "boom"}}
 		supervisor.addRuntimeByAgentLocked("mock-acp", id)
-		supervisor.onExitCallbacks[id] = func(string) {}
+		supervisor.onExitCallbacks[id] = func(string, bool) {}
 	}
 	seed("rt-old-failed", StatusFailed, now.Add(-time.Hour), time.Time{})
 	seed("rt-fresh-failed", StatusFailed, now, time.Time{})
@@ -93,7 +93,7 @@ func TestShutdownClearsLogRings(t *testing.T) {
 		Status: StatusRunning, CreatedAt: time.Now().UTC(),
 	}
 	supervisor.logs["rt-1"] = []LogEntry{{Timestamp: time.Now().UTC(), Stream: "stdout", Message: "hi"}}
-	supervisor.onExitCallbacks["rt-1"] = func(string) {}
+	supervisor.onExitCallbacks["rt-1"] = func(string, bool) {}
 
 	if err := supervisor.Shutdown(context.Background()); err != nil {
 		t.Fatalf("Shutdown() error = %v", err)
@@ -204,7 +204,7 @@ func main() {
 	}
 }
 `
-		srcPath := filepath.Join(baseDir, "sleeper.go")
+	srcPath := filepath.Join(baseDir, "sleeper.go")
 	if err := os.WriteFile(srcPath, []byte(source), 0o644); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
 	}

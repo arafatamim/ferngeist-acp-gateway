@@ -59,9 +59,12 @@ func (rs *RuntimeSession) Create(ctx context.Context, runtimeID, deviceID, agent
 		RuntimeID:   runtimeID,
 		DeviceID:    deviceID,
 		AgentID:     agentID,
-		Status:      StatusActive,
+		Status:      StatusDisconnected,
 		Leaseholder: sessionID,
 		CreatedAt:   now,
+		// Born disconnected: the reaper reclaims a session whose client never
+		// attaches. AttachClient flips it to active.
+		DisconnectedSince: &now,
 	}
 	if err := rs.store.SaveSession(ctx, rec); err != nil {
 		return nil, "", err
@@ -120,20 +123,21 @@ func (rs *RuntimeSession) Create(ctx context.Context, runtimeID, deviceID, agent
 	go pump.StdoutDrainLoop(pumpCtx)
 
 	sess := &Session{
-		ID:          sessionID,
-		RuntimeID:   runtimeID,
-		DeviceID:    deviceID,
-		AgentID:     agentID,
-		Status:      StatusActive,
-		Leaseholder: sessionID,
-		CreatedAt:   now,
-		pump:        pump,
-		cancelPump:  pumpCancel,
+		ID:             sessionID,
+		RuntimeID:      runtimeID,
+		DeviceID:       deviceID,
+		AgentID:        agentID,
+		Status:         StatusDisconnected,
+		Leaseholder:    sessionID,
+		CreatedAt:      now,
+		DisconnectedAt: &now,
+		pump:           pump,
+		cancelPump:     pumpCancel,
 	}
 	rs.sessions[sessionID] = sess
 
-	rs.pm.OnProcessExit(runtimeID, func(rid string) {
-		rs.handleProcessExit(sessionID, runtimeID, deviceID, agentID)
+	rs.pm.OnProcessExit(runtimeID, func(rid string, intentional bool) {
+		rs.handleProcessExit(sessionID, runtimeID, deviceID, agentID, intentional)
 	})
 
 	attachToken, err := rs.tokenSvc.Mint(sessionID, deviceID, 5*time.Minute)
@@ -165,11 +169,13 @@ func (rs *RuntimeSession) sendPushNotification(deviceID, acpSessionID, title, bo
 }
 
 // handleProcessExit is called by the OnProcessExit callback when a runtime
-// process terminates. It detects genuine crashes (exits not preceded by a
-// Close that set StatusClosing), reclaims the crashed session (cancels the
-// pump, releases the runtime lease, deletes the registry and store records),
-// and fires a push notification if the session belongs to a device.
-func (rs *RuntimeSession) handleProcessExit(sessionID, runtimeID, deviceID, agentID string) {
+// process terminates. It detects exits not preceded by a Close that set
+// StatusClosing, reclaims the session (cancels the pump, releases the runtime
+// lease, deletes the registry and store records), and fires a crash push
+// notification if the session belongs to a device. An intentional exit (the
+// supervisor reports a stop or restart, e.g. from the agent-stop API) is
+// reclaimed the same way but sends no push.
+func (rs *RuntimeSession) handleProcessExit(sessionID, runtimeID, deviceID, agentID string, intentional bool) {
 	rs.mu.Lock()
 	var deviceIDForPush string
 	var acpSessionIDForPush string
@@ -209,10 +215,10 @@ func (rs *RuntimeSession) handleProcessExit(sessionID, runtimeID, deviceID, agen
 	}
 	rs.mu.Unlock()
 
-	// Notify on a genuine crash regardless of client attachment; the client
+	// Notify on a genuine crash (not an intentional stop) regardless of client attachment; the client
 	// decides whether to surface it based on its own foreground/background
 	// state. Dispatched asynchronously inside sendPushNotification.
-	if crashed && deviceIDForPush != "" {
+	if crashed && !intentional && deviceIDForPush != "" {
 		rs.sendPushNotification(deviceIDForPush, acpSessionIDForPush, "Agent Crashed", "Your agent has stopped unexpectedly.", push.CategoryAgentCrash)
 	}
 }
@@ -450,13 +456,18 @@ func (rs *RuntimeSession) DetachClient(sessionID string, gen int64) error {
 // Close terminates a session. The order of operations ensures clean teardown:
 //  1. Mark closing (persisted) — prevents reconnection during shutdown
 //  2. Stop pump — the stdout drain loop is cancelled
-//  3. Send ACP session/close — gives agent a chance to cancel in-flight work
-//  4. Delete from in-memory registry — before stopping the runtime, so the
-//     OnProcessExit callback (which fires during StopByRuntimeID) won't find the
-//     session and will no-op safely instead of racing with teardown.
+//  3. Delete from in-memory registry and release rs.mu — before any I/O to the
+//     agent, so the OnProcessExit callback (which fires during StopByRuntimeID)
+//     won't find the session and will no-op safely instead of racing with
+//     teardown, and so a stuck agent can never block other sessions
+//  4. Send ACP session/close — gives agent a chance to cancel in-flight work.
+//     The pipe write has no deadline (an agent that stopped reading stdin blocks
+//     it), so it runs in a goroutine and is waited on for at most
+//     closeWriteTimeout; stopping the runtime next unblocks it with EPIPE.
 //  5. Stop runtime — 2-second graceful timeout, then force kill. The session is
 //     already out of the map, so any concurrent lookup fails cleanly.
-//  6. Release lease — clears the leaseholder on the process handle
+//  6. Release lease — clears the leaseholder on the process handle. Stopping the
+//     runtime normally drops the handle first, so ErrRuntimeNotFound is expected.
 //  7. Delete from storage — cascades to outbound/inbound rows
 func (rs *RuntimeSession) Close(ctx context.Context, sessionID, deviceID string) error {
 	rs.mu.Lock()
@@ -492,7 +503,12 @@ func (rs *RuntimeSession) Close(ctx context.Context, sessionID, deviceID string)
 		sess.cancelPump()
 	}
 
-	// Step 3: If the agent supports session/close, send one last ACP request
+	// Step 3: Drop the session from the registry and release rs.mu before the
+	// agent I/O below; rs.mu is shared by every session.
+	delete(rs.sessions, sessionID)
+	rs.mu.Unlock()
+
+	// Step 4: If the agent supports session/close, send one last ACP request
 	// so it can cancel in-progress work before the process is killed.
 	// Uses acp.CloseSessionRequest for typed param construction. Routed through
 	// the pump (WriteSessionClose) so the frame log records the teardown
@@ -522,18 +538,24 @@ func (rs *RuntimeSession) Close(ctx context.Context, sessionID, deviceID string)
 			ID:      "gw-close-" + sessionID,
 			Params:  acp.CloseSessionRequest{SessionId: acp.SessionId(acpID)},
 		})
-		_ = sess.pump.WriteSessionClose(closeMsg)
+		written := make(chan struct{})
+		go func() {
+			defer close(written)
+			_ = sess.pump.WriteSessionClose(closeMsg)
+		}()
+		select {
+		case <-written:
+		case <-time.After(closeWriteTimeout):
+			rs.logger.Warn("agent did not accept session/close in time; stopping runtime", "runtime_id", sess.RuntimeID)
+		}
 	}
-
-	delete(rs.sessions, sessionID)
-	rs.mu.Unlock()
 
 	if _, err := rs.pm.StopByRuntimeID(sess.RuntimeID); err != nil {
 		rs.logger.Error("failed to stop runtime during close", "error", err, "runtime_id", sess.RuntimeID)
 	}
 
 	rs.mu.Lock()
-	if err := rs.pm.ReleaseLease(sess.RuntimeID, sess.Leaseholder); err != nil {
+	if err := rs.pm.ReleaseLease(sess.RuntimeID, sess.Leaseholder); err != nil && !errors.Is(err, runtime.ErrRuntimeNotFound) {
 		rs.logger.Error("failed to release lease during close", "error", err, "runtime_id", sess.RuntimeID)
 	}
 	if err := rs.store.DeleteSession(ctx, sessionID); err != nil {

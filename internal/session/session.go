@@ -36,6 +36,10 @@ const (
 	defaultMaxDisconnected  = 15 * time.Minute
 	defaultReaperInterval   = 30 * time.Second
 	defaultProgressInterval = 15 * time.Second
+
+	// closeWriteTimeout bounds how long Close waits for the agent to accept the
+	// session/close frame before stopping the runtime anyway.
+	closeWriteTimeout = 2 * time.Second
 )
 
 var (
@@ -56,13 +60,14 @@ var (
 //
 //   - AcquireLease: grants exclusive pipe access for a new session
 //   - ReleaseLease: clears the lease on session close or failure
-//   - OnProcessExit: registers a callback for agent death notification
+//   - OnProcessExit: registers a callback for agent exit notification, flagging
+//     intentional exits (stop/restart) apart from crashes
 //   - StopByRuntimeID: terminates the backing runtime process
 //   - AppendLog: mirrors ACP traffic into the runtime log buffer
 type ProcessManager interface {
 	AcquireLease(runtimeID, leaseholder string) (runtime.Pipes, error)
 	ReleaseLease(runtimeID, leaseholder string) error
-	OnProcessExit(runtimeID string, callback func(string))
+	OnProcessExit(runtimeID string, callback func(runtimeID string, intentional bool))
 	StopByRuntimeID(runtimeID string) (runtime.Runtime, error)
 	AppendLog(runtimeID, stream, message string)
 }

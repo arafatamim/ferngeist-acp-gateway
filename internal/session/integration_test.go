@@ -56,8 +56,8 @@ func TestIntegration_SessionLifecycle(t *testing.T) {
 	if sess == nil || sess.ID == "" {
 		t.Fatal("expected non-nil session with ID")
 	}
-	if sess.Status != StatusActive {
-		t.Errorf("expected status active, got %s", sess.Status)
+	if sess.Status != StatusDisconnected {
+		t.Errorf("expected status disconnected, got %s", sess.Status)
 	}
 	if attachToken == "" {
 		t.Error("expected non-empty attach token")
@@ -67,8 +67,8 @@ func TestIntegration_SessionLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSession: %v", err)
 	}
-	if rec.Status != StatusActive {
-		t.Errorf("expected store status active, got %s", rec.Status)
+	if rec.Status != StatusDisconnected {
+		t.Errorf("expected store status disconnected, got %s", rec.Status)
 	}
 
 	_, gen, err := rs.AttachClient(ctx, sess.ID, attachToken)

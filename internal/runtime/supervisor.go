@@ -252,7 +252,7 @@ type Supervisor struct {
 	installer *acquire.Installer
 
 	// onExitCallbacks maps runtime ID to a callback invoked when the process exits.
-	onExitCallbacks map[string]func(string)
+	onExitCallbacks map[string]func(string, bool)
 
 	// shutdown is set when Shutdown drains the supervisor; no new processes
 	// may launch afterwards (notably pending restart backoffs).
@@ -331,7 +331,7 @@ func NewSupervisorWithBaseDirAndInstaller(logger *slog.Logger, baseDir string, s
 		baseDir:         baseDir,
 		store:           store,
 		installer:       installer,
-		onExitCallbacks: make(map[string]func(string)),
+		onExitCallbacks: make(map[string]func(string, bool)),
 		shutdownCh:      make(chan struct{}),
 	}
 }
@@ -367,7 +367,9 @@ func (s *Supervisor) Start(agent catalog.Agent) (Runtime, error) {
 		// killing them would orphan a resilient session.
 		handle := s.processes[runtimeID]
 		switch {
-		case handle == nil || handle.leaseholder == "":
+		case handle == nil:
+			// No process (e.g. restart backoff, status starting): nothing to reuse.
+		case handle.leaseholder == "" && existing.Status == StatusRunning:
 			if reuse == nil {
 				e := existing
 				reuse = &e
@@ -1106,6 +1108,9 @@ func (s *Supervisor) handleProcessExit(runtimeID, agentID string, handle *proces
 	// Save and remove any exit callback for notification outside the lock.
 	exitCallback := s.onExitCallbacks[runtimeID]
 	delete(s.onExitCallbacks, runtimeID)
+	// handle.stopping is read here, under s.mu, which guards its writers; the
+	// callback uses it to tell an intentional stop or restart from a crash.
+	intentional := handle.stopping
 
 	// Check if we should attempt automatic restart:
 	// 1. Process exited with error
@@ -1131,7 +1136,7 @@ func (s *Supervisor) handleProcessExit(runtimeID, agentID string, handle *proces
 		s.runtimes[runtimeID] = runtime
 		s.mu.Unlock()
 		if exitCallback != nil {
-			exitCallback(runtimeID)
+			exitCallback(runtimeID, intentional)
 		}
 		s.persistRuntime(runtime)
 		s.logger.Error("agent process exited unexpectedly; restart scheduled",
@@ -1170,7 +1175,7 @@ func (s *Supervisor) handleProcessExit(runtimeID, agentID string, handle *proces
 		s.runtimes[runtimeID] = runtime
 		s.mu.Unlock()
 		if exitCallback != nil {
-			exitCallback(runtimeID)
+			exitCallback(runtimeID, intentional)
 		}
 		s.persistRuntime(runtime)
 		// Log the unexpected death at ERROR so it is visible in the daemon log
@@ -1206,7 +1211,7 @@ func (s *Supervisor) handleProcessExit(runtimeID, agentID string, handle *proces
 	s.runtimes[runtimeID] = runtime
 	s.mu.Unlock()
 	if exitCallback != nil {
-		exitCallback(runtimeID)
+		exitCallback(runtimeID, intentional)
 	}
 	s.persistRuntime(runtime)
 	s.persistCleanExit(runtimeID, runtime, s.recentLogs(runtimeID, 5), runtime.StoppedAt)

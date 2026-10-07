@@ -115,10 +115,10 @@ func (s *Supervisor) ReleaseLease(runtimeID, leaseholder string) error {
 
 // OnProcessExit registers a callback to be invoked when the runtime process exits.
 // This allows the session module to mark sessions as failed when their backing
-// agent dies. The callback receives the runtime ID.
-func (s *Supervisor) OnProcessExit(runtimeID string, callback func(string)) {
+// agent dies. The callback receives the runtime ID and whether the exit was
+// intentional (a stop or restart) rather than a crash.
+func (s *Supervisor) OnProcessExit(runtimeID string, callback func(string, bool)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.onExitCallbacks[runtimeID] = callback
 }
-
