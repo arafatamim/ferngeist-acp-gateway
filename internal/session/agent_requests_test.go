@@ -200,9 +200,9 @@ func TestPushSessionIDFollowsTheFrame(t *testing.T) {
 	events := pushCollector(pump)
 	pump.handleStdoutLine(`{"jsonrpc":"2.0","id":"n1","result":{"sessionId":"ses_first"}}`)
 
+	prompt := pump.reqIDs.outbound(1, []byte(`{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":{"sessionId":"ses_second","prompt":[]}}`))
 	pump.handleStdoutLine(`{"jsonrpc":"2.0","id":5,"method":"session/request_permission","params":{"sessionId":"ses_second","options":[]}}`)
 	pump.handleStdoutLine(`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"ses_second","update":{"sessionUpdate":"tool_call","toolCallId":"c","status":"in_progress","title":"Editing"}}}`)
-	prompt := pump.reqIDs.outbound(1, []byte(`{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":{"sessionId":"ses_second","prompt":[]}}`))
 	pump.handleStdoutLine(fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"result":{"stopReason":"end_turn","usage":{"totalTokens":3}}}`, agentIDOf(t, prompt)))
 
 	if len(*events) != 3 {
@@ -274,5 +274,55 @@ func TestElicitationPushesAndNamesTheClientRequest(t *testing.T) {
 	}
 	if len(*events) != 2 || (*events)[1].Category != push.CategoryPermissionRequest || (*events)[1].AcpSessionID != "ses_a" {
 		t.Fatalf("elicitation pushes = %+v", *events)
+	}
+}
+
+// Progress pushes only fire while a prompt runs (not for the finished tool calls
+// session/load replays), and each chat on a shared agent throttles on its own.
+func TestProgressPushOnlyDuringPromptAndPerSession(t *testing.T) {
+	pump := newPump()
+	pump.ProgressInterval = time.Hour
+	events := pushCollector(pump)
+	update := func(session, call, status string) {
+		pump.handleStdoutLine(fmt.Sprintf(`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":%q,"update":{"sessionUpdate":"tool_call","toolCallId":%q,"status":%q,"title":"Read %s"}}}`, session, call, status, call))
+	}
+
+	load := pump.reqIDs.outbound(1, []byte(`{"jsonrpc":"2.0","id":1,"method":"session/load","params":{"sessionId":"a"}}`))
+	update("a", "old1", "completed")
+	update("a", "old2", "completed")
+	pump.handleStdoutLine(fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"result":null}`, agentIDOf(t, load)))
+	if len(*events) != 0 {
+		t.Fatalf("load replay pushed: %+v", *events)
+	}
+
+	pump.reqIDs.outbound(1, []byte(`{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"sessionId":"a","prompt":[]}}`))
+	pump.reqIDs.outbound(1, []byte(`{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"b","prompt":[]}}`))
+	update("a", "c1", "in_progress")
+	update("b", "c2", "in_progress") // within a's interval, but b's own throttle
+	update("a", "c3", "in_progress") // throttled
+	if len(*events) != 2 || (*events)[0].AcpSessionID != "a" || (*events)[1].AcpSessionID != "b" {
+		t.Fatalf("progress pushes = %+v", *events)
+	}
+}
+
+// An empty "success" rewritten into an error pushes exactly one titled error,
+// and a cancelled turn pushes nothing.
+func TestSwallowedFailurePushesOnceAndCancelIsSilent(t *testing.T) {
+	pump := newPump()
+	events := pushCollector(pump)
+	prompt := func(stopReason string) {
+		req := []byte(`{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":{"sessionId":"s","prompt":[]}}`)
+		pump.markTurnStart(req)
+		id := agentIDOf(t, pump.reqIDs.outbound(1, req))
+		pump.handleStdoutLine(fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"result":{"stopReason":%q}}`, id, stopReason))
+	}
+
+	prompt("end_turn")
+	if len(*events) != 1 || (*events)[0].Category != push.CategoryError || (*events)[0].Title == "" {
+		t.Fatalf("swallowed failure pushes = %+v", *events)
+	}
+	prompt("cancelled")
+	if len(*events) != 1 {
+		t.Fatalf("cancelled turn pushed: %+v", *events)
 	}
 }

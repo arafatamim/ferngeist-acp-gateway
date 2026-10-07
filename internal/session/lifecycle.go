@@ -158,13 +158,16 @@ func (rs *RuntimeSession) sendPushNotification(deviceID, acpSessionID, title, bo
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		_ = rs.cfg.PushSvc.Notify(ctx, deviceID, push.Notification{
+		err := rs.cfg.PushSvc.Notify(ctx, deviceID, push.Notification{
 			Title:     title,
 			Body:      body,
 			Category:  category,
 			ServerID:  rs.cfg.GatewayID,
 			SessionID: acpSessionID,
 		})
+		if err != nil {
+			rs.logger.Warn("push notification failed", "device_id", deviceID, "category", category, "error", err)
+		}
 	}()
 }
 

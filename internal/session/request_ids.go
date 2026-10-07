@@ -194,6 +194,18 @@ func (r *requestIDs) dropSessionAgentRequestsLocked(sessionID string) {
 	r.agentReqs = kept
 }
 
+// promptRunning reports whether a session/prompt for sessionID awaits its reply.
+func (r *requestIDs) promptRunning(sessionID string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, req := range r.pending {
+		if req.promptSession == sessionID {
+			return true
+		}
+	}
+	return false
+}
+
 func (r *requestIDs) hasAgentRequests() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()

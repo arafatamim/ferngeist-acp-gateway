@@ -228,11 +228,11 @@ type StdioPump struct {
 	// 0 means push every new/different tool with no throttle.
 	ProgressInterval time.Duration
 
-	// Throttle/dedupe state for live progress pushes. Guarded by progressMu.
-	progressMu           sync.Mutex
-	lastProgressPush     time.Time
-	lastProgressToolCall string
-	lastProgressSummary  string
+	// Throttle/dedupe state for live progress pushes, per ACP session so one
+	// chat's progress never mutes another's on a shared agent. Guarded by
+	// progressMu. ponytail: entries are never evicted; one per chat the pump hosts.
+	progressMu sync.Mutex
+	progress   map[string]progressState
 
 	// Swallowed-failure detection. Some agents (e.g. Opencode) never send a
 	// JSON-RPC error for a failed LLM call — they return a success with
@@ -400,18 +400,23 @@ func (p *StdioPump) handleStdoutLine(line string) {
 	}
 	p.snoopInitializeProbe(probe, line, frameBytes)
 	p.snoopSessionIDProbe(probe)
+	replaced := false
 	if replacement, handled := p.markTurnActivityProbe(probe); handled {
 		line = replacement
+		replaced = true
 		// Replacement is a synthesized error frame; re-probe it cheaply so
-		// the push below classifies the frame actually forwarded.
+		// routing below sees the frame actually forwarded.
 		if rp, ok := parseFrameProbe([]byte(line)); ok {
 			probe = rp
 			probeOK = true
 		}
 	}
 
-	// Fire a push on notable events regardless of client attachment — the
-	p.checkAndNotifyProbe(probe, probeOK)
+	// Fire a push on notable events regardless of client attachment. A
+	// replaced frame already pushed its own, more specific error.
+	if !replaced {
+		p.checkAndNotifyProbe(probe, probeOK)
+	}
 
 	// Buffer conversation history so a reconnecting client can be re-hydrated
 	// even when the agent rejects a duplicate session/load as "already loaded".
@@ -501,7 +506,10 @@ func (p *StdioPump) checkAndNotifyProbe(probe frameProbe, ok bool) {
 	acpID := p.pushAcpSessionID(probe, origin)
 	switch {
 	case probe.Result != nil && probe.Result.StopReason != "":
-		p.onPushNotification(PushEvent{SessionID: p.sessionID, AcpSessionID: acpID, Category: push.CategoryTurnComplete, Title: "Turn Complete", Body: "Your agent has finished processing."})
+		// The user cancelled this turn themselves; telling them it ended is noise.
+		if probe.Result.StopReason != acp.StopReasonCancelled {
+			p.onPushNotification(PushEvent{SessionID: p.sessionID, AcpSessionID: acpID, Category: push.CategoryTurnComplete, Title: "Turn Complete", Body: "Your agent has finished processing."})
+		}
 	case probe.Method == "session/request_permission":
 		p.onPushNotification(PushEvent{SessionID: p.sessionID, AcpSessionID: acpID, Category: push.CategoryPermissionRequest, Title: "Permission Required", Body: "Your agent needs approval to run a tool."})
 	case probe.Method == elicitationMethod:
@@ -515,7 +523,9 @@ func (p *StdioPump) checkAndNotifyProbe(probe frameProbe, ok bool) {
 			p.onPushNotification(PushEvent{SessionID: p.sessionID, AcpSessionID: acpID, Category: push.CategoryError, Title: "Agent Error", Body: "Your agent encountered an unexpected error."})
 		}
 	default:
-		if ev := progressEventFromProbe(probe); ev != nil {
+		// Only while a prompt runs: session/load replays finished tool calls as
+		// the same updates, which would buzz the phone once per past tool call.
+		if ev := progressEventFromProbe(probe); ev != nil && p.reqIDs.promptRunning(acpID) {
 			ev.acpSessionID = acpID
 			p.maybeNotifyProgress(ev)
 		}
@@ -536,6 +546,12 @@ func (p *StdioPump) pushAcpSessionID(probe frameProbe, origin pendingRequest) st
 	return p.AcpSessionID()
 }
 
+type progressState struct {
+	at       time.Time
+	toolCall string
+	summary  string
+}
+
 // maybeNotifyProgress fires a progress push, throttled by ProgressInterval and
 // deduplicated against the previous tool call + summary. Terminal events
 // (completed/failed) always push immediately so the user sees the boundary.
@@ -546,19 +562,21 @@ func (p *StdioPump) maybeNotifyProgress(ev *progressEvent) {
 		ev.acpSessionID = p.AcpSessionID()
 	}
 
+	last := p.progress[ev.acpSessionID]
 	if !ev.terminal {
 		// Dedupe: same tool call, same summary → skip.
-		if ev.toolCallID == p.lastProgressToolCall && ev.summary == p.lastProgressSummary {
+		if ev.toolCallID == last.toolCall && ev.summary == last.summary {
 			return
 		}
 		// Throttle: respect the minimum interval for non-terminal updates.
-		if p.ProgressInterval > 0 && time.Since(p.lastProgressPush) < p.ProgressInterval {
+		if p.ProgressInterval > 0 && time.Since(last.at) < p.ProgressInterval {
 			return
 		}
 	}
-	p.lastProgressPush = time.Now()
-	p.lastProgressToolCall = ev.toolCallID
-	p.lastProgressSummary = ev.summary
+	if p.progress == nil {
+		p.progress = make(map[string]progressState)
+	}
+	p.progress[ev.acpSessionID] = progressState{at: time.Now(), toolCall: ev.toolCallID, summary: ev.summary}
 	p.onPushNotification(PushEvent{
 		SessionID:    p.sessionID,
 		AcpSessionID: ev.acpSessionID,
@@ -784,6 +802,7 @@ func (p *StdioPump) markTurnActivityProbe(probe frameProbe) (out string, handled
 			SessionID:    p.sessionID,
 			AcpSessionID: p.pushAcpSessionID(probe, origin),
 			Category:     push.CategoryError,
+			Title:        "Agent Error",
 			Body:         "The agent finished without producing anything. This usually means the model call failed (rate limit or invalid setting). Check the gateway logs for details.",
 		})
 	}
