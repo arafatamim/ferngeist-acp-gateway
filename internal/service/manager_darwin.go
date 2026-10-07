@@ -20,4 +20,5 @@ func newOSManager() Manager {
 // OS) act on the current user's per-user LaunchAgent.
 func init() {
 	darwinServiceTarget = func() string { return "gui/" + darwinUID + "/" + darwinLabel }
+	darwinDomainTarget = func() string { return "gui/" + darwinUID }
 }

@@ -8,18 +8,19 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
 const linuxUnitTemplate = `[Unit]
 Description=Ferngeist daemon
-After=network-online.target
 
 [Service]
 Type=simple
 WorkingDirectory=%s
 EnvironmentFile=%s
-ExecStart=%s daemon run
+EnvironmentFile=-%s
+ExecStart="%s" daemon run
 Restart=on-failure
 RestartSec=2
 
@@ -75,38 +76,62 @@ func (m *linuxManager) Install(options InstallOptions) error {
 	// or stopped service makes stop a no-op. systemd reports a unit it has
 	// never loaded as "Unit ferngeist-gateway.service not loaded.", which is
 	// exactly the fresh-install case and must not abort the install. The
-	// daemon is brought back by the enable/restart below.
+	// daemon is brought back by the enable --now below.
 	if err := m.systemctl("stop", linuxUnitName); err != nil {
 		if !isSystemctlUnitMissing(err) {
 			return err
 		}
 	}
 
-	if err := copyCurrentBinary(paths.binaryPath); err != nil {
-		return err
-	}
-	if err := writeLinuxEnvFile(paths, options); err != nil {
-		return err
-	}
-	if err := writeLinuxUnitFile(paths); err != nil {
+	if err := installLinuxFiles(paths, options); err != nil {
+		// The stop above left the old service down; bring it back (best-effort).
+		_ = m.systemctl("start", linuxUnitName)
 		return err
 	}
 
 	if err := m.systemctl("daemon-reload"); err != nil {
 		return err
 	}
+	// The service is stopped here, so `enable --now` starts the new binary;
+	// a further restart would only kill the daemon while it initializes.
 	if err := m.systemctl("enable", "--now", linuxUnitName); err != nil {
 		return err
 	}
-	// A reinstall must swap the running binary: `enable --now` starts a
-	// stopped service but does NOT restart one already running the previous
-	// build, so the old daemon would keep serving the old version. `restart`
-	// is a no-op-start on a fresh install and a real restart on an upgrade.
-	if err := m.systemctl("restart", linuxUnitName); err != nil {
-		return err
-	}
+	ensureLinger()
 
 	return nil
+}
+
+func installLinuxFiles(paths linuxPaths, options InstallOptions) error {
+	if err := installCurrentBinary(paths.binaryPath); err != nil {
+		return err
+	}
+	if err := writeLinuxEnvFile(paths, options); err != nil {
+		return err
+	}
+	if err := saveInstallOptions(paths.configDir, options); err != nil {
+		return err
+	}
+	return writeLinuxUnitFile(paths)
+}
+
+// ensureLinger makes the user manager outlive logins so the gateway runs at
+// boot and after logout. Best-effort: enabling linger can need polkit rights,
+// and the CLI prints a hint when it is still off.
+func ensureLinger() {
+	out, err := exec.Command("loginctl", "show-user", strconv.Itoa(os.Getuid()), "--property=Linger", "--value").Output()
+	if err != nil || strings.TrimSpace(string(out)) != "no" {
+		return
+	}
+	_ = exec.Command("loginctl", "enable-linger").Run()
+}
+
+func (m *linuxManager) SavedInstallOptions() (InstallOptions, bool) {
+	paths, err := resolveLinuxPaths()
+	if err != nil {
+		return InstallOptions{}, false
+	}
+	return loadInstallOptions(paths.configDir)
 }
 
 func (m *linuxManager) Uninstall(purge bool) error {
@@ -271,6 +296,7 @@ type linuxPaths struct {
 	dbPath        string
 	binaryPath    string
 	envPath       string
+	overridePath  string
 	unitPath      string
 }
 
@@ -292,33 +318,9 @@ func resolveLinuxPaths() (linuxPaths, error) {
 		dbPath:        filepath.Join(rootDir, "ferngeist-gateway.db"),
 		binaryPath:    filepath.Join(rootDir, "bin", "ferngeist-gateway"),
 		envPath:       filepath.Join(rootDir, "config", "daemon.env"),
+		overridePath:  filepath.Join(rootDir, "config", "daemon.override.env"),
 		unitPath:      unitPath,
 	}, nil
-}
-
-func copyCurrentBinary(targetPath string) error {
-	currentBinaryPath, err := copyCurrentBinarySource()
-	if err != nil {
-		return fmt.Errorf("resolve current binary: %w", err)
-	}
-
-	// Installing from the service directory itself: the running image cannot
-	// be overwritten on Linux while executing (ETXTBSY) and it is already the
-	// correct binary. Skip the self-copy so `install` is idempotent when
-	// invoked via the service-bin path.
-	if filepath.Clean(currentBinaryPath) == filepath.Clean(targetPath) {
-		return nil
-	}
-
-	contents, err := os.ReadFile(currentBinaryPath)
-	if err != nil {
-		return fmt.Errorf("read current binary: %w", err)
-	}
-	if err := os.WriteFile(targetPath, contents, 0o755); err != nil {
-		return fmt.Errorf("write service binary: %w", err)
-	}
-
-	return nil
 }
 
 func writeLinuxEnvFile(paths linuxPaths, options InstallOptions) error {
@@ -360,7 +362,8 @@ func writeLinuxUnitFile(paths linuxPaths) error {
 		linuxUnitTemplate,
 		escapeSystemdValue(paths.rootDir),
 		escapeSystemdValue(paths.envPath),
-		escapeSystemdValue(paths.binaryPath),
+		escapeSystemdValue(paths.overridePath),
+		escapeSystemdExecArg(paths.binaryPath),
 	)
 
 	if err := os.WriteFile(paths.unitPath, []byte(unitBody), 0o644); err != nil {
@@ -372,4 +375,12 @@ func writeLinuxUnitFile(paths linuxPaths) error {
 
 func escapeSystemdValue(value string) string {
 	return strings.ReplaceAll(value, "%", "%%")
+}
+
+// escapeSystemdExecArg escapes a value for use inside a double-quoted
+// ExecStart argument.
+func escapeSystemdExecArg(value string) string {
+	value = strings.ReplaceAll(value, `\`, `\\`)
+	value = strings.ReplaceAll(value, `"`, `\"`)
+	return escapeSystemdValue(value)
 }

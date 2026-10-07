@@ -1,9 +1,13 @@
 package service
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -62,6 +66,9 @@ type InstallOptions struct {
 
 type Manager interface {
 	Install(options InstallOptions) error
+	// SavedInstallOptions returns the options the current install was made
+	// with, if any were recorded.
+	SavedInstallOptions() (InstallOptions, bool)
 	Uninstall(purge bool) error
 	Start() error
 	Stop() error
@@ -79,6 +86,10 @@ type unsupportedManager struct {
 
 func (m unsupportedManager) Install(_ InstallOptions) error {
 	return m.err
+}
+
+func (m unsupportedManager) SavedInstallOptions() (InstallOptions, bool) {
+	return InstallOptions{}, false
 }
 
 func (m unsupportedManager) Uninstall(_ bool) error {
@@ -148,4 +159,106 @@ func isLoopbackHost(host string) bool {
 	}
 	ip := net.ParseIP(trimmed)
 	return ip != nil && ip.IsLoopback()
+}
+
+// installCopySource is the binary copied into the service bin dir on Install.
+// Defaults to the running executable with symlinks resolved (darwin's
+// os.Executable reports the symlink a process was started through, which
+// would defeat the self-copy check). Tests override it.
+var installCopySource = func() (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+		return resolved, nil
+	}
+	return exe, nil
+}
+
+// sameFile reports whether a and b name the same file on disk.
+func sameFile(a, b string) bool {
+	ai, aerr := os.Stat(a)
+	bi, berr := os.Stat(b)
+	return aerr == nil && berr == nil && os.SameFile(ai, bi)
+}
+
+// replaceFileAtomically copies src to dst through a temp file in dst's
+// directory and renames it into place, so dst gets a fresh inode. Never
+// truncate a binary in place: Linux refuses (ETXTBSY) while it executes,
+// and macOS kills processes whose signed image changes under them.
+// On Windows a running dst cannot be replaced; callers stop it first.
+func replaceFileAtomically(src, dst string, perm os.FileMode) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	tmp, err := os.CreateTemp(filepath.Dir(dst), ".install-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	if _, err := io.Copy(tmp, in); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if err := os.Chmod(tmpName, perm); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if err := os.Rename(tmpName, dst); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
+	return nil
+}
+
+// installCurrentBinary copies the install source into targetPath unless it
+// already is targetPath (installing from the service bin dir).
+func installCurrentBinary(targetPath string) error {
+	src, err := installCopySource()
+	if err != nil {
+		return fmt.Errorf("resolve current binary: %w", err)
+	}
+	if sameFile(src, targetPath) {
+		return nil
+	}
+	if err := replaceFileAtomically(src, targetPath, 0o755); err != nil {
+		return fmt.Errorf("write service binary: %w", err)
+	}
+	return nil
+}
+
+// installOptionsFile is where Install records the options it was given, so
+// `daemon install --keep-settings` (used by package upgrades) can reapply
+// them instead of resetting the service to package defaults.
+const installOptionsFile = "install-options.json"
+
+func saveInstallOptions(configDir string, options InstallOptions) error {
+	data, err := json.MarshalIndent(NormalizeInstallOptions(options), "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(configDir, installOptionsFile), data, 0o600); err != nil {
+		return fmt.Errorf("record install options: %w", err)
+	}
+	return nil
+}
+
+func loadInstallOptions(configDir string) (InstallOptions, bool) {
+	data, err := os.ReadFile(filepath.Join(configDir, installOptionsFile))
+	if err != nil {
+		return InstallOptions{}, false
+	}
+	var options InstallOptions
+	if json.Unmarshal(data, &options) != nil {
+		return InstallOptions{}, false
+	}
+	return options, true
 }

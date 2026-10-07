@@ -5,6 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
+	"runtime"
+	"strconv"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -13,11 +17,39 @@ import (
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/service"
 )
 
-func runDaemonInstall(options service.InstallOptions) error {
+// lingerEnabled reports whether the Linux user manager outlives logins. Tests
+// replace it so they never call a real loginctl.
+var lingerEnabled = func() bool {
+	out, err := exec.Command("loginctl", "show-user", strconv.Itoa(os.Getuid()), "--property=Linger", "--value").Output()
+	return err != nil || strings.TrimSpace(string(out)) != "no"
+}
+
+// permissionDeniedHint tells the operator how to retry; per-user services must
+// not be installed with sudo on Linux/macOS (it targets root's account).
+func permissionDeniedHint(goos string) string {
+	if goos == "windows" {
+		return "Hint: rerun from an elevated terminal"
+	}
+	return "Hint: do not use sudo; run this as your own user in a logged-in session (the service is installed per user)"
+}
+
+// resolveInstallOptions applies --keep-settings: previously saved options win
+// over the flags, which then only matter for a first install.
+func resolveInstallOptions(manager service.Manager, flags service.InstallOptions, keepSettings bool) service.InstallOptions {
+	if keepSettings {
+		if saved, ok := manager.SavedInstallOptions(); ok {
+			return saved
+		}
+	}
+	return flags
+}
+
+func runDaemonInstall(flags service.InstallOptions, keepSettings bool) error {
 	manager := service.NewManager()
+	options := resolveInstallOptions(manager, flags, keepSettings)
 	if err := manager.Install(options); err != nil {
 		if errors.Is(err, service.ErrServicePermissionDenied) {
-			return fmt.Errorf("install daemon service: %w\nHint: rerun with elevated privileges, for example: sudo ferngeist-gateway daemon install", err)
+			return fmt.Errorf("install daemon service: %w\n%s", err, permissionDeniedHint(runtime.GOOS))
 		}
 		if errors.Is(err, service.ErrInvalidInstallOptions) {
 			return fmt.Errorf("install daemon service: %w\nHint: use --host, --port, and optional --public-url", err)
@@ -25,6 +57,9 @@ func runDaemonInstall(options service.InstallOptions) error {
 		return fmt.Errorf("install daemon service: %w", err)
 	}
 	fmt.Println("Daemon service installed and started.")
+	if runtime.GOOS == "linux" && !lingerEnabled() {
+		fmt.Println("Run `sudo loginctl enable-linger $USER` so the gateway keeps running after logout/at boot.")
+	}
 	if options.TailscaleMode != "off" && options.TailscaleMode != "" {
 		printRemoteSetupAfterInstall(context.Background())
 	}

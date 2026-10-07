@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/adminclient"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/service"
 )
 
 func TestWaitForRemoteSetup_returns_login_link_when_auth_pending(t *testing.T) {
@@ -71,5 +73,39 @@ func TestWaitForRemoteSetup_times_out_with_last_status(t *testing.T) {
 	_, err := waitForRemoteSetup(context.Background(), fetch, 1500*time.Millisecond)
 	if err == nil {
 		t.Fatal("waitForRemoteSetup returned nil error, want budget expiry")
+	}
+}
+
+type savedOptionsManager struct {
+	service.Manager
+	saved service.InstallOptions
+	ok    bool
+}
+
+func (m savedOptionsManager) SavedInstallOptions() (service.InstallOptions, bool) {
+	return m.saved, m.ok
+}
+
+func TestResolveInstallOptionsKeepSettings(t *testing.T) {
+	flags := service.InstallOptions{Host: "0.0.0.0", Port: 5788}
+	saved := service.InstallOptions{Host: "127.0.0.1", Port: 9000, TailscaleMode: "auto"}
+
+	if got := resolveInstallOptions(savedOptionsManager{saved: saved, ok: true}, flags, true); got != saved {
+		t.Fatalf("keepSettings with saved options = %+v, want %+v", got, saved)
+	}
+	if got := resolveInstallOptions(savedOptionsManager{saved: saved, ok: true}, flags, false); got != flags {
+		t.Fatalf("without keepSettings = %+v, want flags %+v", got, flags)
+	}
+	if got := resolveInstallOptions(savedOptionsManager{}, flags, true); got != flags {
+		t.Fatalf("keepSettings without saved options = %+v, want flags %+v", got, flags)
+	}
+}
+
+func TestPermissionDeniedHintIsPlatformAppropriate(t *testing.T) {
+	if h := permissionDeniedHint("windows"); !strings.Contains(h, "elevated") {
+		t.Fatalf("windows hint = %q", h)
+	}
+	if h := permissionDeniedHint("linux"); !strings.Contains(h, "do not use sudo") {
+		t.Fatalf("linux hint = %q", h)
 	}
 }

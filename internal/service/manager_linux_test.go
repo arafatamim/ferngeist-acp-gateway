@@ -5,6 +5,7 @@ package service
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -18,7 +19,7 @@ func TestLinuxManagerType(t *testing.T) {
 	}
 }
 
-// seedServiceBinarySource makes copyCurrentBinary's source a readable
+// seedServiceBinarySource makes installCurrentBinary's source a readable
 // executable that is not the install target, the way a `daemon install` run
 // from a user's downloads directory would be.
 func seedServiceBinarySource(t *testing.T) {
@@ -28,16 +29,15 @@ func seedServiceBinarySource(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	prev := copyCurrentBinarySource
-	copyCurrentBinarySource = func() (string, error) { return self, nil }
-	t.Cleanup(func() { copyCurrentBinarySource = prev })
+	prev := installCopySource
+	installCopySource = func() (string, error) { return self, nil }
+	t.Cleanup(func() { installCopySource = prev })
 }
 
 // TestLinuxInstallRestartsService verifies Install's lifecycle on reinstall:
 // stop the running daemon before swapping the binary (ETXTBSY on Linux), then
-// enable --now and restart so the new build takes over. `enable --now` alone
-// does NOT restart an already-running service, which would leave the old
-// daemon serving the previous version. The fake systemctl records the calls.
+// enable --now to start the new build. No trailing restart: it would kill the
+// freshly started daemon. The fake systemctl records the calls.
 func TestLinuxInstallRestartsService(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("linux only")
@@ -65,31 +65,102 @@ func TestLinuxInstallRestartsService(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var sawStop, enableNow, restart bool
-	for _, call := range systemctlCalls(t, logPath) {
+	stopAt, enableAt := -1, -1
+	for i, call := range systemctlCalls(t, logPath) {
 		fields := strings.Fields(call)
 		// Every invocation is `systemctl --user <subcommand> ...`.
 		if len(fields) >= 2 && fields[0] == "--user" {
 			switch fields[1] {
 			case "stop":
-				sawStop = true
+				stopAt = i
 			case "enable":
 				if len(fields) >= 3 && fields[2] == "--now" {
-					enableNow = true
+					enableAt = i
 				}
 			case "restart":
-				restart = true
+				t.Fatalf("systemctl calls = %v, want no restart after enable --now", systemctlCalls(t, logPath))
 			}
 		}
 	}
-	if !sawStop {
-		t.Fatalf("systemctl calls = %v, want stop before binary copy", systemctlCalls(t, logPath))
+	if stopAt < 0 || enableAt < 0 || stopAt > enableAt {
+		t.Fatalf("systemctl calls = %v, want stop before enable --now", systemctlCalls(t, logPath))
 	}
-	if !enableNow {
-		t.Fatalf("systemctl calls = %v, want enable --now", systemctlCalls(t, logPath))
+	saved, ok := m.SavedInstallOptions()
+	if !ok || saved.Port != defaultInstallPort {
+		t.Fatalf("SavedInstallOptions = %+v, %v; want recorded options", saved, ok)
 	}
-	if !restart {
-		t.Fatalf("systemctl calls = %v, want restart after enable", systemctlCalls(t, logPath))
+}
+
+// TestLinuxInstallRestartsOldServiceWhenFilesFail verifies a failed copy after
+// the stop does not leave the previous service down.
+func TestLinuxInstallRestartsOldServiceWhenFilesFail(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("linux only")
+	}
+	t.Setenv("HOME", t.TempDir())
+
+	logPath := newFakeSystemctl(t, nil)
+	prev := installCopySource
+	installCopySource = func() (string, error) { return "/nonexistent/ferngeist", nil }
+	defer func() { installCopySource = prev }()
+
+	if err := (&linuxManager{}).Install(InstallOptions{}); err == nil {
+		t.Fatal("Install = nil, want the copy failure")
+	}
+	calls := systemctlCalls(t, logPath)
+	if last := calls[len(calls)-1]; last != "--user start "+linuxUnitName {
+		t.Fatalf("systemctl calls = %v, want the old unit started again", calls)
+	}
+}
+
+// TestLinuxInstallEnablesLingerWhenOff verifies loginctl enable-linger runs
+// only when linger is reported off.
+func TestLinuxInstallEnablesLingerWhenOff(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("linux only")
+	}
+	t.Setenv("HOME", t.TempDir())
+	newFakeSystemctl(t, nil)
+	seedServiceBinarySource(t)
+	t.Setenv("LOGINCTL_LINGER", "no")
+
+	if err := (&linuxManager{}).Install(InstallOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	log, err := os.ReadFile(os.Getenv("LOGINCTL_LOG"))
+	if err != nil || !strings.Contains(string(log), "enable-linger") {
+		t.Fatalf("loginctl log = %q (%v), want enable-linger", log, err)
+	}
+}
+
+// TestLinuxUnitQuotesExecStart verifies a binary path with spaces survives in
+// ExecStart and the override env file follows the main one.
+func TestLinuxUnitQuotesExecStart(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("linux only")
+	}
+	t.Setenv("HOME", t.TempDir()+"/with space")
+	paths, err := resolveLinuxPaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(paths.unitPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeLinuxUnitFile(paths); err != nil {
+		t.Fatal(err)
+	}
+	unit, _ := os.ReadFile(paths.unitPath)
+	for _, want := range []string{
+		`ExecStart="` + paths.binaryPath + `" daemon run`,
+		"EnvironmentFile=" + paths.envPath + "\nEnvironmentFile=-" + paths.overridePath,
+	} {
+		if !strings.Contains(string(unit), want) {
+			t.Fatalf("unit missing %q:\n%s", want, unit)
+		}
+	}
+	if got := escapeSystemdExecArg(`a"b\c%d`); got != `a\"b\\c%%d` {
+		t.Fatalf("escapeSystemdExecArg = %q", got)
 	}
 }
 
@@ -115,9 +186,9 @@ func TestLinuxInstallSkipsSelfCopy(t *testing.T) {
 	}
 
 	// Simulate the running daemon: the copy source IS the service binary.
-	prev := copyCurrentBinarySource
-	copyCurrentBinarySource = func() (string, error) { return paths.binaryPath, nil }
-	defer func() { copyCurrentBinarySource = prev }()
+	prev := installCopySource
+	installCopySource = func() (string, error) { return paths.binaryPath, nil }
+	defer func() { installCopySource = prev }()
 
 	m := &linuxManager{}
 	if err := m.Install(InstallOptions{}); err != nil {
@@ -166,20 +237,15 @@ func TestLinuxInstallFreshMachineToleratesNeverLoadedUnit(t *testing.T) {
 		t.Fatalf("systemd unit not written after a tolerated stop failure: %v", err)
 	}
 
-	var enableNow, restart bool
+	var enableNow bool
 	for _, call := range systemctlCalls(t, logPath) {
 		fields := strings.Fields(call)
-		if len(fields) >= 2 && fields[0] == "--user" {
-			switch fields[1] {
-			case "enable":
-				enableNow = len(fields) >= 3 && fields[2] == "--now"
-			case "restart":
-				restart = true
-			}
+		if len(fields) >= 3 && fields[0] == "--user" && fields[1] == "enable" {
+			enableNow = fields[2] == "--now"
 		}
 	}
-	if !enableNow || !restart {
-		t.Fatalf("systemctl calls = %v, want enable --now and restart after the tolerated failure", systemctlCalls(t, logPath))
+	if !enableNow {
+		t.Fatalf("systemctl calls = %v, want enable --now after the tolerated failure", systemctlCalls(t, logPath))
 	}
 }
 
@@ -249,7 +315,7 @@ func TestLinuxInstallSurfacesUnrelatedSystemctlFailure(t *testing.T) {
 		t.Fatalf("service binary exists after a failed stop (stat err = %v), want the install aborted before the swap", statErr)
 	}
 	for _, call := range systemctlCalls(t, logPath) {
-		if strings.Contains(call, "enable") || strings.Contains(call, "restart") {
+		if strings.Contains(call, "enable") || strings.Contains(call, "restart") || strings.Contains(call, "start") {
 			t.Fatalf("systemctl calls = %v, want no enable/restart after the stop failure", systemctlCalls(t, logPath))
 		}
 	}

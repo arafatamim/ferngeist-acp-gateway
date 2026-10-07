@@ -131,6 +131,10 @@ func main() {
 								Name:  "public-url",
 								Usage: "public base URL announced to clients (optional)",
 							},
+							&cli.BoolFlag{
+								Name:  "keep-settings",
+								Usage: "reuse the settings of the existing install; the other flags only apply to a first install",
+							},
 						},
 						Action: func(_ context.Context, cmd *cli.Command) error {
 							host := cmd.String("host")
@@ -147,7 +151,7 @@ func main() {
 							if cmd.Bool("remote") {
 								options.TailscaleMode = "auto"
 							}
-							return runDaemonInstall(options)
+							return runDaemonInstall(options, cmd.Bool("keep-settings"))
 						},
 					},
 					{

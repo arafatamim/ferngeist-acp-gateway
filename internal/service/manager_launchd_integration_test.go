@@ -18,7 +18,7 @@ import (
 // the runner user). It runs the full service lifecycle:
 //   - Install: writes binary, env file, plist under $HOME and loads it
 //   - Status: reports Installed and ActiveState
-//   - Restart / Stop / Start: control calls against the loaded agent
+//   - Restart / Stop / Start: Stop must leave it installed but inactive
 //   - Re-install idempotency: a second Install succeeds
 //   - Uninstall: unloads and removes the plist
 //
@@ -32,15 +32,15 @@ func TestLaunchdLifecycle(t *testing.T) {
 	// Install a REAL gateway binary (not the test binary, which has no
 	// buildVersion and would exit immediately under launchd). Build
 	// ./cmd/ferngeist with a buildVersion ldflag into a temp dir and point
-	// copyCurrentBinarySource at it.
+	// installCopySource at it.
 	realBin := filepath.Join(t.TempDir(), "ferngeist-gateway")
 	cmd := exec.Command("go", "build", "-ldflags", "-X main.buildVersion=test", "-o", realBin, "../../cmd/ferngeist")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("build real gateway binary: %v\n%s", err, out)
 	}
-	oldSource := copyCurrentBinarySource
-	copyCurrentBinarySource = func() (string, error) { return realBin, nil }
-	t.Cleanup(func() { copyCurrentBinarySource = oldSource })
+	oldSource := installCopySource
+	installCopySource = func() (string, error) { return realBin, nil }
+	t.Cleanup(func() { installCopySource = oldSource })
 
 	m := NewManager()
 
@@ -77,12 +77,8 @@ func TestLaunchdLifecycle(t *testing.T) {
 		t.Fatalf("Restart() error = %v", err)
 	}
 
-	// Stop: agent should be stopped (launchctl kill SIGTERM). Right after a
-	// kickstart restart, launchd may not have finished spawning the process,
-	// so "kill" can transiently report "No process to signal". Wait for the
-	// service to report running (with a generous budget on a loaded CI
-	// runner) before stopping, then retry only the not-yet-signalable
-	// condition briefly.
+	// Wait until the service is running (with a generous budget on a loaded CI
+	// runner) before stopping it.
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		st, err := m.Status()
@@ -106,23 +102,38 @@ func TestLaunchdLifecycle(t *testing.T) {
 		time.Sleep(200 * time.Millisecond)
 	}
 
-	stopErr := m.Stop()
-	for attempt := 0; stopErr != nil && strings.Contains(stopErr.Error(), "No process to signal") && attempt < 5; attempt++ {
-		time.Sleep(200 * time.Millisecond)
-		stopErr = m.Stop()
+	// Stop boots the job out, so KeepAlive must not respawn it: the service
+	// stays installed but is no longer active.
+	if err := m.Stop(); err != nil {
+		t.Fatalf("Stop() error = %v", err)
 	}
-	if stopErr != nil {
-		t.Fatalf("Stop() error = %v", stopErr)
+	time.Sleep(2 * time.Second) // give a (buggy) KeepAlive respawn time to show up
+	st, err := m.Status()
+	if err != nil {
+		t.Fatalf("Status() after stop error = %v", err)
+	}
+	if !st.Installed || st.ActiveState == "active" {
+		t.Fatalf("Status() after stop = %+v, want installed and not active", st)
 	}
 
 	// Start: agent should come back.
 	if err := m.Start(); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
+	waitLaunchdActive(t, m)
 
-	// Installing over an existing install must succeed (idempotent).
-	if err := m.Install(InstallOptions{}); err != nil {
-		t.Fatalf("Install() (idempotent) error = %v", err)
+	// Reinstalling over an existing install must succeed and replace the
+	// running instance's configuration.
+	if err := m.Install(InstallOptions{Port: 5799}); err != nil {
+		t.Fatalf("Install() (reinstall) error = %v", err)
+	}
+	waitLaunchdActive(t, m)
+	if saved, ok := m.SavedInstallOptions(); !ok || saved.Port != 5799 {
+		t.Fatalf("SavedInstallOptions() = %+v, %v, want port 5799", saved, ok)
+	}
+	out, err := exec.Command("launchctl", "print", darwinServiceTarget()).CombinedOutput()
+	if err != nil || !strings.Contains(string(out), "127.0.0.1:5799") {
+		t.Fatalf("reinstalled job does not carry the new listen addr: %v\n%s", err, out)
 	}
 
 	if err := m.Uninstall(false); err != nil {
@@ -135,5 +146,21 @@ func TestLaunchdLifecycle(t *testing.T) {
 	}
 	if status.Installed {
 		t.Fatal("Status() after uninstall = installed, want not installed")
+	}
+}
+
+// waitLaunchdActive polls until the service reports active.
+func waitLaunchdActive(t *testing.T, m Manager) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		st, err := m.Status()
+		if err == nil && st.ActiveState == "active" {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("service did not become active: last status %+v err %v", st, err)
+		}
+		time.Sleep(200 * time.Millisecond)
 	}
 }

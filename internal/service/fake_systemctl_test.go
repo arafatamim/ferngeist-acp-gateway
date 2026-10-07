@@ -47,6 +47,17 @@ fi
 exit 0
 `
 
+// fakeLoginctlScript stands in for loginctl so Install's linger handling never
+// touches the real user manager. show-user reports $LOGINCTL_LINGER (default
+// "yes"); every call is appended to $LOGINCTL_LOG.
+const fakeLoginctlScript = `#!/bin/sh
+echo "$@" >> "$LOGINCTL_LOG"
+if [ "$1" = "show-user" ]; then
+	echo "${LOGINCTL_LINGER:-yes}"
+fi
+exit 0
+`
+
 // newFakeSystemctl puts a fake systemctl first on PATH and returns the path of
 // the call log.
 func newFakeSystemctl(t *testing.T, failures map[string]fakeFailure) string {
@@ -57,6 +68,11 @@ func newFakeSystemctl(t *testing.T, failures map[string]fakeFailure) string {
 	if err := os.WriteFile(fake, []byte(fakeSystemctlScript), 0o755); err != nil {
 		t.Fatal(err)
 	}
+
+	if err := os.WriteFile(filepath.Join(dir, "loginctl"), []byte(fakeLoginctlScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LOGINCTL_LOG", filepath.Join(t.TempDir(), "loginctl.log"))
 
 	logPath := filepath.Join(t.TempDir(), "calls.log")
 	t.Setenv("SYSTEMCTL_LOG", logPath)

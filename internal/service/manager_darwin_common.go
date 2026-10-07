@@ -17,17 +17,23 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 const (
 	darwinLabel        = "com.ferngeist.gateway"
 	darwinPlistName    = darwinLabel + ".plist"
 	darwinLaunchctlDir = "Library/LaunchAgents"
+
+	// darwinStdoutPath discards stdout: the daemon already writes JSON logs to
+	// gateway.log in LOG_DIR, so a captured copy would only grow unrotated.
+	darwinStdoutPath = "/dev/null"
 )
 
 // darwinPlistTemplate is the launchd per-user LaunchAgent plist. It starts at
 // login (RunAtLoad), keeps the daemon alive, and carries the runtime
-// environment inline so launchd never needs editing.
+// environment inline so launchd never needs editing. The environment entries
+// come from darwinEnv, the same list daemon.plist.env is written from.
 const darwinPlistTemplate = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -42,17 +48,7 @@ const darwinPlistTemplate = `<?xml version="1.0" encoding="UTF-8"?>
 	</array>
 	<key>EnvironmentVariables</key>
 	<dict>
-		<key>FERNGEIST_GATEWAY_LISTEN_ADDR</key>
-		<string>%s</string>
-		<key>FERNGEIST_GATEWAY_ENABLE_LAN</key>
-		<string>%s</string>
-		<key>FERNGEIST_GATEWAY_STATE_DB</key>
-		<string>%s</string>
-		<key>FERNGEIST_GATEWAY_LOG_DIR</key>
-		<string>%s</string>
-		<key>FERNGEIST_GATEWAY_MANAGED_BIN_DIR</key>
-		<string>%s</string>
-	</dict>
+%s	</dict>
 	<key>RunAtLoad</key>
 	<true/>
 	<key>KeepAlive</key>
@@ -72,6 +68,10 @@ type darwinManager struct{}
 // manager_darwin.go; on other OSes it stays a stub returning "" so the var is
 // never nil and *darwinManager still satisfies Manager.
 var darwinServiceTarget = func() string { return "" } // overridden on darwin
+
+// darwinDomainTarget resolves the launchd domain (gui/<uid>) that bootstrap
+// operates on. Overridden on darwin like darwinServiceTarget.
+var darwinDomainTarget = func() string { return "" } // overridden on darwin
 
 func (m *darwinManager) Install(options InstallOptions) error {
 	options = NormalizeInstallOptions(options)
@@ -106,7 +106,12 @@ func (m *darwinManager) Install(options InstallOptions) error {
 		return fmt.Errorf("create launch agents directory: %w", err)
 	}
 
-	if err := copyCurrentBinaryDarwin(paths.binaryPath); err != nil {
+	// Stop the running instance first: a bootstrap over a loaded job keeps the
+	// old process, and overwriting a running signed binary in place can crash it.
+	if err := m.bootout(); err != nil {
+		return err
+	}
+	if err := installCurrentBinary(paths.binaryPath); err != nil {
 		return err
 	}
 	if err := writeDarwinEnvFile(paths, options); err != nil {
@@ -115,13 +120,70 @@ func (m *darwinManager) Install(options InstallOptions) error {
 	if err := writeDarwinPlist(paths, options); err != nil {
 		return err
 	}
-
-	// Load replaces any existing instance; bootstrap is only for system agents.
-	if err := m.launchctl("load", "-w", paths.plistPath); err != nil {
+	if err := saveInstallOptions(paths.configDir, options); err != nil {
 		return err
 	}
 
+	return m.bootstrapAndKick()
+}
+
+// SavedInstallOptions returns the options persisted by the last Install.
+func (m *darwinManager) SavedInstallOptions() (InstallOptions, bool) {
+	paths, err := resolveDarwinPaths()
+	if err != nil {
+		return InstallOptions{}, false
+	}
+	return loadInstallOptions(paths.configDir)
+}
+
+// bootout unloads the job, treating "not loaded" as already stopped. Unlike
+// `kill`, it stops KeepAlive from respawning the daemon.
+func (m *darwinManager) bootout() error {
+	if err := m.launchctl("bootout", darwinServiceTarget()); err != nil && !isLaunchctlNotFound(err) {
+		return err
+	}
 	return nil
+}
+
+// bootstrap loads the job from the plist; enable first so a job disabled by an
+// older `unload -w` can load.
+func (m *darwinManager) bootstrap() error {
+	paths, err := resolveDarwinPaths()
+	if err != nil {
+		return err
+	}
+	if err := m.launchctl("enable", darwinServiceTarget()); err != nil {
+		return err
+	}
+	// bootout is asynchronous: a bootstrap issued while launchd is still
+	// tearing the old job down fails with "Bootstrap failed: 5: Input/output
+	// error". Retry briefly.
+	// ponytail: fixed 5s budget; poll `launchctl print` if teardown is slower.
+	for attempt := 0; ; attempt++ {
+		err = m.launchctl("bootstrap", darwinDomainTarget(), paths.plistPath)
+		if err == nil || attempt == 9 {
+			return err
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+func (m *darwinManager) bootstrapAndKick() error {
+	if err := m.bootstrap(); err != nil {
+		return err
+	}
+	return m.launchctl("kickstart", darwinServiceTarget())
+}
+
+// loaded reports whether launchd currently has the job loaded.
+func (m *darwinManager) loaded() (bool, error) {
+	if _, err := m.launchctlOutput("print", darwinServiceTarget()); err != nil {
+		if isLaunchctlNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 func (m *darwinManager) Uninstall(purge bool) error {
@@ -134,11 +196,8 @@ func (m *darwinManager) Uninstall(purge bool) error {
 		return err
 	}
 
-	// Unload tolerates "no such label" (not currently loaded).
-	if err := m.launchctl("unload", "-w", paths.plistPath); err != nil {
-		if !isLaunchctlUnloadNotFound(err) {
-			return err
-		}
+	if err := m.bootout(); err != nil {
+		return err
 	}
 
 	if err := os.Remove(paths.plistPath); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -161,9 +220,18 @@ func (m *darwinManager) Start() error {
 	if err := m.ensureInstalled(); err != nil {
 		return err
 	}
-	return m.launchctl("kickstart", "-k", darwinServiceTarget())
+	loaded, err := m.loaded()
+	if err != nil {
+		return err
+	}
+	if !loaded {
+		return m.bootstrapAndKick()
+	}
+	return m.launchctl("kickstart", darwinServiceTarget())
 }
 
+// Stop boots the job out (launchctl kill would just be respawned by KeepAlive).
+// The plist stays, so Status still reports Installed and Start can bootstrap.
 func (m *darwinManager) Stop() error {
 	if err := m.ensureLaunchctlAvailable(); err != nil {
 		return err
@@ -171,7 +239,7 @@ func (m *darwinManager) Stop() error {
 	if err := m.ensureInstalled(); err != nil {
 		return err
 	}
-	return m.launchctl("kill", "SIGTERM", darwinServiceTarget())
+	return m.bootout()
 }
 
 func (m *darwinManager) Restart() error {
@@ -180,6 +248,15 @@ func (m *darwinManager) Restart() error {
 	}
 	if err := m.ensureInstalled(); err != nil {
 		return err
+	}
+	loaded, err := m.loaded()
+	if err != nil {
+		return err
+	}
+	if !loaded {
+		if err := m.bootstrap(); err != nil {
+			return err
+		}
 	}
 	return m.launchctl("kickstart", "-k", darwinServiceTarget())
 }
@@ -194,10 +271,26 @@ func (m *darwinManager) Status() (Status, error) {
 		return Status{}, err
 	}
 
+	// Installed means the plist exists, not that launchd has it loaded: a
+	// stopped (booted-out) service must still be startable.
+	if _, err := os.Stat(paths.plistPath); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return Status{Installed: false, UnitPath: paths.plistPath}, nil
+		}
+		return Status{}, fmt.Errorf("stat launch agent plist: %w", err)
+	}
+
 	out, err := m.launchctlOutput("print", darwinServiceTarget())
 	if err != nil {
-		if isLaunchctlPrintNotFound(err) {
-			return Status{Installed: false, UnitPath: paths.plistPath}, nil
+		if isLaunchctlNotFound(err) {
+			return Status{
+				Installed:     true,
+				UnitPath:      paths.plistPath,
+				UnitFileState: paths.plistPath,
+				LoadState:     "not-loaded",
+				ActiveState:   "inactive",
+				SubState:      "stopped",
+			}, nil
 		}
 		return Status{}, err
 	}
@@ -282,7 +375,6 @@ type darwinPaths struct {
 	envPath         string
 	launchAgentsDir string
 	plistPath       string
-	stdoutLogPath   string
 	stderrLogPath   string
 }
 
@@ -306,62 +398,41 @@ func resolveDarwinPaths() (darwinPaths, error) {
 		envPath:         filepath.Join(rootDir, "config", "daemon.plist.env"),
 		launchAgentsDir: launchAgentsDir,
 		plistPath:       filepath.Join(launchAgentsDir, darwinPlistName),
-		stdoutLogPath:   filepath.Join(rootDir, "logs", "daemon.log"),
 		stderrLogPath:   filepath.Join(rootDir, "logs", "daemon.err.log"),
 	}, nil
 }
 
-// copyCurrentBinarySource is the path copied into the service bin dir on
-// Install. Defaults to the running executable; tests override it (the
-// launchd integration test points it at a real gateway binary, and the Linux
-// self-copy test points it at the service binary).
-var copyCurrentBinarySource = func() (string, error) { return os.Executable() }
+type darwinEnvEntry struct{ key, value string }
 
-// copyCurrentBinaryDarwin mirrors copyCurrentBinary in manager_linux.go, which
-// is hidden from darwin builds by its //go:build linux tag.
-func copyCurrentBinaryDarwin(targetPath string) error {
-	currentBinaryPath, err := copyCurrentBinarySource()
-	if err != nil {
-		return fmt.Errorf("resolve current binary: %w", err)
-	}
-
-	// Installing from the service directory itself: skip the self-copy so
-	// `install` is idempotent when invoked via the service-bin path (and
-	// never read-then-write a file onto itself).
-	if filepath.Clean(currentBinaryPath) == filepath.Clean(targetPath) {
-		return nil
-	}
-
-	contents, err := os.ReadFile(currentBinaryPath)
-	if err != nil {
-		return fmt.Errorf("read current binary: %w", err)
-	}
-	if err := os.WriteFile(targetPath, contents, 0o755); err != nil {
-		return fmt.Errorf("write service binary: %w", err)
-	}
-
-	return nil
-}
-
-func writeDarwinEnvFile(paths darwinPaths, options InstallOptions) error {
-	options = NormalizeInstallOptions(options)
-	lines := []string{
-		"FERNGEIST_GATEWAY_LISTEN_ADDR=" + ListenAddr(options),
-		"FERNGEIST_GATEWAY_ENABLE_LAN=" + darwinBool(!isLoopbackHost(options.Host)),
-		"FERNGEIST_GATEWAY_STATE_DB=" + paths.dbPath,
-		"FERNGEIST_GATEWAY_LOG_DIR=" + paths.logDir,
-		"FERNGEIST_GATEWAY_MANAGED_BIN_DIR=" + paths.managedBinDir,
+// darwinEnv is the single ordered environment list shared by the plist (the
+// source of truth, since launchd never reads daemon.plist.env) and the env file.
+func darwinEnv(paths darwinPaths, options InstallOptions) []darwinEnvEntry {
+	env := []darwinEnvEntry{
+		{"FERNGEIST_GATEWAY_LISTEN_ADDR", ListenAddr(options)},
+		{"FERNGEIST_GATEWAY_ENABLE_LAN", darwinBool(!isLoopbackHost(options.Host))},
+		{"FERNGEIST_GATEWAY_STATE_DB", paths.dbPath},
+		{"FERNGEIST_GATEWAY_LOG_DIR", paths.logDir},
+		{"FERNGEIST_GATEWAY_MANAGED_BIN_DIR", paths.managedBinDir},
 	}
 	// A persisted remote URL must not survive into a LAN-only service: it
 	// would otherwise keep advertising the old tailnet URL.
 	if includePublicURL(options) {
-		lines = append(lines, "FERNGEIST_GATEWAY_PUBLIC_BASE_URL="+options.PublicURL)
+		env = append(env, darwinEnvEntry{"FERNGEIST_GATEWAY_PUBLIC_BASE_URL", options.PublicURL})
 	}
 	if remoteModeRequested(options.TailscaleMode) {
-		lines = append(lines, "FERNGEIST_GATEWAY_TAILSCALE_MODE="+options.TailscaleMode)
+		env = append(env, darwinEnvEntry{"FERNGEIST_GATEWAY_TAILSCALE_MODE", options.TailscaleMode})
 	}
-	content := strings.Join(lines, "\n") + "\n"
-	if err := os.WriteFile(paths.envPath, []byte(content), 0o600); err != nil {
+	return env
+}
+
+// writeDarwinEnvFile writes an informational copy of the environment.
+func writeDarwinEnvFile(paths darwinPaths, options InstallOptions) error {
+	options = NormalizeInstallOptions(options)
+	var content strings.Builder
+	for _, e := range darwinEnv(paths, options) {
+		content.WriteString(e.key + "=" + e.value + "\n")
+	}
+	if err := os.WriteFile(paths.envPath, []byte(content.String()), 0o600); err != nil {
 		return fmt.Errorf("write service environment file: %w", err)
 	}
 	return nil
@@ -369,22 +440,18 @@ func writeDarwinEnvFile(paths darwinPaths, options InstallOptions) error {
 
 func writeDarwinPlist(paths darwinPaths, options InstallOptions) error {
 	options = NormalizeInstallOptions(options)
-	listenAddr := ListenAddr(options)
-	enableLAN := "0"
-	if !isLoopbackHost(options.Host) {
-		enableLAN = "1"
+
+	var env strings.Builder
+	for _, e := range darwinEnv(paths, options) {
+		fmt.Fprintf(&env, "\t\t<key>%s</key>\n\t\t<string>%s</string>\n", escapePlist(e.key), escapePlist(e.value))
 	}
 
 	plistBody := fmt.Sprintf(
 		darwinPlistTemplate,
 		darwinLabel,
-		paths.binaryPath,
-		escapePlist(listenAddr),
-		enableLAN,
-		escapePlist(paths.dbPath),
-		escapePlist(paths.logDir),
-		escapePlist(paths.managedBinDir),
-		escapePlist(paths.stdoutLogPath),
+		escapePlist(paths.binaryPath),
+		env.String(),
+		darwinStdoutPath,
 		escapePlist(paths.stderrLogPath),
 	)
 
@@ -409,22 +476,15 @@ func escapePlist(value string) string {
 	).Replace(value)
 }
 
-func isLaunchctlPrintNotFound(err error) bool {
+// isLaunchctlNotFound matches print/bootout errors for a job that is not
+// loaded ("Could not find service", "Boot-out failed: 3: No such process", ...).
+func isLaunchctlNotFound(err error) bool {
 	if err == nil {
 		return false
 	}
 	message := strings.ToLower(err.Error())
 	return strings.Contains(message, "could not find service") ||
-		strings.Contains(message, "no such process") ||
-		strings.Contains(message, "not found")
-}
-
-func isLaunchctlUnloadNotFound(err error) bool {
-	if err == nil {
-		return false
-	}
-	message := strings.ToLower(err.Error())
-	return strings.Contains(message, "could not find service") ||
+		strings.Contains(message, "could not find specified service") ||
 		strings.Contains(message, "no such process") ||
 		strings.Contains(message, "not found")
 }
@@ -432,6 +492,5 @@ func isLaunchctlUnloadNotFound(err error) bool {
 func isLaunchctlPermissionDenied(message string) bool {
 	lower := strings.ToLower(strings.TrimSpace(message))
 	return strings.Contains(lower, "permission denied") ||
-		strings.Contains(lower, "operation not permitted") ||
-		strings.Contains(lower, "denied")
+		strings.Contains(lower, "operation not permitted")
 }
