@@ -506,7 +506,7 @@ service reports gone (`404`/`410`) is deleted.
 |-------------|---------------------------------------------------------------------|
 | `title`     | notification title                                                  |
 | `body`      | notification body                                                   |
-| `category`  | event kind — `turn_complete`, `permission_request`, `agent_error`, `agent_crash`, `progress`, or `gateway_url` |
+| `category`  | event kind — `turn_complete`, `permission_request`, `agent_error`, `agent_crash`, `progress`, `gateway_url`, or `gateway_update` |
 | `serverId`  | the gateway's `gatewayId` (from pairing); deep-links with `sessionId` |
 | `sessionId` | target ACP session (chat)                                           |
 | `cwd`       | working directory for the chat route, when known                    |
@@ -520,7 +520,8 @@ deep-links a tap only when it has **both** `serverId` and `sessionId`.
 Delivery hints, as Web Push headers: every category is sent with
 `Urgency: high` and a 24 h TTL, except `progress`, which is sent with
 `Urgency: normal`, a 5 min TTL and a per-chat `Topic`, so a newer progress update
-replaces an undelivered older one. `progress` pushes are throttled to one per
+replaces an undelivered older one, and `gateway_update` (a newer gateway release
+is out), which is sent with `Urgency: normal`. `progress` pushes are throttled to one per
 `FERNGEIST_GATEWAY_PROGRESS_INTERVAL_SECONDS` (default 15s) per chat while a
 prompt runs, and always fire on each tool call that completes or fails.
 

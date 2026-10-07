@@ -30,6 +30,8 @@ const (
 	CategoryError             = "agent_error"
 	CategoryAgentCrash        = "agent_crash"
 	CategoryProgress          = "progress"
+	// CategoryUpdate announces a newer gateway release.
+	CategoryUpdate = "gateway_update"
 	// CategoryGatewayURL is used when the gateway's public URL changes or is
 	// first provisioned, so clients can re-address the server without manual
 	// entry.

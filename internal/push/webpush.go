@@ -92,12 +92,16 @@ func (p *WebPushProvider) Send(ctx context.Context, token string, n Notification
 		TTL:             24 * 60 * 60,
 		Urgency:         webpush.UrgencyHigh,
 	}
-	if n.Category == CategoryProgress {
+	switch n.Category {
+	case CategoryProgress:
 		// Progress is stale within minutes, must not wake a dozing phone, and a
 		// newer update replaces an undelivered older one for the same chat.
 		opts.TTL = 5 * 60
 		opts.Urgency = webpush.UrgencyNormal
 		opts.Topic = progressTopic(n.SessionID)
+	case CategoryUpdate:
+		// Worth seeing whenever the phone next wakes, never worth waking it for.
+		opts.Urgency = webpush.UrgencyNormal
 	}
 
 	resp, err := webpush.SendNotificationWithContext(ctx, payload, &webpush.Subscription{

@@ -99,7 +99,7 @@ func (n *Notifier) CheckAndNotify(ctx context.Context, currentVersion string) er
 		_ = n.Push.Notify(ctx, deviceID, push.Notification{
 			Title:    "Ferngeist Gateway update available: " + release.TagName,
 			Body:     "Run ferngeist-gateway update to install the latest version.",
-			Category: push.CategoryProgress,
+			Category: push.CategoryUpdate,
 		})
 	}
 	return nil

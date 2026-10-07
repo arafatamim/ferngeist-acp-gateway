@@ -174,6 +174,10 @@ clients.
   only while a prompt runs, a cancelled turn no longer pushes `turn_complete`,
   and an empty-success turn pushes one `agent_error` instead of two.
   (2026-10-07)
+- `[semantic]` The update-available push uses a new `category`,
+  `gateway_update`, instead of `progress`, so it is no longer collapsed or
+  expired like live progress. No `protocolVersion` bump: an unknown category
+  falls back to the client's default channel. (2026-10-07)
 
 ## History
 

@@ -133,6 +133,19 @@ func TestWebPushProgressIsQuietShortLivedAndCollapsed(t *testing.T) {
 	}
 }
 
+func TestWebPushUpdateIsQuietButLongLived(t *testing.T) {
+	f := newFakeSubscriber(t)
+	p, _ := newTestWebPushProvider(t, f)
+
+	if err := p.Send(context.Background(), f.token(t), Notification{Category: CategoryUpdate}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	h := f.got.Header
+	if h.Get("Urgency") != "normal" || h.Get("TTL") != "86400" || h.Get("Topic") != "" {
+		t.Fatalf("update headers urgency=%q ttl=%q topic=%q", h.Get("Urgency"), h.Get("TTL"), h.Get("Topic"))
+	}
+}
+
 func TestWebPushStatusMapping(t *testing.T) {
 	f := newFakeSubscriber(t)
 	p, _ := newTestWebPushProvider(t, f)
