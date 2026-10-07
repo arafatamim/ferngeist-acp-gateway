@@ -742,6 +742,32 @@ func (s *SQLiteStore) EnsureGatewayID(ctx context.Context) (string, error) {
 	return id, nil
 }
 
+// EnsureVAPIDKeys returns this gateway's Web Push signing key pair, creating it
+// with generate on first call. It must never change: every client's push
+// subscription is bound to the public key it was created with.
+func (s *SQLiteStore) EnsureVAPIDKeys(ctx context.Context, generate func() (privateKey, publicKey string, err error)) (publicKey, privateKey string, err error) {
+	query := `SELECT public_key, private_key FROM vapid_keys WHERE id = 1`
+	switch err := s.db.QueryRowContext(ctx, query).Scan(&publicKey, &privateKey); {
+	case err == nil:
+		return publicKey, privateKey, nil
+	case !errors.Is(err, sql.ErrNoRows):
+		return "", "", err
+	}
+	privateKey, publicKey, err = generate()
+	if err != nil {
+		return "", "", err
+	}
+	// Same first-boot race guard as EnsureGatewayID: keep whichever pair won.
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT OR IGNORE INTO vapid_keys(id, public_key, private_key) VALUES (1, ?, ?)`, publicKey, privateKey); err != nil {
+		return "", "", err
+	}
+	if err := s.db.QueryRowContext(ctx, query).Scan(&publicKey, &privateKey); err != nil {
+		return "", "", err
+	}
+	return publicKey, privateKey, nil
+}
+
 // SaveCustomAgent inserts or updates a custom agent. The upsert keeps the
 // original created_at so updates are distinguishable from re-registrations.
 // Args are stored as a JSON array (like paired_device_scopes), normalizing a
@@ -934,6 +960,11 @@ func (s *SQLiteStore) migrate(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS gateway_identity (
 			id INTEGER PRIMARY KEY CHECK (id = 1),
 			gateway_id TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS vapid_keys (
+			id INTEGER PRIMARY KEY CHECK (id = 1),
+			public_key TEXT NOT NULL,
+			private_key TEXT NOT NULL
 		)`,
 		`CREATE TABLE IF NOT EXISTS custom_agents (
 			agent_id TEXT PRIMARY KEY,

@@ -280,6 +280,7 @@ func NewServer(
 	mux.HandleFunc("GET /v1/runtimes/{runtimeId}/git/diff", server.handleWorkspaceGitDiff)
 	server.registerSessionRoutes(mux)
 	mux.HandleFunc("POST /v1/devices/push-token", server.handleRegisterPushToken)
+	mux.HandleFunc("GET /v1/devices/push-config", server.handlePushConfig)
 	adminMux.HandleFunc("GET /admin/v1/status", server.handleAdminStatus)
 	adminMux.HandleFunc("POST /admin/v1/pairings/start", server.handleAdminPairingStart)
 	adminMux.HandleFunc("GET /admin/v1/pairings/{challengeId}", server.handleAdminPairingStatus)

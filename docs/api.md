@@ -447,63 +447,82 @@ return `422`.
 
 ### Push notification registration
 
+Pushes are delivered over **Web Push** (RFC 8030), encrypted end to end
+(RFC 8291) and signed with this gateway's own VAPID key (RFC 8292). The gateway
+needs no Firebase or other third-party credentials: the client tells it where to
+send. On Android that is a [UnifiedPush](https://unifiedpush.org) endpoint — a
+distributor such as ntfy, or FCM through the connector's embedded FCM
+distributor on phones without one; in a browser it is the browser's push
+service. Only the client can decrypt a message.
+
+- `GET /v1/devices/push-config`
+  - Returns what the client needs to subscribe:
+    ```json
+    { "vapidPublicKey": "BAhG…" }
+    ```
+    `vapidPublicKey` is the base64url, uncompressed P-256 key the subscription
+    must be created with (UnifiedPush: `UnifiedPush.register(…, vapid = key)`;
+    browsers: `applicationServerKey`). It never changes for a gateway, and each
+    gateway has its own, so a client paired with several gateways holds one
+    subscription per gateway (UnifiedPush: one `instance` per gateway).
+  - Authenticated with the device credential.
+  - Error responses: `401` — invalid or missing device credential
+
 - `POST /v1/devices/push-token`
-  - Registers or updates the calling device's push token. The device identity is
-    taken from the authenticated credential, **never from the body** — the body
-    carries only the token and the platform it was issued for.
+  - Registers or updates the calling device's push subscription. The device
+    identity is taken from the authenticated credential, **never from the body**.
   - Authenticated with the device credential (bearer token + proof-of-possession
     headers, the same scheme as every other `/v1` route).
-  - Request body:
+  - Request body — the subscription in the `PushSubscription.toJSON()` shape
+    (UnifiedPush: `endpoint.url`, `endpoint.pubKeySet.pubKey`, `endpoint.pubKeySet.auth`):
     ```json
     {
-      "token": "string",
-      "platform": "android"
+      "platform": "webpush",
+      "subscription": {
+        "endpoint": "https://…",
+        "keys": { "p256dh": "base64url", "auth": "base64url" }
+      }
     }
     ```
-    - `platform` is the routing key the gateway uses to pick a delivery provider
-      (`android` today; `ios`/`web` are reserved for future clients). It is
-      optional and defaults to `android` if omitted.
-  - **Idempotent.** The client re-POSTs on every app start and whenever the token
-    rotates, once per paired gateway; the gateway upserts one token per device,
-    replacing any prior token.
+  - **Idempotent.** The client re-POSTs on every app start and whenever its
+    endpoint changes; the gateway keeps one subscription per device, replacing
+    any prior one.
   - Response: `204 No Content`
   - Error responses:
-    - `400` — missing or empty `token`
+    - `400` — `endpoint` is not an `https` URL, or `p256dh`/`auth` is missing
     - `401` — invalid or missing device credential
+  - The legacy `{"token": "...", "platform": "android"}` body is still accepted,
+    but no provider delivers to it.
 
-**Client obligation.** After pairing, the client must register its push token
-here, and re-register whenever the platform rotates the token. A device with no
-registered token simply receives no pushes — delivery is best-effort and never
-blocks a session.
+**Client obligation.** After pairing, the client must fetch the push config,
+subscribe, and register the subscription here, and re-register whenever the
+endpoint changes. A device with no subscription simply receives no pushes —
+delivery is best-effort and never blocks a session. A subscription the push
+service reports gone (`404`/`410`) is deleted.
 
-**Delivery payload (hybrid notification + data).** Pushes are sent as **hybrid**
-messages carrying both an FCM `notification` block and a `data` block. The
-`notification` block (title, body) is what lets Android display the alert when the
-app is **killed** — the system renders it with no app process running. The `data`
-block duplicates the title/body and adds the deep-link keys; the **foreground**
-client reads `data` to suppress the duplicate and route a tap into the right chat.
-For FCM the data keys are:
+**Payload.** The decrypted message body is a JSON object; empty fields are omitted:
 
 | key         | meaning                                                              |
 |-------------|---------------------------------------------------------------------|
 | `title`     | notification title                                                  |
 | `body`      | notification body                                                   |
-| `category`  | event kind — `turn_complete`, `permission_request`, `agent_error`, `agent_crash`, or `progress` |
+| `category`  | event kind — `turn_complete`, `permission_request`, `agent_error`, `agent_crash`, `progress`, or `gateway_url` |
 | `serverId`  | the gateway's `gatewayId` (from pairing); deep-links with `sessionId` |
-| `sessionId` | target gateway session/chat                                         |
+| `sessionId` | target ACP session (chat)                                           |
 | `cwd`       | working directory for the chat route, when known                    |
 
-All `data` values are strings. A push deep-links into a chat only when it carries
-**both** `serverId` and `sessionId`; otherwise a tap just opens the app. Empty
-optional fields are omitted from `data`.
+The message is data only: the **client** posts the notification, chooses its
+channel from `category`, suppresses one for the chat already on screen, and
+deep-links a tap only when it has **both** `serverId` and `sessionId`.
+`permission_request` also covers an agent asking for input (ACP
+`elicitation/create`).
 
-The message also carries an `android` block with `priority: high` (to wake the
-device promptly) and a per-category `channel_id`: alert-worthy events
-(`permission_request`, `agent_error`, `agent_crash`) route to the heads-up
-`ferngeist_push` channel, and `turn_complete` and `progress` route to the quiet
-`ferngeist_push_updates` channel. `progress` pushes are throttled to one per
-`FERNGEIST_GATEWAY_PROGRESS_INTERVAL_SECONDS` (default 15s) while the agent is
-mid-turn, and always fire on each tool call that completes or fails.
+Delivery hints, as Web Push headers: every category is sent with
+`Urgency: high` and a 24 h TTL, except `progress`, which is sent with
+`Urgency: normal`, a 5 min TTL and a per-chat `Topic`, so a newer progress update
+replaces an undelivered older one. `progress` pushes are throttled to one per
+`FERNGEIST_GATEWAY_PROGRESS_INTERVAL_SECONDS` (default 15s) per chat while a
+prompt runs, and always fire on each tool call that completes or fails.
 
 > A force-stopped app (Settings → Force Stop, or some OEM task-killers) cannot
 > receive any push until the user reopens it — an Android platform rule. Normal
@@ -613,7 +632,7 @@ The ACP WebSocket endpoint is the primary transport for agent traffic.
 1. Pair a device.
 2. `POST /v1/runtimes/{id}/connect` — get `sessionId`, `attachToken`, and connection details.
 3. `GET /v1/acp/{runtimeId}?sessionId=<id>&attachToken=<token>` — WebSocket connect.
-4. Exchange ACP messages. Disconnect does NOT kill the runtime; the gateway session stays `disconnected`. The gateway sends hybrid notification+data push notifications on notable events (turn complete, permission request, agent error, agent crash) regardless of whether a client is attached — the client suppresses them in the foreground and the system displays them when backgrounded or killed (when `FERNGEIST_GATEWAY_FCM_CREDENTIALS_FILE` is configured; otherwise these are logged only).
+4. Exchange ACP messages. Disconnect does NOT kill the runtime; the gateway session stays `disconnected`. The gateway sends Web Push notifications on notable events (turn complete, permission or input request, agent error, agent crash) regardless of whether a client is attached — the client suppresses them in the foreground and posts them when backgrounded or killed (see [Push notification registration](#push-notification-registration)).
 5. Register the push token: `POST /v1/devices/push-token` (authenticated with device credential).
 6. To reconnect: `POST /v1/sessions/{id}/resume` (authenticated with device credential) — get new `attachToken`.
 7. `GET /v1/acp/{runtimeId}?sessionId=<id>&attachToken=<token>` — live proxying resumes. The client calls `session/load` on the agent for context restoration.

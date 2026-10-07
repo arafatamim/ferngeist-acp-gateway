@@ -7,8 +7,8 @@
 //   - PushService.Notify resolves a device to its registered token+platform and
 //     dispatches to the matching Provider. Dead-token eviction lives here, so it
 //     is identical across platforms.
-//   - Provider is the per-platform transport (FCM today; APNs/WebPush are additive
-//     and require no change to the core or the session layer).
+//   - Provider is the per-platform transport (Web Push today; APNs is additive
+//     and requires no change to the core or the session layer).
 package push
 
 import (

@@ -148,7 +148,11 @@ func Run(ctx context.Context, build api.BuildInfo) error {
 	})
 	gatewaySvc := gateway.New(logger, store)
 	tokenSvc := token.New(logger)
-	pushSvc := newPushService(ctx, logger, store, cfg.FCMCredentialsFile)
+	pushSvc, vapidPublicKey, err := newPushService(logger, store)
+	if err != nil {
+		return fmt.Errorf("establish web push keys: %w", err)
+	}
+	cfg.VAPIDPublicKey = vapidPublicKey
 
 	// Remote access provisioning: Tailscale CLI when available, embedded tsnet
 	// node otherwise. Best-effort — a provisioning failure never prevents the
@@ -355,32 +359,19 @@ func portOf(addr string) (int, error) {
 	return net.LookupPort("tcp", portText)
 }
 
-// newPushService builds the platform-neutral push dispatcher and registers the
-// Android delivery provider: FCM HTTP v1 when a service-account credentials file
-// is configured, otherwise a log-only provider. A misconfigured credentials file
-// is non-fatal — the daemon logs the error and degrades to the log provider so a
-// bad push config never prevents the gateway from booting. Additional platforms
-// (iOS/web) register more providers here without touching the dispatcher or the
-// session layer.
-func newPushService(ctx context.Context, logger *slog.Logger, store *storage.SQLiteStore, credentialsFile string) push.PushService {
+// newPushService builds the platform-neutral push dispatcher with the Web Push
+// provider, signing with this gateway's VAPID key (generated once, persisted).
+// It returns the public key clients subscribe against. Web Push needs no
+// third-party credentials, so delivery is always on.
+func newPushService(logger *slog.Logger, store *storage.SQLiteStore) (push.PushService, string, error) {
 	pushLogger := logger.With("component", "push")
-
-	var androidProvider push.Provider
-	if credentialsFile == "" {
-		logger.Info("push notifications: no FCM credentials configured, using log-only provider")
-		androidProvider = push.NewLogProvider(pushLogger)
-	} else if fcm, err := push.NewFCMProvider(ctx, credentialsFile, pushLogger); err != nil {
-		logger.Warn("push notifications: FCM init failed, falling back to log-only provider",
-			slog.String("error", err.Error()))
-		androidProvider = push.NewLogProvider(pushLogger)
-	} else {
-		logger.Info("push notifications: FCM HTTP v1 delivery enabled")
-		androidProvider = fcm
+	publicKey, privateKey, err := store.EnsureVAPIDKeys(context.Background(), push.GenerateVAPIDKeys)
+	if err != nil {
+		return nil, "", err
 	}
-
 	return push.NewDispatcher(store, map[string]push.Provider{
-		"android": androidProvider,
-	}, pushLogger)
+		push.PlatformWebPush: push.NewWebPushProvider(publicKey, privateKey, pushLogger),
+	}, pushLogger), publicKey, nil
 }
 
 // DiscoveryTXTRecords keeps the mDNS payload intentionally small and stable so

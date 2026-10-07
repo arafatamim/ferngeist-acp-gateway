@@ -68,10 +68,6 @@ type Config struct {
 	// ProgressInterval is the minimum seconds between live progress push
 	// notifications while an agent is mid-turn. 0 means use the default.
 	ProgressInterval time.Duration
-	// FCMCredentialsFile is the path to a Firebase service-account JSON used to
-	// authenticate FCM HTTP v1 push delivery. When empty, push notifications fall
-	// back to the log-only stub so local/dev runs work without a Firebase project.
-	FCMCredentialsFile string
 	// FrameLogEnabled toggles a raw ACP JSON-RPC frame log. When enabled, the
 	// gateway appends every client->agent and agent->client frame to
 	// <LogDir>/<agent>-agent.log as newline-delimited JSON, one line per frame,
@@ -84,6 +80,10 @@ type Config struct {
 	// and is handed to clients at pairing so they can address this gateway and
 	// resolve its pushes for deep-linking.
 	GatewayID string
+	// VAPIDPublicKey is the public half of this gateway's Web Push signing key,
+	// populated at boot from persisted storage. Clients create their push
+	// subscription against it.
+	VAPIDPublicKey string
 	// UpdateCheckEnabled toggles the startup update-available check. Defaults on;
 	// package-manager-installed builds are expected to disable it via env in their
 	// service environment.
@@ -143,7 +143,6 @@ func Load() Config {
 		SessionMaxDisconnected: envDurationSecondsOrDefault("FERNGEIST_GATEWAY_SESSION_MAX_DISCONNECTED_SECONDS", defaultSessionMaxDisconnected),
 		MaxSessionsPerDevice:   envIntOrDefault("FERNGEIST_GATEWAY_MAX_SESSIONS_PER_DEVICE", defaultMaxSessionsPerDevice),
 		ProgressInterval:       envDurationSecondsOrDefault("FERNGEIST_GATEWAY_PROGRESS_INTERVAL_SECONDS", defaultProgressInterval),
-		FCMCredentialsFile:     strings.TrimSpace(os.Getenv("FERNGEIST_GATEWAY_FCM_CREDENTIALS_FILE")),
 		FrameLogEnabled:        envBool("FERNGEIST_GATEWAY_FRAME_LOG"),
 		UpdateCheckInterval:    envDurationSecondsOrDefault("FERNGEIST_GATEWAY_UPDATE_CHECK_INTERVAL_SECONDS", defaultUpdateCheckInterval),
 		TailscaleMode:          normalizeTailscaleMode(envOrDefault("FERNGEIST_GATEWAY_TAILSCALE_MODE", "off")),

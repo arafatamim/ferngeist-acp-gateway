@@ -793,7 +793,7 @@ func (p *StdioPump) markTurnActivityProbe(probe frameProbe) (out string, handled
 	}
 
 	// Log/push outside the lock: the callback reaches network code, and
-	// markTurnStart on the next prompt must never queue behind FCM I/O.
+	// markTurnStart on the next prompt must never queue behind push I/O.
 	p.logger.Warn("agent returned empty success; rewriting as JSON-RPC error "+
 		"(likely swallowed LLM failure: rate limit / invalid model setting)",
 		"runtime_id", p.runtimeID, "session_id", p.sessionID)

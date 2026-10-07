@@ -27,7 +27,6 @@ Ferngeist Gateway is configured through environment variables and persisted stat
 
 | Variable | Purpose | Default |
 |---|---|---|
-| `FERNGEIST_GATEWAY_FCM_CREDENTIALS_FILE` | Path to Firebase service-account JSON for push notifications | unset (log-only fallback) |
 | `FERNGEIST_GATEWAY_SESSION_MAX_DISCONNECTED_SECONDS` | TTL for disconnected sessions before reaper closes them | `900` (15 min) |
 | `FERNGEIST_GATEWAY_MAX_SESSIONS_PER_DEVICE` | Max concurrent sessions per device | `5` |
 | `FERNGEIST_GATEWAY_SESSION_REAPER_INTERVAL_SECONDS` | Interval between reaper sweeps | `30` |
@@ -70,6 +69,6 @@ Ferngeist Gateway is configured through environment variables and persisted stat
 - `PUBLIC_BASE_URL` should match the URL clients use to reach the gateway.
 - In public mode, proof-of-possession is required unless legacy bearer credentials are explicitly enabled.
 - Custom agents (registered by a paired client or with `ferngeist-gateway agents add`) run as the same OS user as the daemon, so pairing is equivalent to shell access for that user. A gateway holds at most 50 custom agents. v1 has **no kill switch** — no setting disables custom-agent registration, so gate it by controlling who can pair (or stop the daemon). Embedded and registry agents are unaffected.
-- Push notifications are optional. With `FERNGEIST_GATEWAY_FCM_CREDENTIALS_FILE` set, the gateway delivers hybrid notification+data pushes via FCM HTTP v1; without it, notifications are logged only and the gateway runs normally. A bad or unreadable credentials file is non-fatal — the daemon logs a warning and degrades to log-only.
+- Push notifications need no configuration. The gateway delivers them over Web Push, signed with a VAPID key it generates on first boot and keeps in its state database; clients subscribe through UnifiedPush or a browser (see the API docs). Deleting the state database changes the key, and every client must subscribe again.
 - `FERNGEIST_GATEWAY_FRAME_LOG` is a debugging aid and captures **raw ACP conversation data** — including tool output, file diffs, and potentially secrets — in plaintext on disk (one file per agent, `<agent>-agent.log` in the log directory). Use it only for local debugging and do not enable it in shared deployments. Frame files are written with `0600` permissions.
 - Exact defaults can vary by platform and release build.

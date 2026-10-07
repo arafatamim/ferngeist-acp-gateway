@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -1453,5 +1454,36 @@ func TestCustomAgentBadStoredData(t *testing.T) {
 	}
 	if _, err := store.GetCustomAgent(ctx, "custom-bad-ts"); err == nil {
 		t.Error("GetCustomAgent(corrupt timestamp) = nil error, want error")
+	}
+}
+
+func TestEnsureVAPIDKeysGeneratesOnceAndPersists(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "vapid.db")
+	calls := 0
+	gen := func() (string, string, error) {
+		calls++
+		return fmt.Sprintf("priv-%d", calls), fmt.Sprintf("pub-%d", calls), nil
+	}
+	ctx := context.Background()
+
+	store, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	pub, priv, err := store.EnsureVAPIDKeys(ctx, gen)
+	if err != nil || pub != "pub-1" || priv != "priv-1" {
+		t.Fatalf("EnsureVAPIDKeys() = (%q, %q, %v), want (pub-1, priv-1)", pub, priv, err)
+	}
+	store.Close()
+
+	// Subscriptions are bound to the key: a restart must reuse it, not regenerate.
+	store, err = Open(dbPath)
+	if err != nil {
+		t.Fatalf("reopen error = %v", err)
+	}
+	defer store.Close()
+	pub, priv, err = store.EnsureVAPIDKeys(ctx, gen)
+	if err != nil || pub != "pub-1" || priv != "priv-1" || calls != 1 {
+		t.Fatalf("after reopen = (%q, %q, %v), generator calls = %d", pub, priv, err, calls)
 	}
 }

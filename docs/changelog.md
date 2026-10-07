@@ -154,6 +154,26 @@ clients.
   the JSON shapes are unchanged, and a client that reconnects and re-issues
   `session/load`, the disconnect-tolerant path it already implements, recovers.
   (2026-10-05)
+- `[additive]` ACP `elicitation/create` (unstable) — forwarded to the client
+  like any agent request and pushed as `permission_request` ("Input
+  Required"). A request-scoped elicitation's `params.requestId` is rewritten to
+  the id the client used, since the agent only sees the gateway's translated
+  id; unanswered session-scoped ones are re-sent after `session/load`. A
+  disconnected session whose agent awaits an unanswered request now survives
+  up to 24 h instead of `MaxDisconnected`. (2026-10-07)
+- `[additive]` Web Push delivery — `GET /v1/devices/push-config` returns the
+  gateway's `vapidPublicKey`, and `POST /v1/devices/push-token` accepts
+  `{"platform":"webpush","subscription":{endpoint, keys:{p256dh, auth}}}`.
+  Pushes are now Web Push messages, encrypted end to end, whose decrypted body
+  is a JSON object with the former FCM `data` keys; the client posts the
+  notification itself. FCM HTTP v1 delivery, its `notification` block and
+  `FERNGEIST_GATEWAY_FCM_CREDENTIALS_FILE` are removed: a legacy
+  `platform: "android"` token is still accepted but no longer delivered to. No
+  `protocolVersion` bump — push is best-effort, and a client that has not
+  moved to Web Push keeps working without pushes. `progress` pushes now fire
+  only while a prompt runs, a cancelled turn no longer pushes `turn_complete`,
+  and an empty-success turn pushes one `agent_error` instead of two.
+  (2026-10-07)
 
 ## History
 

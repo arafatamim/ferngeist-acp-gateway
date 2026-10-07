@@ -8,7 +8,7 @@ Its main job is to expose ACP agents through a unified WebSocket API. It discove
 
 - `cmd/ferngeist` — CLI entrypoint for daemon, pairing, and device management
 - `internal/api` — public and admin HTTP APIs, WebSocket bridge, session handlers
-- `internal/push` — platform-neutral push dispatcher with pluggable delivery providers (FCM, log-only)
+- `internal/push` — platform-neutral push dispatcher with pluggable delivery providers (Web Push)
 - `internal/gateway` — runtime token issuance, attach token and validation
 - `internal/pairing` — pairing flow and device credentials
 - `internal/runtime` — process supervision, lease-based transport bridging
@@ -37,13 +37,13 @@ Every connection creates a persistent gateway session with:
 > the same agent. Per-session close still stops by runtime ID
 > (`StopByRuntimeID`); per-agent stop (`StopByAgentID`) stops all runtimes for the
 > agent. The exclusive pipe lease is unchanged: one leaseholder per runtime.
-- **Push notifications** — when the pump detects a notable event (turn complete, permission request, agent error, or live progress) — or the runtime crashes — it emits a platform-neutral notification through the push dispatcher, which routes it to the device's provider (FCM when credentials are configured, otherwise log-only). Pushes fire **regardless of whether a client is attached**: the gateway can't tell whether the app is foregrounded or backgrounded (only whether a socket is attached, a poor proxy), so it always emits a hybrid notification+data message — the foreground client suppresses the duplicate, while the system displays the `notification` block when the app is backgrounded or killed. The client reconnects and calls `session/load` on the agent for context restoration.
+- **Push notifications** — when the pump detects a notable event (turn complete, permission request, agent error, or live progress) — or the runtime crashes — it emits a platform-neutral notification through the push dispatcher, which delivers it over Web Push to the subscription the device registered. Pushes fire **regardless of whether a client is attached**: the gateway can't tell whether the app is foregrounded or backgrounded (only whether a socket is attached, a poor proxy), so the client decides — it suppresses the notification for a chat already on screen and posts it otherwise, including when the push wakes a killed app. The client reconnects and calls `session/load` on the agent for context restoration.
 - **Inbound diagnostics** — client-to-agent frames are logged asynchronously to SQLite via a buffered channel (non-blocking, dropped on overflow with counter).
 - **ACP session/close** — before stopping the runtime on session close, the gateway sends a `session/close` JSON-RPC request to the agent if it advertised `sessionCapabilities.close` during initialize. The mock agent supports this for testing.
 
 There is no ring buffer or catchup replay. On WebSocket disconnect:
 1. The pump continues running, discarding agent output.
-2. On notable events (turn complete, permission request, agent error, agent crash, or live progress), a push notification is dispatched (if a push service is configured). Pushes also fire while a client is attached — the client suppresses foreground notifications — so disconnection is not what gates them.
+2. On notable events (turn complete, permission request, agent error, agent crash, or live progress), a push notification is dispatched. Pushes also fire while a client is attached — the client suppresses foreground notifications — so disconnection is not what gates them.
 3. The client reconnects, calls `session/load` on the agent, and resumes live proxying.
 
 ## Session lifecycle
@@ -97,20 +97,20 @@ device's registered platform.
   - **Owns dead-token eviction** (platform-neutral): on `ErrTokenUnregistered` it
     deletes the token so it is not retried. Only genuine retryable failures are
     returned to the caller.
-- `internal/push/fcm.go` provides `FCMProvider`, the Android transport (FCM HTTP v1):
-  - Reads a Firebase service-account JSON file (path from `FERNGEIST_GATEWAY_FCM_CREDENTIALS_FILE`)
-    and authenticates via OAuth2 with the `firebase.messaging` scope.
-  - Sends **hybrid notification+data** messages: the FCM `notification` block lets
-    a killed app's system display the alert, while the `data` block duplicates
-    title/body and carries the deep-link keys for the foreground client. Adds an
-    `android` block with high priority and a per-category channel (`ferngeist_push`
-    for alerts, `ferngeist_push_updates` for quiet updates — `turn_complete` and
-    live `progress` use the quiet channel). Reports
-    `ErrTokenUnregistered` on `UNREGISTERED`/404.
+- `internal/push/webpush.go` provides `WebPushProvider`, the only transport,
+  registered for the `webpush` platform:
+  - Sends Web Push (RFC 8030) encrypted end to end (RFC 8291) and signed with
+    the gateway's VAPID key (RFC 8292), generated on first boot and persisted in
+    the `vapid_keys` table. It needs no third-party credentials; the endpoint
+    the client registered decides the route (FCM via UnifiedPush's embedded
+    distributor, a UnifiedPush distributor such as ntfy, or a browser push
+    service), and only the client can decrypt.
+  - Sends data only: the client posts the notification and picks its channel.
+    `progress` goes out at normal urgency with a short TTL and a per-chat
+    `Topic`; everything else at high urgency.
+  - Reports `ErrTokenUnregistered` on `404`/`410`, and for a stored token that
+    is not a subscription.
   - Is store-free — token lookup and eviction live in the dispatcher.
-- `internal/push/log.go` provides `LogProvider`, which logs instead of delivering.
-  The daemon registers it for the `android` platform when no Firebase credentials
-  are configured or they fail to load, so a bad push config never blocks boot.
 - The session calls `PushSvc.Notify` (10-second context timeout) on each notable
   event, **regardless of client attachment** — the client suppresses foreground
   notifications, a foreground/background distinction the gateway can't make.
@@ -122,21 +122,24 @@ device's registered platform.
   gateway's `gatewayId` as `serverId` for deep-linking.
 - **Live progress** — the pump parses each agent stdout line for ACP
   `session/update` frames with a `tool_call` or `tool_call_update` discriminator
-  and emits a `progress` push so a phone user sees the agent working mid-turn.
+  and, while a prompt for that chat is running, emits a `progress` push so a
+  phone user sees the agent working mid-turn. (`session/load` replays finished
+  tool calls in the same shape, so updates outside a prompt never push.)
   The summary resolves from the frame's `title`, then the first `content` text
   block, then a verb derived from `kind` (e.g. "Running a command"). Non-terminal
   updates (`in_progress`) are deduplicated by `(toolCallId, summary)` and
   throttled to one push per `FERNGEIST_GATEWAY_PROGRESS_INTERVAL_SECONDS`
   (default 15s); terminal updates (`completed`/`failed`) always push immediately
-  so the user sees the tool boundary. Progress pushes route to the quiet
-  `ferngeist_push_updates` channel.
-- `POST /v1/devices/push-token` registers/updates a device's `(token, platform)`,
-  stored in SQLite. The interface only sends; registration is via the API endpoint.
+  so the user sees the tool boundary. Throttling is per chat.
+- `GET /v1/devices/push-config` hands clients the VAPID public key, and
+  `POST /v1/devices/push-token` stores a device's subscription as its token
+  (platform `webpush`) in SQLite. The interface only sends; registration is via
+  the API.
 
-Adding a platform (iOS/Web) is additive: implement another `Provider`, register it
-under its platform key in the daemon. Neither the dispatcher nor the session layer
-changes. (FCM itself can also relay to APNs/Web Push via override blocks, so a
-single `FCMProvider` may cover multiple platforms.)
+Web Push already covers Android (UnifiedPush) and browsers. A platform it cannot
+reach — a native iOS app, whose APNs does not accept Web Push — is additive:
+implement another `Provider` and register it under its platform key in the
+daemon. Neither the dispatcher nor the session layer changes.
 
 ## Workspace browsing
 

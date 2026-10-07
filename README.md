@@ -1,6 +1,6 @@
 # Ferngeist Gateway
 
-`Ferngeist Gateway` is a self-hosted backend service for ACP-compatible agents. Its main purpose is to expose ACP agents through a unified WebSocket API with **resilient sessions** that survive WebSocket disconnection — keeping agents alive, dispatching FCM push notifications (`end_turn`, permission requests, agent errors, agent crashes), and allowing seamless reconnection. It discovers and launches supported agents, provides one authenticated endpoint, and manages pairing and paired devices. It also powers the [Ferngeist](https://github.com/arafatamim/Ferngeist) Android app.
+`Ferngeist Gateway` is a self-hosted backend service for ACP-compatible agents. Its main purpose is to expose ACP agents through a unified WebSocket API with **resilient sessions** that survive WebSocket disconnection — keeping agents alive, dispatching end-to-end encrypted Web Push notifications (turn complete, permission and input requests, agent errors, agent crashes), and allowing seamless reconnection. It discovers and launches supported agents, provides one authenticated endpoint, and manages pairing and paired devices. It also powers the [Ferngeist](https://github.com/arafatamim/Ferngeist) Android app.
 
 ## Install
 
@@ -109,7 +109,7 @@ Then pair the device and add the public URL in the Ferngeist app.
 - exposes ACP agents through one unified WebSocket API
 - discovers supported agents and launches them on demand
 - handles pairing and paired device credentials
-- supports **resilient sessions** that survive WebSocket disconnection with push notification wake-up (FCM, with a pluggable provider seam for other platforms) and seamless reconnection
+- supports **resilient sessions** that survive WebSocket disconnection with push notification wake-up (Web Push via UnifiedPush or the browser, no Firebase credentials needed) and seamless reconnection
 - supports local and LAN-based access
 - **workspace browsing:** read-only file view (`GET /v1/runtimes/{id}/files`) and git inspection (`git/status`, `git/diff`) so a paired client can see what the agent is working on
 
