@@ -3,6 +3,7 @@ package update
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -12,9 +13,11 @@ import (
 type fakeChecker struct {
 	release Release
 	err     error
+	checks  atomic.Int32
 }
 
 func (f *fakeChecker) LatestStable(ctx context.Context) (Release, error) {
+	f.checks.Add(1)
 	return f.release, f.err
 }
 
@@ -107,8 +110,9 @@ func TestCheckAndNotifyDeviceIDErrorNoPush(t *testing.T) {
 
 func TestNotifierRunTicks(t *testing.T) {
 	p := &fakePush{}
+	checker := &fakeChecker{release: Release{TagName: "v2.0.0"}}
 	n := &Notifier{
-		Checker:  &fakeChecker{release: Release{TagName: "v2.0.0"}},
+		Checker:  checker,
 		Push:     p,
 		Interval: 10 * time.Millisecond,
 		DeviceIDs: func(ctx context.Context) ([]string, error) {
@@ -126,8 +130,11 @@ func TestNotifierRunTicks(t *testing.T) {
 	<-done
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if len(p.calls) < 2 {
-		t.Fatalf("calls = %d, want >= 2 (initial + at least one tick)", len(p.calls))
+	if checker.checks.Load() < 2 {
+		t.Fatalf("checks = %d, want >= 2 (initial + at least one tick)", checker.checks.Load())
+	}
+	if len(p.calls) != 1 {
+		t.Fatalf("calls = %d, want 1 (same tag is deduped across ticks)", len(p.calls))
 	}
 }
 
@@ -169,7 +176,7 @@ func TestCheckAndNotifyDowngradeNoPush(t *testing.T) {
 	}
 }
 
-func TestIsNewerVersion(t *testing.T) {
+func TestIsNewer(t *testing.T) {
 	cases := []struct {
 		a, b string
 		want bool
@@ -183,10 +190,15 @@ func TestIsNewerVersion(t *testing.T) {
 		{"dev", "1.0.0", false},
 		{"1.0.0", "dev", false},
 		{"", "1.0.0", false},
+		{"0.11.3", "0.11.3-dirty", false},
+		{"0.11.3-dirty", "0.11.3", false},
+		{"0.11.4", "0.11.3-dirty", true},
+		{"1.0", "1.0.0", false},
+		{"1.0.1", "1.0", true},
 	}
 	for _, c := range cases {
-		if got := isNewerVersion(c.a, c.b); got != c.want {
-			t.Errorf("isNewerVersion(%q, %q) = %v, want %v", c.a, c.b, got, c.want)
+		if got := IsNewer(c.a, c.b); got != c.want {
+			t.Errorf("IsNewer(%q, %q) = %v, want %v", c.a, c.b, got, c.want)
 		}
 	}
 }
@@ -200,7 +212,10 @@ func TestParseVersion(t *testing.T) {
 		{"1.0.0", []int{1, 0, 0}, true},
 		{"1.10", []int{1, 10}, true},
 		{"1", []int{1}, true},
-		{"1.0.0-beta", nil, false},
+		{"1.0.0-beta", []int{1, 0, 0}, true},
+		{"0.11.3-dirty", []int{0, 11, 3}, true},
+		{"1.2.3+meta", []int{1, 2, 3}, true},
+		{"-dirty", nil, false},
 		{"", nil, false},
 		{"a.b", nil, false},
 		{"1..0", nil, false},
@@ -223,5 +238,50 @@ func TestParseVersion(t *testing.T) {
 				t.Errorf("parseVersion(%q)[%d] = %d, want %d", c.in, i, got[i], c.want[i])
 			}
 		}
+	}
+}
+
+func TestCheckAndNotifyDedupesSameTag(t *testing.T) {
+	p := &fakePush{}
+	checker := &fakeChecker{release: Release{TagName: "v2.0.0"}}
+	n := &Notifier{
+		Checker: checker,
+		Push:    p,
+		DeviceIDs: func(ctx context.Context) ([]string, error) {
+			return []string{"dev-1"}, nil
+		},
+	}
+	for i := 0; i < 3; i++ {
+		if err := n.CheckAndNotify(context.Background(), "v1.0.0"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(p.calls) != 1 {
+		t.Fatalf("calls = %d, want 1 for repeated same tag", len(p.calls))
+	}
+	checker.release = Release{TagName: "v2.1.0"}
+	if err := n.CheckAndNotify(context.Background(), "v1.0.0"); err != nil {
+		t.Fatal(err)
+	}
+	if len(p.calls) != 2 {
+		t.Fatalf("calls = %d, want 2 after a newer tag", len(p.calls))
+	}
+}
+
+func TestCheckAndNotifyNoDevicesDoesNotMarkNotified(t *testing.T) {
+	p := &fakePush{}
+	devices := []string{}
+	n := &Notifier{
+		Checker: &fakeChecker{release: Release{TagName: "v2.0.0"}},
+		Push:    p,
+		DeviceIDs: func(ctx context.Context) ([]string, error) {
+			return devices, nil
+		},
+	}
+	_ = n.CheckAndNotify(context.Background(), "v1.0.0")
+	devices = []string{"dev-1"}
+	_ = n.CheckAndNotify(context.Background(), "v1.0.0")
+	if len(p.calls) != 1 {
+		t.Fatalf("calls = %d, want 1 once a device is paired", len(p.calls))
 	}
 }

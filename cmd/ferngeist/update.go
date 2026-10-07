@@ -20,19 +20,17 @@ func runUpdate() error {
 	if updateChannel != "" && updateChannel != "self" {
 		return fmt.Errorf("this build was installed via %s; update it with your package manager instead", updateChannel)
 	}
-	// Package-manager installs set FERNGEIST_GATEWAY_UPDATE_CHECK_ENABLED=0 in
-	// the service environment (see packaging/postinstall.sh); the update
-	// command honors the same gate so apt/dnf/pacman installs refuse to
-	// self-update even though the binary's updateChannel ldflag is "self".
-	if v, ok := os.LookupEnv("FERNGEIST_GATEWAY_UPDATE_CHECK_ENABLED"); ok {
-		disabled := strings.TrimSpace(v) == "" || v == "0" || strings.EqualFold(v, "false")
-		if disabled {
-			return fmt.Errorf("this build is managed by a package manager; update it with your package manager instead")
-		}
-	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// Remove .old binaries left by a previous Windows swap (best-effort).
+	if p, err := serviceBinaryPath(); err == nil {
+		update.CleanupOld(p)
+	}
+	if exe, err := runningExecutable(); err == nil {
+		update.CleanupOld(exe)
+	}
 
 	checker := update.NewChecker("arafatamim/ferngeist-acp-gateway")
 	release, err := checker.LatestStable(ctx)
@@ -42,12 +40,13 @@ func runUpdate() error {
 
 	latest := strings.TrimPrefix(release.TagName, "v")
 	current := strings.TrimPrefix(buildVersion, "v")
-	if latest == current {
-		fmt.Println("Already up to date (" + current + ").")
-		return nil
-	}
-	if !strings.HasPrefix(latest, current+".") && !isNewerVersionTag(latest, current) {
-		fmt.Printf("Installed version %s is newer than latest stable %s; skipping.\n", current, release.TagName)
+	// An unparseable current version (e.g. "dev") is always updatable.
+	if update.ValidVersion(current) && !update.IsNewer(latest, current) {
+		if latest == current {
+			fmt.Println("Already up to date (" + current + ").")
+		} else {
+			fmt.Printf("Installed version %s is not older than latest stable %s; skipping.\n", current, release.TagName)
+		}
 		return nil
 	}
 
@@ -82,34 +81,42 @@ func runUpdate() error {
 		return err
 	}
 
-	// Resolve the installed binary path so the verified binary can be
-	// swapped in place. Status.UnitPath is the unit/task path, not the binary.
-	// On android (Termux) there is no service manager (no systemd/launchd);
-	// update swaps the binary directly and the user restarts it.
+	// Decide what to update. The service binary is updated when the service is
+	// installed; the running executable is updated too when it is a different
+	// file (otherwise a later `daemon install` from it would downgrade the
+	// service). Without a usable service manager (no systemd, android, or not
+	// installed) only the running executable is updated.
 	manager := service.NewManager()
-	serviceManaged := true
+	serviceManaged := false
 	status, err := manager.Status()
-	if err != nil {
-		if errors.Is(err, service.ErrServiceUnsupportedOS) {
-			serviceManaged = false
-		} else {
-			return fmt.Errorf("read service status: %w", err)
-		}
-	} else if !status.Installed {
-		return fmt.Errorf("daemon service is not installed; run `ferngeist-gateway daemon install` first")
+	switch {
+	case err == nil:
+		serviceManaged = status.Installed
+	case errors.Is(err, service.ErrServiceUnsupportedOS), errors.Is(err, service.ErrServiceUnsupportedConfig):
+	default:
+		return fmt.Errorf("read service status: %w", err)
 	}
-	binaryPath, err := serviceBinaryPath()
-	if err != nil {
-		return err
+	var targets []string
+	if serviceManaged {
+		binaryPath, err := serviceBinaryPath()
+		if err != nil {
+			return err
+		}
+		targets = append(targets, binaryPath)
+	}
+	if exe, err := runningExecutable(); err == nil {
+		if !sameFileAsAny(exe, targets) {
+			targets = append(targets, exe)
+		}
+	} else if len(targets) == 0 {
+		return fmt.Errorf("locate running executable: %w", err)
 	}
 
 	fmt.Printf("Downloading %s\n", asset.BrowserDownloadURL)
 
-	// Stage the archive in a temporary file next to the binary path so
-	// DownloadAndVerify (which writes the raw asset and verifies its
-	// checksum) and ExtractArchive (which pulls the binary out) share the
-	// same destination directory and filesystem.
-	tmpArchive, err := os.CreateTemp(filepath.Dir(binaryPath), ".update-*")
+	// The raw archive is staged in the system temp dir; each binary is then
+	// staged next to its target so the final swap is a same-filesystem rename.
+	tmpArchive, err := os.CreateTemp("", "ferngeist-update-*")
 	if err != nil {
 		return fmt.Errorf("stage update archive: %w", err)
 	}
@@ -121,66 +128,79 @@ func runUpdate() error {
 		return fmt.Errorf("download and verify update: %w", err)
 	}
 
-	// Stop the service before replacing the running binary. On Windows a
-	// running executable is locked and cannot be renamed over; on all
-	// platforms the process must be restarted to pick up the new binary.
+	// Stage every new binary before touching the service, so an extraction
+	// failure leaves the running daemon alone. The archive entry is named after
+	// the platform binary (ferngeist-gateway[.exe]); base(target) is the exact
+	// name the extractor must match.
+	staged := make([]string, len(targets))
+	defer func() {
+		for _, s := range staged {
+			if s != "" {
+				_ = os.Remove(s) // already gone once swapped
+			}
+		}
+	}()
+	for i, target := range targets {
+		staged[i], err = update.StageArchiveFromFile(tmpArchiveName, filepath.Base(target), target)
+		if err != nil {
+			return fmt.Errorf("extract update: %w", err)
+		}
+	}
+
+	// Stop the service so its binary can be replaced and re-launched.
 	if serviceManaged {
 		if err := manager.Stop(); err != nil {
 			return fmt.Errorf("stop daemon service: %w", err)
 		}
 	}
 
-	// The archive entry is named after the platform binary: on Windows it is
-	// ferngeist-gateway.exe (goreleaser keeps the .exe suffix), elsewhere
-	// ferngeist-gateway. base(binaryPath) is the exact name the extractor
-	// must match.
-	if err := update.ExtractArchiveFromFile(tmpArchiveName, filepath.Base(binaryPath), binaryPath); err != nil {
-		return fmt.Errorf("extract update: %w", err)
+	var swapErr error
+	for i, target := range targets {
+		if err := update.SwapBinary(staged[i], target); err != nil {
+			swapErr = fmt.Errorf("replace %s: %w", target, err)
+			break
+		}
 	}
 
 	if serviceManaged {
-		fmt.Printf("Updated to %s; restarting the daemon service.\n", release.TagName)
-		if err := manager.Restart(); err != nil {
+		// Restart even after a failed swap so the old binary keeps running.
+		if swapErr == nil {
+			fmt.Printf("Updated to %s; restarting the daemon service.\n", release.TagName)
+		}
+		if err := manager.Restart(); err != nil && swapErr == nil {
 			return fmt.Errorf("restart daemon service: %w", err)
 		}
-	} else {
-		fmt.Printf("Updated to %s at %s. Restart the daemon to pick it up.\n", release.TagName, binaryPath)
+	}
+	if swapErr != nil {
+		return swapErr
+	}
+	if !serviceManaged {
+		fmt.Printf("Updated to %s at %s. Restart it to pick up the new version.\n", release.TagName, strings.Join(targets, ", "))
 	}
 	return nil
 }
 
-// isNewerVersionTag compares two version strings numerically (dot-separated).
-func isNewerVersionTag(a, b string) bool {
-	ap := parseTagParts(a)
-	bp := parseTagParts(b)
-	for i := 0; i < len(ap) || i < len(bp); i++ {
-		av, bv := 0, 0
-		if i < len(ap) {
-			av = ap[i]
-		}
-		if i < len(bp) {
-			bv = bp[i]
-		}
-		if av != bv {
-			return av > bv
+// runningExecutable returns the symlink-resolved path of the current process.
+func runningExecutable() (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	return filepath.EvalSymlinks(exe)
+}
+
+// sameFileAsAny reports whether path is the same file as any of others.
+func sameFileAsAny(path string, others []string) bool {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	for _, o := range others {
+		if oi, err := os.Stat(o); err == nil && os.SameFile(fi, oi) {
+			return true
 		}
 	}
 	return false
-}
-
-func parseTagParts(v string) []int {
-	var parts []int
-	for _, p := range strings.Split(v, ".") {
-		n := 0
-		for _, c := range p {
-			if c < '0' || c > '9' {
-				return parts
-			}
-			n = n*10 + int(c-'0')
-		}
-		parts = append(parts, n)
-	}
-	return parts
 }
 
 // serviceBinaryPath returns the installed service binary path for this OS,

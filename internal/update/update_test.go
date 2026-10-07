@@ -299,3 +299,85 @@ func TestExtractArchiveMissingBinary(t *testing.T) {
 		t.Fatalf("dest exists after failed extract: stat error = %v", statErr)
 	}
 }
+
+func TestAssetForExactNameIgnoresBrewAndPrefixes(t *testing.T) {
+	r := Release{
+		TagName: "v1.2.3",
+		Assets: []Asset{
+			{Name: "ferngeist-gateway_1.2.3_linux_amd64_brew.tar.gz"},
+			{Name: "ferngeist-gateway_1.2.3_linux_arm64.tar.gz"},
+			{Name: "ferngeist-gateway_1.2.3_linux_amd64.tar.gz"},
+			{Name: "ferngeist-gateway_1.2.3_windows_amd64_brew.zip"},
+			{Name: "ferngeist-gateway_1.2.3_windows_amd64.zip"},
+		},
+	}
+	c := NewChecker("acme/ferngeist")
+	for goos, want := range map[string]string{
+		"linux":   "ferngeist-gateway_1.2.3_linux_amd64.tar.gz",
+		"windows": "ferngeist-gateway_1.2.3_windows_amd64.zip",
+	} {
+		got, err := c.AssetFor(r, goos, "amd64")
+		if err != nil || got.Name != want {
+			t.Errorf("AssetFor(%s/amd64) = %q, %v; want %q", goos, got.Name, err, want)
+		}
+	}
+	if a, err := c.AssetFor(r, "linux", "arm"); err == nil {
+		t.Errorf("AssetFor(linux/arm) = %q, want error (must not prefix-match arm64)", a.Name)
+	}
+}
+
+func TestSwapBinaryAside(t *testing.T) {
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "gw")
+	staged := filepath.Join(dir, "staged")
+	write := func(p, s string) {
+		t.Helper()
+		if err := os.WriteFile(p, []byte(s), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	read := func(p string) string {
+		t.Helper()
+		b, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+
+	// Success, with a stale .old that must be replaced.
+	write(dest, "old")
+	write(dest+".old", "stale")
+	write(staged, "new")
+	if err := swapBinary(staged, dest, true); err != nil {
+		t.Fatal(err)
+	}
+	if read(dest) != "new" || read(dest+".old") != "old" {
+		t.Fatalf("dest=%q old=%q, want new/old", read(dest), read(dest+".old"))
+	}
+	CleanupOld(dest)
+	if _, err := os.Stat(dest + ".old"); !os.IsNotExist(err) {
+		t.Fatalf(".old not cleaned: %v", err)
+	}
+
+	// Failed final rename (staged missing) rolls dest back.
+	if err := swapBinary(filepath.Join(dir, "nope"), dest, true); err == nil {
+		t.Fatal("swap with missing staged file = nil error")
+	}
+	if read(dest) != "new" {
+		t.Fatalf("dest after rollback = %q, want new", read(dest))
+	}
+
+	// No existing dest: plain rename.
+	fresh := filepath.Join(dir, "fresh")
+	write(staged, "x")
+	if err := swapBinary(staged, fresh, true); err != nil || read(fresh) != "x" {
+		t.Fatalf("fresh swap err=%v", err)
+	}
+
+	// Plain (non-aside) mode.
+	write(staged, "y")
+	if err := swapBinary(staged, fresh, false); err != nil || read(fresh) != "y" {
+		t.Fatalf("plain swap err=%v", err)
+	}
+}

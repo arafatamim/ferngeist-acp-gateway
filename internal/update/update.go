@@ -14,12 +14,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/url"
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"time"
 )
 
 const (
@@ -55,12 +58,12 @@ func NewChecker(repo string) *Checker {
 	return &Checker{Repo: repo}
 }
 
-// client returns c.Client, falling back to the process-wide default.
+// client returns c.Client, falling back to a short-timeout API client.
 func (c *Checker) client() *http.Client {
 	if c.Client != nil {
 		return c.Client
 	}
-	return http.DefaultClient
+	return &http.Client{Timeout: 30 * time.Second}
 }
 
 // baseURL returns the API root for the repository, honoring the test seam.
@@ -100,11 +103,18 @@ func (c *Checker) LatestStable(ctx context.Context) (Release, error) {
 	return release, nil
 }
 
-// AssetFor returns the first asset whose name contains "<goos>_<goarch>".
+// AssetFor returns the asset named exactly
+// "ferngeist-gateway_<version>_<goos>_<goarch>.tar.gz" (".zip" on windows).
+// Substring matching is unsafe: release assets also include "_brew" archives
+// (a different updateChannel) and "arm" would prefix-match "arm64".
 func (c *Checker) AssetFor(r Release, goos, goarch string) (Asset, error) {
-	needle := goos + "_" + goarch
+	ext := "tar.gz"
+	if goos == "windows" {
+		ext = "zip"
+	}
+	want := fmt.Sprintf("ferngeist-gateway_%s_%s_%s.%s", strings.TrimPrefix(r.TagName, "v"), goos, goarch, ext)
 	for _, asset := range r.Assets {
-		if strings.Contains(asset.Name, needle) {
+		if asset.Name == want {
 			return asset, nil
 		}
 	}
@@ -130,9 +140,10 @@ func (c *Checker) AssetBaseURL(r Release) string {
 	return ""
 }
 
-// DefaultClient returns the client used when none is configured.
+// DefaultClient returns the download client used when none is configured. The
+// overall timeout bounds a stalled transfer.
 func DefaultClient() *http.Client {
-	return http.DefaultClient
+	return &http.Client{Timeout: 10 * time.Minute}
 }
 
 // ChecksumFor parses SHA256SUMS data and returns the hex-decoded digest
@@ -208,28 +219,39 @@ func DownloadAndVerify(ctx context.Context, client *http.Client, url string, wan
 	return nil
 }
 
-// ExtractArchiveFromFile reads the release archive at src (tar.gz or zip)
-// and extracts the binary named binName into dest. It is a convenience
-// wrapper around ExtractArchive for archives staged by DownloadAndVerify.
-func ExtractArchiveFromFile(src, binName, dest string) error {
+// StageArchiveFromFile reads the release archive at src (tar.gz or zip) and
+// writes the binary named binName to a temporary file next to dest, returning
+// its path. Rename it into place with SwapBinary; the caller removes it if it
+// is never swapped.
+func StageArchiveFromFile(src, binName, dest string) (string, error) {
 	data, err := os.ReadFile(src)
 	if err != nil {
-		return fmt.Errorf("read staged archive %s: %w", src, err)
+		return "", fmt.Errorf("read staged archive %s: %w", src, err)
 	}
-	return ExtractArchive(data, binName, dest)
+	return stageExtract(data, binName, dest)
 }
 
 // ExtractArchive extracts the single binary named binName from a release
-// archive (tar.gz or zip) into dest. The archive layout is
-// "<binary>/ferngeist-gateway" for goreleaser archives. The format is
-// detected from the leading magic bytes, so the source file name does not
-// matter. The extracted file is written atomically: a temporary file next to
-// dest is populated and renamed into place only on success. Any failure
-// removes the temporary file.
+// archive (tar.gz or zip) into dest, atomically (stage + rename).
 func ExtractArchive(data []byte, binName, dest string) error {
+	tmpName, err := stageExtract(data, binName, dest)
+	if err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, dest); err != nil {
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("extract %s: %w", filepath.Base(dest), err)
+	}
+	return nil
+}
+
+// stageExtract writes binName from the archive to an executable temporary file
+// in dest's directory. The format is detected from the leading magic bytes, so
+// the source file name does not matter. Any failure removes the temporary file.
+func stageExtract(data []byte, binName, dest string) (string, error) {
 	dir := filepath.Dir(dest)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("create destination directory: %w", err)
+		return "", fmt.Errorf("create destination directory: %w", err)
 	}
 
 	var contents []byte
@@ -239,35 +261,63 @@ func ExtractArchive(data []byte, binName, dest string) error {
 	case len(data) >= 4 && string(data[:4]) == "PK\x03\x04": // zip magic
 		contents = extractZip(data, binName)
 	default:
-		return fmt.Errorf("extract %s: unsupported archive format", filepath.Base(dest))
+		return "", fmt.Errorf("extract %s: unsupported archive format", filepath.Base(dest))
 	}
 	if contents == nil {
-		return fmt.Errorf("extract %s: %s not found in archive", filepath.Base(dest), binName)
+		return "", fmt.Errorf("extract %s: %s not found in archive", filepath.Base(dest), binName)
 	}
 
 	tmp, err := os.CreateTemp(dir, ".update-*")
 	if err != nil {
-		return fmt.Errorf("extract %s: %w", filepath.Base(dest), err)
+		return "", fmt.Errorf("extract %s: %w", filepath.Base(dest), err)
 	}
 	tmpName := tmp.Name()
 	if _, err := tmp.Write(contents); err != nil {
 		_ = tmp.Close()
 		_ = os.Remove(tmpName)
-		return fmt.Errorf("extract %s: %w", filepath.Base(dest), err)
+		return "", fmt.Errorf("extract %s: %w", filepath.Base(dest), err)
 	}
 	if err := tmp.Close(); err != nil {
 		_ = os.Remove(tmpName)
-		return fmt.Errorf("extract %s: %w", filepath.Base(dest), err)
+		return "", fmt.Errorf("extract %s: %w", filepath.Base(dest), err)
 	}
 	if err := os.Chmod(tmpName, 0o755); err != nil {
 		_ = os.Remove(tmpName)
-		return fmt.Errorf("extract %s: %w", filepath.Base(dest), err)
+		return "", fmt.Errorf("extract %s: %w", filepath.Base(dest), err)
 	}
-	if err := os.Rename(tmpName, dest); err != nil {
-		_ = os.Remove(tmpName)
-		return fmt.Errorf("extract %s: %w", filepath.Base(dest), err)
+	return tmpName, nil
+}
+
+// SwapBinary renames the staged binary onto dest. Windows refuses to rename
+// over a running executable but allows renaming it, so there the existing dest
+// is moved aside to dest+".old" first (see CleanupOld) and restored if the
+// final rename fails.
+func SwapBinary(staged, dest string) error {
+	return swapBinary(staged, dest, runtime.GOOS == "windows")
+}
+
+func swapBinary(staged, dest string, aside bool) error {
+	if !aside {
+		return os.Rename(staged, dest)
+	}
+	old := dest + ".old"
+	_ = os.Remove(old) // stale leftover from a previous update
+	if err := os.Rename(dest, old); err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+		return os.Rename(staged, dest)
+	}
+	if err := os.Rename(staged, dest); err != nil {
+		_ = os.Rename(old, dest)
+		return err
 	}
 	return nil
+}
+
+// CleanupOld best-effort removes the dest+".old" file left by SwapBinary.
+func CleanupOld(dest string) {
+	_ = os.Remove(dest + ".old")
 }
 
 // extractTarGz returns the bytes of binName inside a gzipped tarball, or nil.

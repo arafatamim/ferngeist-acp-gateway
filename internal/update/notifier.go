@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/push"
@@ -25,6 +26,9 @@ type Notifier struct {
 	DeviceIDs func(ctx context.Context) ([]string, error)
 	// Interval between checks. The first check runs immediately.
 	Interval time.Duration
+
+	mu           sync.Mutex
+	lastNotified string // tag last pushed; dedupes re-notifying within the process
 }
 
 func NewNotifier(checker UpdateChecker, pushSvc push.PushService, deviceIDs func(ctx context.Context) ([]string, error)) *Notifier {
@@ -58,8 +62,8 @@ func (n *Notifier) Run(ctx context.Context, currentVersion string) {
 
 // CheckAndNotify fetches the latest stable release and, if it is newer than
 // currentVersion, pushes an update-available notification to all paired
-// devices. Version comparison is string-based (semver tags); a non-parseable
-// current version (e.g. "dev") never triggers.
+// devices, once per tag per process. A non-parseable current version (e.g.
+// "dev") never triggers.
 func (n *Notifier) CheckAndNotify(ctx context.Context, currentVersion string) error {
 	release, err := n.Checker.LatestStable(ctx)
 	if err != nil {
@@ -71,7 +75,13 @@ func (n *Notifier) CheckAndNotify(ctx context.Context, currentVersion string) er
 		return nil
 	}
 	// Only notify for a newer-looking version; never for a downgrade.
-	if !isNewerVersion(latest, current) {
+	if !IsNewer(latest, current) {
+		return nil
+	}
+	n.mu.Lock()
+	seen := n.lastNotified == release.TagName
+	n.mu.Unlock()
+	if seen {
 		return nil
 	}
 
@@ -80,6 +90,11 @@ func (n *Notifier) CheckAndNotify(ctx context.Context, currentVersion string) er
 		return fmt.Errorf("list paired devices for update notification: %w", err)
 	}
 
+	if len(deviceIDs) > 0 {
+		n.mu.Lock()
+		n.lastNotified = release.TagName
+		n.mu.Unlock()
+	}
 	for _, deviceID := range deviceIDs {
 		_ = n.Push.Notify(ctx, deviceID, push.Notification{
 			Title:    "Ferngeist Gateway update available: " + release.TagName,
@@ -90,10 +105,11 @@ func (n *Notifier) CheckAndNotify(ctx context.Context, currentVersion string) er
 	return nil
 }
 
-// isNewerVersion compares two dot-separated numeric versions lexically after
-// padding each component to equal width, so 1.10 > 1.9. Returns false on
-// parse failure (never false-positives an upgrade).
-func isNewerVersion(a, b string) bool {
+// IsNewer reports whether version a is strictly newer than b. Versions are
+// dot-separated numerics; a pre-release/build suffix ("-dirty", "+meta") is
+// ignored, so 0.11.3-dirty is not older than 0.11.3. Returns false when either
+// side is unparseable (never false-positives an upgrade).
+func IsNewer(a, b string) bool {
 	ap, aok := parseVersion(a)
 	bp, bok := parseVersion(b)
 	if !aok || !bok {
@@ -114,7 +130,16 @@ func isNewerVersion(a, b string) bool {
 	return false
 }
 
+// ValidVersion reports whether v (a leading "v" is tolerated) is parseable.
+func ValidVersion(v string) bool {
+	_, ok := parseVersion(strings.TrimPrefix(v, "v"))
+	return ok
+}
+
 func parseVersion(v string) ([]int, bool) {
+	if i := strings.IndexAny(v, "-+"); i >= 0 {
+		v = v[:i]
+	}
 	var parts []int
 	for _, p := range strings.Split(v, ".") {
 		if p == "" {

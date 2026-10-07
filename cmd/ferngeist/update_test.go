@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -26,24 +28,22 @@ func TestRunUpdateRefusesPackageChannel(t *testing.T) {
 	}
 }
 
-// TestRunUpdateHonorsEnvGate verifies the env-var gate: even a "self" build
-// refuses when FERNGEIST_GATEWAY_UPDATE_CHECK_ENABLED is disabled (the
-// postinstall.sh defense for package installs whose ldflag is self).
-func TestRunUpdateHonorsEnvGate(t *testing.T) {
-	old := updateChannel
-	updateChannel = "self"
-	defer func() { updateChannel = old }()
-
-	for _, v := range []string{"0", "false", "FALSE", ""} {
-		t.Run("env="+v, func(t *testing.T) {
-			t.Setenv("FERNGEIST_GATEWAY_UPDATE_CHECK_ENABLED", v)
-			err := runUpdate()
-			if err == nil {
-				t.Fatalf("runUpdate() = nil, want refusal with env=%q", v)
-			}
-			if !strings.Contains(err.Error(), "package manager") {
-				t.Fatalf("runUpdate() error = %q, want package-manager refusal", err)
-			}
-		})
+func TestSameFileAsAny(t *testing.T) {
+	dir := t.TempDir()
+	a := filepath.Join(dir, "a")
+	b := filepath.Join(dir, "b")
+	for _, p := range []string{a, b} {
+		if err := os.WriteFile(p, []byte("x"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !sameFileAsAny(a, []string{b, a}) {
+		t.Error("same path not detected")
+	}
+	if sameFileAsAny(a, []string{b, filepath.Join(dir, "missing")}) {
+		t.Error("different files reported as same")
+	}
+	if sameFileAsAny(filepath.Join(dir, "missing"), []string{a}) {
+		t.Error("missing path reported as same")
 	}
 }
