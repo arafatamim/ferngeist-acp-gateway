@@ -1,8 +1,8 @@
 #!/usr/bin/env pwsh
 # Universal installer for the Ferngeist Gateway (Windows).
 # Downloads the latest release zip, verifies its SHA-256 against SHA256SUMS,
-# installs the daemon as a per-user scheduled task (needs one UAC prompt to
-# create the task), and adds the CLI to the user PATH. Updates are manual:
+# installs the daemon as a per-user scheduled task (no elevation needed),
+# and adds the CLI to the user PATH. Updates are manual:
 # run `ferngeist-gateway update` when a new release is announced.
 #
 # Usage:
@@ -136,30 +136,26 @@ if ($Lan -and -not $Localhost) {
 } else {
     Write-Step 'Installing + starting the daemon (per-user scheduled task, localhost only)'
 }
-# Creating the scheduled task requires elevation (Task Scheduler denies task
-# creation from a UAC-filtered medium-integrity token). Start-Process -Verb
-# RunAs triggers the UAC prompt and runs the binary elevated. It returns
-# immediately, so $LASTEXITCODE is not populated; success/failure is inferred
-# by re-checking the task afterwards.
+# The task is scoped to the current user, so no elevation is needed (and
+# elevating would register it in the admin account's profile when the UAC
+# prompt is answered by a different user).
 $daemonInstall = $exe.FullName
-try {
-    $proc = Start-Process -FilePath $daemonInstall -ArgumentList $daemonArgs -Verb RunAs -PassThru -Wait
-    if ($proc.ExitCode -ne 0) {
-        Write-Warn "daemon install exited with code $($proc.ExitCode); the binary is at $daemonInstall - run 'ferngeist-gateway daemon install' from an elevated prompt"
-    }
-} catch {
-    # User cancelled the UAC prompt or elevation failed.
-    Write-Warn "daemon install needs elevation and could not run: $($_.Exception.Message)"
+& $daemonInstall @daemonArgs
+if ($LASTEXITCODE -ne 0) {
+    Write-Warn "daemon install exited with code $LASTEXITCODE; the binary is at $daemonInstall - run 'ferngeist-gateway daemon install' to retry"
 }
 
 # ---------------------------------------------------------------------------
 # Add the CLI to the user PATH
 # ---------------------------------------------------------------------------
 $binDir = Join-Path $env:LOCALAPPDATA 'FerngeistGateway\service\bin'
-$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-if ($userPath -notlike "*$binDir*") {
-    [Environment]::SetEnvironmentVariable('Path', "$binDir;$userPath", 'User')
-    Write-Step "Added $binDir to your user PATH (new terminals will pick it up)."
+# Only when the daemon install actually put the binary there.
+if (Test-Path -LiteralPath (Join-Path $binDir 'ferngeist-gateway.exe')) {
+    $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+    if ($userPath -notlike "*$binDir*") {
+        [Environment]::SetEnvironmentVariable('Path', "$binDir;$userPath", 'User')
+        Write-Step "Added $binDir to your user PATH (new terminals will pick it up)."
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -168,12 +164,10 @@ if ($userPath -notlike "*$binDir*") {
 if (-not $KeepDownloads) {
     Remove-Item -Recurse -Force -Path $setupDir -ErrorAction SilentlyContinue
 }
-# The elevated process ran invisibly; confirm the scheduled task exists.
-$task = schtasks /Query /TN FerngeistGateway /FO LIST 2>&1
-if ($LASTEXITCODE -eq 0 -and $task -match 'FerngeistGateway') {
+if (Get-ScheduledTask -TaskName FerngeistGateway -ErrorAction SilentlyContinue) {
     Write-Step "Installed ferngeist-gateway $ver. The daemon is registered as the FerngeistGateway scheduled task and running."
 } else {
-    Write-Warn "Could not confirm the FerngeistGateway scheduled task. Run 'ferngeist-gateway daemon install' from an elevated prompt."
+    Write-Warn "Could not confirm the FerngeistGateway scheduled task. Run 'ferngeist-gateway daemon install' to retry."
 }
 Write-Host 'Check the daemon with:  ferngeist-gateway daemon status'
 Write-Host 'Updates are manual: run `ferngeist-gateway update` when a new release is announced.'
