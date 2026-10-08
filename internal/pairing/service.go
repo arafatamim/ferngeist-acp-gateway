@@ -24,6 +24,16 @@ const (
 	defaultGracePeriod  = 90 * 24 * time.Hour
 	challengeHistoryTTL = 10 * time.Minute
 	codeLength          = 6
+
+	// defaultRotationOverlap is how long a token stays exchangeable after a
+	// refresh rotated it away. Rotation is otherwise instant and irreversible, so
+	// a lost response (or two refreshes racing) would leave the client holding a
+	// token the gateway only answers with "credential invalid" — the one state
+	// the grace recovery does not cover, and the one the app reacts to by
+	// dropping the gateway and its bindings. The client refreshes on launch and
+	// on push and treats a token within 24h of expiry as due, so one missed
+	// response is retried well inside this window.
+	defaultRotationOverlap = 48 * time.Hour
 )
 
 var (
@@ -116,7 +126,19 @@ type Service struct {
 	// byTokenHash indexes TokenHash -> deviceID so Validate is O(1):
 	// one SHA-256 per request instead of one per device.
 	byTokenHash map[string]string
-	store       *storage.SQLiteStore
+	// retired indexes the credential hashes recent refreshes rotated away, so a
+	// client that never received its new token can still exchange the old one.
+	// Retired hashes authorize nothing by themselves: only the refresh endpoint
+	// consults them, and only after proof-of-possession.
+	retired map[string]retiredToken
+	store   *storage.SQLiteStore
+}
+
+// retiredToken is a credential hash that a refresh rotated away, and the
+// deadline until which the gateway will still exchange it for the live token.
+type retiredToken struct {
+	deviceID string
+	until    time.Time
 }
 
 type Options struct {
@@ -156,6 +178,7 @@ func NewServiceWithOptions(logger *slog.Logger, store *storage.SQLiteStore, opti
 		challenges:  make(map[string]challengeRecord),
 		credentials: make(map[string]Credential),
 		byTokenHash: make(map[string]string),
+		retired:     make(map[string]retiredToken),
 		store:       store,
 	}
 	service.loadPersistedCredentials()
@@ -417,6 +440,7 @@ func (s *Service) RefreshCredential(token string) (Credential, error) {
 	}
 
 	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	now := s.now().UTC()
 	id, ok := s.byTokenHash[hashCredentialToken(token)]
@@ -428,55 +452,96 @@ func (s *Service) RefreshCredential(token string) (Credential, error) {
 				break
 			}
 		}
-		if !ok {
-			s.pruneExpiredCredentialsLocked(now)
-			s.mu.Unlock()
-			return Credential{}, ErrCredentialInvalid
+	}
+	// presented is the retired entry the caller came in on, if any. It is the
+	// token the client actually holds, so it is what must survive a restart.
+	var presented *retiredToken
+	if !ok {
+		// The caller holds a token this gateway already rotated away: its refresh
+		// response was lost, or two refreshes raced. Hand back the live credential
+		// when its secret is still known rather than answering "credential
+		// invalid", which is the one failure the client cannot recover from.
+		if retiredID, retired := s.retiredDeviceLocked(token, now); retired {
+			entry := s.retired[hashCredentialToken(token)]
+			presented = &entry
+			if current, exists := s.credentials[retiredID]; exists && current.Token != "" && now.Before(current.ExpiresAt) {
+				return current, nil
+			}
+			id, ok = retiredID, true
 		}
+	}
+	if !ok {
+		s.pruneExpiredCredentialsLocked(now)
+		return Credential{}, ErrCredentialInvalid
 	}
 	credential := s.credentials[id]
 	if now.After(credential.ExpiresAt) {
 		if s.gracePeriod <= 0 {
 			s.deleteCredentialLocked(id)
-			s.mu.Unlock()
 			return Credential{}, ErrCredentialExpired
 		}
 		if now.Sub(credential.ExpiresAt) > s.gracePeriod {
 			s.deleteCredentialLocked(id)
-			s.mu.Unlock()
 			return Credential{}, ErrCredentialGraceExpired
 		}
 	}
+
 	oldHash := credential.TokenHash
-	credential.Token = randomToken(32)
-	credential.TokenHash = hashCredentialToken(credential.Token)
-	credential.ExpiresAt = now.Add(s.tokenTTL)
+	newToken := randomToken(32)
+	newHash := hashCredentialToken(newToken)
+	expiresAt := now.Add(s.tokenTTL)
+
+	// Persist before the rotation becomes visible. A token the store never
+	// recorded is a token that disappears on the next restart, and the store is
+	// authoritative for what survives one. Failing here leaves the old credential
+	// in place — it still works, so the client can simply retry.
+	if s.store != nil {
+		record := storage.PairingRecord{
+			DeviceID:       credential.DeviceID,
+			DeviceName:     credential.DeviceName,
+			Token:          newHash,
+			ExpiresAt:      expiresAt,
+			Scopes:         credential.Scopes,
+			ProofPublicKey: credential.ProofPublicKey,
+		}
+		switch {
+		case presented != nil:
+			// The store keeps one retired hash per device. The live hash being
+			// replaced here was never delivered (the client came back with the
+			// retired one), so persist the token the client holds, under its
+			// original deadline so repeated retries cannot stretch the window.
+			record.RetiredToken = hashCredentialToken(token)
+			record.RetiredUntil = presented.until
+		case oldHash != "":
+			record.RetiredToken = oldHash
+			record.RetiredUntil = now.Add(defaultRotationOverlap)
+		}
+		if err := s.store.SavePairing(context.Background(), record); err != nil {
+			s.logger.Error("persist refreshed pairing failed", "device_id", credential.DeviceID, "error", err)
+			return Credential{}, err
+		}
+	}
+
+	credential.Token = newToken
+	credential.TokenHash = newHash
+	credential.ExpiresAt = expiresAt
 	credential.ExpiredAt = nil
 	s.credentials[id] = credential
 	if oldHash != "" && oldHash != credential.TokenHash {
 		delete(s.byTokenHash, oldHash)
+		s.retired[oldHash] = retiredToken{deviceID: credential.DeviceID, until: now.Add(defaultRotationOverlap)}
 	}
+	s.pruneRetiredLocked(now)
 	s.indexCredentialLocked(credential)
-	store := s.store
-	s.mu.Unlock()
-	if store != nil {
-		if err := store.SavePairing(context.Background(), storage.PairingRecord{
-			DeviceID:       credential.DeviceID,
-			DeviceName:     credential.DeviceName,
-			Token:          credential.TokenHash,
-			ExpiresAt:      credential.ExpiresAt,
-			Scopes:         credential.Scopes,
-			ProofPublicKey: credential.ProofPublicKey,
-		}); err != nil {
-			s.logger.Error("persist refreshed pairing failed", "error", err)
-		}
-	}
 	return credential, nil
 }
 
 // LookupCredentialByToken returns the credential matching the token regardless
 // of expiry state, without mutating it. Used by the refresh endpoint to
-// authorize a proof-of-possession for a possibly-expired credential.
+// authorize a proof-of-possession for a possibly-expired credential, and for a
+// token a refresh rotated away within the overlap window — the caller that lost
+// the refresh response still holds that one. Normal API calls go through
+// ValidateCredential and never see retired tokens.
 func (s *Service) LookupCredentialByToken(token string) (Credential, error) {
 	if token == "" {
 		return Credential{}, ErrCredentialMissing
@@ -490,6 +555,11 @@ func (s *Service) LookupCredentialByToken(token string) (Credential, error) {
 	}
 	for _, credential := range s.credentials {
 		if credential.TokenHash == "" && credential.Token == token {
+			return credential, nil
+		}
+	}
+	if deviceID, ok := s.retiredDeviceLocked(token, s.now().UTC()); ok {
+		if credential, ok := s.credentials[deviceID]; ok {
 			return credential, nil
 		}
 	}
@@ -559,6 +629,30 @@ func (s *Service) pruneExpiredCredentialsLocked(now time.Time) {
 			s.deleteCredentialLocked(id)
 		}
 	}
+	s.pruneRetiredLocked(now)
+}
+
+func (s *Service) pruneRetiredLocked(now time.Time) {
+	for hash, entry := range s.retired {
+		if now.After(entry.until) {
+			delete(s.retired, hash)
+		}
+	}
+}
+
+// retiredDeviceLocked resolves a token that a refresh rotated away recently.
+// It only names the device the caller is holding a token for; the caller must
+// still prove possession of that device's key before anything is issued.
+// Caller holds s.mu.
+func (s *Service) retiredDeviceLocked(token string, now time.Time) (string, bool) {
+	entry, ok := s.retired[hashCredentialToken(token)]
+	if !ok || now.After(entry.until) {
+		return "", false
+	}
+	if _, ok := s.credentials[entry.deviceID]; !ok {
+		return "", false
+	}
+	return entry.deviceID, true
 }
 
 // shouldReapCredential reports whether a credential should be hard-deleted:
@@ -581,6 +675,12 @@ func (s *Service) deleteCredentialLocked(deviceID string) {
 		}
 	}
 	delete(s.credentials, deviceID)
+	// A revoked device must not keep exchanging whatever it rotated away.
+	for hash, entry := range s.retired {
+		if entry.deviceID == deviceID {
+			delete(s.retired, hash)
+		}
+	}
 	if s.store == nil {
 		return
 	}
@@ -675,6 +775,9 @@ func (s *Service) loadPersistedCredentials() {
 		}
 		s.credentials[record.DeviceID] = credential
 		s.indexCredentialLocked(credential)
+		if record.RetiredToken != "" && now.Before(record.RetiredUntil) {
+			s.retired[record.RetiredToken] = retiredToken{deviceID: record.DeviceID, until: record.RetiredUntil}
+		}
 		if !isHashedCredentialToken(record.Token) && s.store != nil {
 			if err := s.store.SavePairing(context.Background(), storage.PairingRecord{
 				DeviceID:       record.DeviceID,
@@ -683,6 +786,8 @@ func (s *Service) loadPersistedCredentials() {
 				ExpiresAt:      record.ExpiresAt,
 				Scopes:         fallbackScopes(record.Scopes, s.baseScopes),
 				ProofPublicKey: record.ProofPublicKey,
+				RetiredToken:   record.RetiredToken,
+				RetiredUntil:   record.RetiredUntil,
 			}); err != nil {
 				s.logger.Error("upgrade pairing token hash failed", "device_id", record.DeviceID, "error", err)
 			}

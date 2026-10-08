@@ -6,6 +6,7 @@ package storage
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1485,5 +1486,68 @@ func TestEnsureVAPIDKeysGeneratesOnceAndPersists(t *testing.T) {
 	pub, priv, err = store.EnsureVAPIDKeys(ctx, gen)
 	if err != nil || pub != "pub-1" || priv != "priv-1" || calls != 1 {
 		t.Fatalf("after reopen = (%q, %q, %v), generator calls = %d", pub, priv, err, calls)
+	}
+}
+
+// ========================================================================
+// Schema upgrades for databases created by an older gateway
+// ========================================================================
+
+// TestOpenUpgradesPairedDevicesWithRetiredColumns guards the upgrade path for
+// databases created before the retired-credential columns existed: CREATE TABLE
+// IF NOT EXISTS is a no-op on an existing table, so without the explicit ALTER
+// every refresh on an upgraded gateway would fail to persist — and a refresh
+// that cannot persist now fails loudly rather than handing out a token the
+// store does not have.
+func TestOpenUpgradesPairedDevicesWithRetiredColumns(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy_pairing.db")
+
+	legacy, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	if _, err := legacy.Exec(`CREATE TABLE paired_devices (
+			device_id TEXT PRIMARY KEY,
+			device_name TEXT NOT NULL,
+			token TEXT NOT NULL,
+			expires_at TEXT NOT NULL
+		)`); err != nil {
+		t.Fatalf("create legacy paired_devices: %v", err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatalf("close legacy db: %v", err)
+	}
+
+	store, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	retiredUntil := time.Date(2026, 4, 25, 10, 0, 0, 0, time.UTC)
+	if err := store.SavePairing(ctx, PairingRecord{
+		DeviceID:       "dev-1",
+		DeviceName:     "Pixel 9",
+		Token:          "sha256:current",
+		ExpiresAt:      retiredUntil.Add(24 * time.Hour),
+		RetiredToken:   "sha256:retired",
+		RetiredUntil:   retiredUntil,
+	}); err != nil {
+		t.Fatalf("SavePairing() error = %v", err)
+	}
+
+	pairings, err := store.ListPairings(ctx)
+	if err != nil {
+		t.Fatalf("ListPairings() error = %v", err)
+	}
+	if len(pairings) != 1 {
+		t.Fatalf("len(pairings) = %d, want 1", len(pairings))
+	}
+	if pairings[0].RetiredToken != "sha256:retired" {
+		t.Fatalf("RetiredToken = %q, want %q", pairings[0].RetiredToken, "sha256:retired")
+	}
+	if !pairings[0].RetiredUntil.Equal(retiredUntil) {
+		t.Fatalf("RetiredUntil = %v, want %v", pairings[0].RetiredUntil, retiredUntil)
 	}
 }

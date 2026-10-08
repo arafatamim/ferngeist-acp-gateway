@@ -31,6 +31,14 @@ type PairingRecord struct {
 	ExpiresAt      time.Time
 	Scopes         []string
 	ProofPublicKey string
+	// RetiredToken is the credential hash the last refresh rotated away, and
+	// RetiredUntil is the deadline until which the gateway still exchanges it for
+	// the live token. A client that lost the refresh response (or fired two
+	// refreshes concurrently) holds the retired token; without this it can only
+	// ever see "credential invalid", which the app treats as a dead pairing.
+	// An empty RetiredToken means the device has no retired credential.
+	RetiredToken string
+	RetiredUntil time.Time
 }
 
 type RuntimeRecord struct {
@@ -177,16 +185,20 @@ func (s *SQLiteStore) SavePairing(ctx context.Context, record PairingRecord) err
 	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(
 		ctx,
-		`INSERT INTO paired_devices(device_id, device_name, token, expires_at)
-		 VALUES (?, ?, ?, ?)
+		`INSERT INTO paired_devices(device_id, device_name, token, expires_at, retired_token, retired_until)
+		 VALUES (?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(device_id) DO UPDATE SET
 		   device_name = excluded.device_name,
 		   token = excluded.token,
-		   expires_at = excluded.expires_at`,
+		   expires_at = excluded.expires_at,
+		   retired_token = excluded.retired_token,
+		   retired_until = excluded.retired_until`,
 		record.DeviceID,
 		record.DeviceName,
 		record.Token,
 		record.ExpiresAt.UTC().Format(time.RFC3339Nano),
+		record.RetiredToken,
+		formatOptionalTime(record.RetiredUntil),
 	); err != nil {
 		return err
 	}
@@ -214,7 +226,7 @@ func (s *SQLiteStore) SavePairing(ctx context.Context, record PairingRecord) err
 }
 
 func (s *SQLiteStore) ListPairings(ctx context.Context) ([]PairingRecord, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT p.device_id, p.device_name, p.token, p.expires_at, COALESCE(s.scopes, ''), COALESCE(k.public_key, '') FROM paired_devices p LEFT JOIN paired_device_scopes s ON s.device_id = p.device_id LEFT JOIN paired_device_proofs k ON k.device_id = p.device_id`)
+	rows, err := s.db.QueryContext(ctx, `SELECT p.device_id, p.device_name, p.token, p.expires_at, COALESCE(s.scopes, ''), COALESCE(k.public_key, ''), p.retired_token, p.retired_until FROM paired_devices p LEFT JOIN paired_device_scopes s ON s.device_id = p.device_id LEFT JOIN paired_device_proofs k ON k.device_id = p.device_id`)
 	if err != nil {
 		return nil, err
 	}
@@ -223,12 +235,14 @@ func (s *SQLiteStore) ListPairings(ctx context.Context) ([]PairingRecord, error)
 	var records []PairingRecord
 	for rows.Next() {
 		var (
-			record      PairingRecord
-			expiresRaw  string
-			scopesRaw   string
-			proofKeyRaw string
+			record          PairingRecord
+			expiresRaw      string
+			scopesRaw       string
+			proofKeyRaw     string
+			retiredRaw      string
+			retiredUntilRaw string
 		)
-		if err := rows.Scan(&record.DeviceID, &record.DeviceName, &record.Token, &expiresRaw, &scopesRaw, &proofKeyRaw); err != nil {
+		if err := rows.Scan(&record.DeviceID, &record.DeviceName, &record.Token, &expiresRaw, &scopesRaw, &proofKeyRaw, &retiredRaw, &retiredUntilRaw); err != nil {
 			return nil, err
 		}
 		record.ExpiresAt, err = time.Parse(time.RFC3339Nano, expiresRaw)
@@ -241,9 +255,25 @@ func (s *SQLiteStore) ListPairings(ctx context.Context) ([]PairingRecord, error)
 			}
 		}
 		record.ProofPublicKey = proofKeyRaw
+		record.RetiredToken = retiredRaw
+		if retiredUntilRaw != "" {
+			record.RetiredUntil, err = time.Parse(time.RFC3339Nano, retiredUntilRaw)
+			if err != nil {
+				return nil, err
+			}
+		}
 		records = append(records, record)
 	}
 	return records, rows.Err()
+}
+
+// formatOptionalTime renders a timestamp column that may be absent, using the
+// same RFC3339Nano encoding as the columns that are always present.
+func formatOptionalTime(value time.Time) string {
+	if value.IsZero() {
+		return ""
+	}
+	return value.UTC().Format(time.RFC3339Nano)
 }
 
 // GetPairedDeviceIDs returns the device IDs of all currently paired devices.
@@ -875,7 +905,9 @@ func (s *SQLiteStore) migrate(ctx context.Context) error {
 			device_id TEXT PRIMARY KEY,
 			device_name TEXT NOT NULL,
 			token TEXT NOT NULL,
-			expires_at TEXT NOT NULL
+			expires_at TEXT NOT NULL,
+			retired_token TEXT NOT NULL DEFAULT '',
+			retired_until TEXT NOT NULL DEFAULT ''
 		)`,
 		`CREATE TABLE IF NOT EXISTS paired_device_scopes (
 			device_id TEXT PRIMARY KEY,
@@ -993,6 +1025,25 @@ func (s *SQLiteStore) migrate(ctx context.Context) error {
 	if !hasClean {
 		if _, err := s.db.ExecContext(ctx,
 			`ALTER TABLE runtime_failures ADD COLUMN clean INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return err
+		}
+	}
+
+	// paired_devices gained the retired-credential columns after the first
+	// releases shipped, so databases created before them need an explicit
+	// upgrade: CREATE TABLE IF NOT EXISTS is a no-op on an existing table.
+	for _, column := range []struct{ name, statement string }{
+		{"retired_token", `ALTER TABLE paired_devices ADD COLUMN retired_token TEXT NOT NULL DEFAULT ''`},
+		{"retired_until", `ALTER TABLE paired_devices ADD COLUMN retired_until TEXT NOT NULL DEFAULT ''`},
+	} {
+		present, err := s.tableHasColumn(ctx, "paired_devices", column.name)
+		if err != nil {
+			return err
+		}
+		if present {
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx, column.statement); err != nil {
 			return err
 		}
 	}

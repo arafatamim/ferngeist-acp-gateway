@@ -2928,3 +2928,61 @@ func TestAuthRefreshRejectsPastGraceWithDistinctError(t *testing.T) {
 		t.Fatalf("error = %q, want %q", response.Error, pairing.ErrCredentialGraceExpired.Error())
 	}
 }
+
+// A refresh whose response never reached the client must not brick the pairing.
+// The app still holds the token it had; answering "credential invalid" is the
+// one error it acts on by deleting the gateway and its agent bindings, so the
+// gateway exchanges the rotated token for the live one instead.
+func TestAuthRefreshExchangesRotatedTokenWithinOverlap(t *testing.T) {
+	server := newConfiguredTestServer(config.Config{
+		ListenAddr:    "127.0.0.1:0",
+		CredentialTTL: 24 * time.Hour,
+	})
+	credential := pairDeviceWithProof(t, server)
+
+	refreshAt := time.Now().UTC()
+	server.pairing.SetClockForTesting(func() time.Time { return refreshAt })
+	server.now = func() time.Time { return refreshAt }
+
+	first := httptest.NewRequest(http.MethodPost, "/v1/auth/refresh", nil)
+	signProofRequest(t, first, credential, nil, refreshAt, "nonce-lost-response")
+	firstRecorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(firstRecorder, first)
+	if firstRecorder.Code != http.StatusOK {
+		t.Fatalf("refresh status code = %d, want %d", firstRecorder.Code, http.StatusOK)
+	}
+	var lost pairCompleteResponse
+	if err := json.Unmarshal(firstRecorder.Body.Bytes(), &lost); err != nil {
+		t.Fatalf("Unmarshal(refresh) error = %v", err)
+	}
+	if lost.Token == credential.token {
+		t.Fatal("refresh should rotate the token")
+	}
+
+	// The client never received that response and retries with the token it has,
+	// with a fresh proof nonce.
+	retry := httptest.NewRequest(http.MethodPost, "/v1/auth/refresh", nil)
+	signProofRequest(t, retry, credential, nil, refreshAt, "nonce-lost-response-retry")
+	retryRecorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(retryRecorder, retry)
+	if retryRecorder.Code != http.StatusOK {
+		t.Fatalf("retry status code = %d, want %d", retryRecorder.Code, http.StatusOK)
+	}
+	var retried pairCompleteResponse
+	if err := json.Unmarshal(retryRecorder.Body.Bytes(), &retried); err != nil {
+		t.Fatalf("Unmarshal(retry) error = %v", err)
+	}
+	if retried.Token != lost.Token {
+		t.Fatalf("retry token = %q, want the live token %q", retried.Token, lost.Token)
+	}
+
+	// The recovered token is the live one: it authenticates with proof.
+	credential.token = retried.Token
+	liveRequest := httptest.NewRequest(http.MethodGet, "/v1/agents", nil)
+	signProofRequest(t, liveRequest, credential, nil, refreshAt, "nonce-recovered")
+	liveRecorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(liveRecorder, liveRequest)
+	if liveRecorder.Code != http.StatusOK {
+		t.Fatalf("recovered token status code = %d, want %d", liveRecorder.Code, http.StatusOK)
+	}
+}
