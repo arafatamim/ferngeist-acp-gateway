@@ -97,6 +97,8 @@ type gitChangedFile struct {
 // per rename/copy; the status is the X or Y of the XY pair (index status if
 // non-'.', else worktree status). Rename/copy entries report the destination
 // path (the field before the tab); the tab-separated origPath is the source.
+// Unmerged (conflicted) entries are `u <XY> <sub> <m1> <m2> <m3> <mW> <h1> <h2> <h3> <path>`
+// and report status "U" whatever the XY pair.
 // Untracked files are emitted as `? <path>` lines with status "?". Header
 // lines (`#`, blank) are ignored. Paths are read as raw line suffixes (git
 // runs with core.quotePath=false), so spaces inside a path parse correctly.
@@ -114,14 +116,17 @@ func parseGitStatus(out string) []gitChangedFile {
 			// to a single `? <dir>/` entry, which is a directory.
 			p := strings.TrimSpace(line[1:])
 			files = append(files, gitChangedFile{Path: p, Status: "?", IsDir: strings.HasSuffix(p, "/")})
-		case (line[0] == '1' || line[0] == '2') && line[1] == ' ':
-			// Tracked change. Both formats share a fixed whitespace-separated
-			// prefix (7 fields for format 1, 8 for format 2); the path is the
-			// raw remainder of the line and may itself contain spaces
-			// (core.quotePath=false), so it is not a whitespace token.
+		case (line[0] == '1' || line[0] == '2' || line[0] == 'u') && line[1] == ' ':
+			// Tracked change. All formats share a fixed whitespace-separated
+			// prefix (7 fields for format 1, 8 for format 2, 9 for unmerged);
+			// the path is the raw remainder of the line and may itself contain
+			// spaces (core.quotePath=false), so it is not a whitespace token.
 			prefix := 7
-			if line[0] == '2' {
+			switch line[0] {
+			case '2':
 				prefix = 8
+			case 'u':
+				prefix = 9
 			}
 			xy, rest, ok := afterFields(line[2:], 1)
 			if !ok || rest == "" {
@@ -149,6 +154,9 @@ func parseGitStatus(out string) []gitChangedFile {
 			status := string(xy[0])
 			if status == "." {
 				status = string(xy[1])
+			}
+			if line[0] == 'u' {
+				status = "U"
 			}
 			// sub is the abbreviated status per worktree: S..U marks a modified
 			// submodule (a gitlink directory). A trailing slash marks a collapsed
@@ -307,6 +315,14 @@ func runGitLimited(ctx context.Context, dir string, max int, args ...string) (st
 		return "", fmt.Errorf("git %s: %s", strings.Join(args, " "), readErr)
 	}
 	return string(out), nil
+}
+
+// gitStatus runs `git status --porcelain=v2` scoped to cwd. The `-- .`
+// pathspec keeps changes elsewhere in the repo out when the agent works in a
+// subdirectory; v2 reports paths relative to cwd, which is what every
+// consumer (resolveWithinRoot, countFileLines, numstat --relative) expects.
+func gitStatus(ctx context.Context, cwd string) (string, error) {
+	return runGit(ctx, cwd, "status", "--porcelain=v2", "--branch", "--untracked-files=all", "--", ".")
 }
 
 // fileReadResponse is the payload for GET /v1/runtimes/{id}/files. It embeds
@@ -469,7 +485,7 @@ func (s *Server) handleWorkspaceGitStatus(w http.ResponseWriter, r *http.Request
 	if !ok {
 		return
 	}
-	out, err := runGit(r.Context(), cwd, "status", "--porcelain=v2", "--branch", "--untracked-files=all")
+	out, err := gitStatus(r.Context(), cwd)
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
@@ -481,12 +497,14 @@ func (s *Server) handleWorkspaceGitStatus(w http.ResponseWriter, r *http.Request
 	// (both staged and unstaged edits) get counts for the whole HEAD → worktree
 	// delta. Untracked files are not covered by git diff, so count their lines
 	// directly from disk.
-	numstat, err := runGit(r.Context(), cwd, "diff", "HEAD", "--numstat")
+	// --relative keys numstat by cwd-relative path, matching git status, and
+	// drops changes outside cwd.
+	numstat, err := runGit(r.Context(), cwd, "diff", "HEAD", "--numstat", "--relative")
 	if err != nil {
 		// No HEAD yet (fresh repo with staged-but-uncommitted files): git diff
 		// HEAD fails, so fall back to the staged diff (index vs the empty tree)
 		// to still report real counts for tracked changes.
-		numstat, err = runGit(r.Context(), cwd, "diff", "--cached", "--numstat")
+		numstat, err = runGit(r.Context(), cwd, "diff", "--cached", "--numstat", "--relative")
 	}
 	if err == nil {
 		stats := parseGitNumstat(numstat)
@@ -566,7 +584,7 @@ func (s *Server) handleWorkspaceGitDiff(w http.ResponseWriter, r *http.Request) 
 
 	// Whole-tree: enumerate changed files via git status and emit one entry
 	// per file that has readable or deleted working content.
-	out, err := runGit(r.Context(), cwd, "status", "--porcelain=v2", "--branch", "--untracked-files=all")
+	out, err := gitStatus(r.Context(), cwd)
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
@@ -602,7 +620,9 @@ func (s *Server) handleWorkspaceGitDiff(w http.ResponseWriter, r *http.Request) 
 // for a deleted file (working copy gone but present in HEAD). The 1 MiB cap is
 // applied to both texts; truncation is documented in docs/api.md.
 func (s *Server) gitDiffEntry(ctx context.Context, cwd, rel, abs string) (acp.ToolCallContentDiff, error) {
-	oldText, err := runGitLimited(ctx, cwd, maxFileReadBytes, "show", "HEAD:"+rel)
+	// HEAD:<path> is repo-root relative; HEAD:./<path> resolves against cwd,
+	// which is what rel is relative to.
+	oldText, err := runGitLimited(ctx, cwd, maxFileReadBytes, "show", "HEAD:./"+rel)
 	var oldPtr *string
 	if err == nil {
 		oldPtr = truncateStringPtr(oldText, maxFileReadBytes)

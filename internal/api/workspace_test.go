@@ -86,6 +86,11 @@ func TestParseGitStatus(t *testing.T) {
 	if f := files[4]; f.Path != "vendor/DiffuEraser" || f.Status != "M" || !f.IsDir {
 		t.Fatalf("files[4] = %+v, want {vendor/DiffuEraser M isDir:true}", f)
 	}
+	// A merge conflict is a `u` record with nine fixed fields before the path.
+	files = parseGitStatus("u UU N... 100644 100644 100644 100644 a b c conflicted file.go\n")
+	if len(files) != 1 || files[0].Path != "conflicted file.go" || files[0].Status != "U" {
+		t.Fatalf("unmerged = %+v, want {conflicted file.go U}", files)
+	}
 	// An untracked directory collapses to a trailing-slash path by default; it
 	// is a directory, not a file.
 	files = parseGitStatus("? vendor/\n")
@@ -279,5 +284,70 @@ func TestGitDiffEntry(t *testing.T) {
 	}
 	if entry.OldText == nil || *entry.OldText != "old\n" {
 		t.Fatalf("deleted OldText = %v, want pointer to old", entry.OldText)
+	}
+}
+
+// An agent working in a subdirectory of a repo must see only its own changes,
+// with paths relative to its cwd, and diffs against the committed version.
+func TestGitStatusScopedToSubdirectory(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	root := t.TempDir()
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", root}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	write := func(rel, content string) {
+		t.Helper()
+		path := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run("init", "-q")
+	run("config", "user.email", "t@t")
+	run("config", "user.name", "t")
+	run("config", "commit.gpgSign", "false")
+	run("config", "core.autocrlf", "false")
+	write("app/a.txt", "old\n")
+	write("lib/l.txt", "lib\n")
+	run("add", ".")
+	run("commit", "-qm", "init")
+	write("app/a.txt", "old\nnew\n")
+	write("lib/l.txt", "lib\nchanged\n")
+	write("lib/outside.txt", "x\n")
+
+	cwd := filepath.Join(root, "app")
+	out, err := gitStatus(context.Background(), cwd)
+	if err != nil {
+		t.Fatalf("gitStatus: %v", err)
+	}
+	files := parseGitStatus(out)
+	if len(files) != 1 || files[0].Path != "a.txt" || files[0].Status != "M" {
+		t.Fatalf("status from app/ = %+v, want only {a.txt M}", files)
+	}
+
+	numstat, err := runGit(context.Background(), cwd, "diff", "HEAD", "--numstat", "--relative")
+	if err != nil {
+		t.Fatalf("numstat: %v", err)
+	}
+	if stat, ok := parseGitNumstat(numstat)["a.txt"]; !ok || stat.Added != 1 {
+		t.Fatalf("numstat from app/ = %q, want a.txt with 1 added", numstat)
+	}
+
+	s := &Server{}
+	entry, err := s.gitDiffEntry(context.Background(), cwd, "a.txt", filepath.Join(cwd, "a.txt"))
+	if err != nil {
+		t.Fatalf("gitDiffEntry: %v", err)
+	}
+	if entry.OldText == nil || *entry.OldText != "old\n" {
+		t.Fatalf("OldText from app/ = %v, want the committed content", entry.OldText)
 	}
 }
