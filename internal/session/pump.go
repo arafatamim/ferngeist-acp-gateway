@@ -1037,17 +1037,18 @@ func (p *StdioPump) snoopInboundSessionID(payload []byte) {
 }
 
 // snoopInboundCwd captures the ACP session working directory from a
-// client->agent session/new or session/load request's params.cwd. Both methods
-// carry cwd (session/load is what Ferngeist sends when resuming a session);
+// client->agent session/new, session/load or session/resume request's params.cwd.
+// All carry cwd (load/resume are what Ferngeist sends when reopening a session);
 // unlike sessionId (present on every session-scoped frame), cwd is set once when
 // the client opens the project. Re-captured on each such request so a project
 // switch updates it.
 func (p *StdioPump) snoopInboundCwd(payload []byte) {
 	// Hot path: every client->agent frame passes through here, but only
-	// session/new and session/load requests carry cwd. A cheap substring scan
+	// session/new, session/load and session/resume requests carry cwd. A cheap substring scan
 	// avoids a full JSON parse per frame.
 	if !bytes.Contains(payload, []byte("session/new")) &&
-		!bytes.Contains(payload, []byte("session/load")) {
+		!bytes.Contains(payload, []byte("session/load")) &&
+		!bytes.Contains(payload, []byte("session/resume")) {
 		return
 	}
 	var probe struct {
@@ -1059,7 +1060,7 @@ func (p *StdioPump) snoopInboundCwd(payload []byte) {
 		} `json:"params"`
 	}
 	if err := json.Unmarshal(payload, &probe); err != nil ||
-		(probe.Method != "session/new" && probe.Method != "session/load") ||
+		(probe.Method != "session/new" && probe.Method != "session/load" && probe.Method != "session/resume") ||
 		probe.Params == nil || probe.Params.Cwd == "" {
 		return
 	}
@@ -1068,7 +1069,7 @@ func (p *StdioPump) snoopInboundCwd(payload []byte) {
 	defer p.acpMu.Unlock()
 	p.acpCwd = cwd
 	switch {
-	case probe.Method == "session/load" && probe.Params.SessionID != "":
+	case probe.Method != "session/new" && probe.Params.SessionID != "":
 		if p.cwdBySession == nil {
 			p.cwdBySession = make(map[string]string)
 		}

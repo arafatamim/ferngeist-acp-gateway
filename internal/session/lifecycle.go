@@ -104,7 +104,7 @@ func (rs *RuntimeSession) Create(ctx context.Context, runtimeID, deviceID, agent
 		// and a push is a token lookup plus a network round-trip to the provider.
 		// Blocking here would stall agent stdout draining — and any attached
 		// client's live stream — until the push completes or times out.
-		rs.sendPushNotification(s.DeviceID, e.AcpSessionID, e.Title, e.Body, e.Category)
+		rs.sendPushNotification(s.DeviceID, e.AcpSessionID, s.pump.AcpCwdFor(e.AcpSessionID), e.Title, e.Body, e.Category)
 	}
 
 	pump := &StdioPump{
@@ -151,7 +151,7 @@ func (rs *RuntimeSession) Create(ctx context.Context, runtimeID, deviceID, agent
 // sendPushNotification dispatches a push notification asynchronously with a 10s
 // timeout so a slow or failing provider never blocks the caller. No-op when push
 // notifications are not configured (PushSvc is nil).
-func (rs *RuntimeSession) sendPushNotification(deviceID, acpSessionID, title, body, category string) {
+func (rs *RuntimeSession) sendPushNotification(deviceID, acpSessionID, cwd, title, body, category string) {
 	if rs.cfg.PushSvc == nil {
 		return
 	}
@@ -164,6 +164,8 @@ func (rs *RuntimeSession) sendPushNotification(deviceID, acpSessionID, title, bo
 			Category:  category,
 			ServerID:  rs.cfg.GatewayID,
 			SessionID: acpSessionID,
+			// The client resumes the chat with this cwd; without it the load fails.
+			Cwd: cwd,
 		})
 		if err != nil {
 			rs.logger.Warn("push notification failed", "device_id", deviceID, "category", category, "error", err)
@@ -182,6 +184,7 @@ func (rs *RuntimeSession) handleProcessExit(sessionID, runtimeID, deviceID, agen
 	rs.mu.Lock()
 	var deviceIDForPush string
 	var acpSessionIDForPush string
+	var cwdForPush string
 	var crashed bool
 	if s, ok := rs.sessions[sessionID]; ok {
 		s.mu.Lock()
@@ -199,6 +202,7 @@ func (rs *RuntimeSession) handleProcessExit(sessionID, runtimeID, deviceID, agen
 			deviceIDForPush = s.DeviceID
 			// ACP session id (the id the client navigates by), for the crash push.
 			acpSessionIDForPush = s.pump.AcpSessionID()
+			cwdForPush = s.pump.AcpCwdFor(acpSessionIDForPush)
 		}
 		s.mu.Unlock()
 		if crashed {
@@ -222,7 +226,7 @@ func (rs *RuntimeSession) handleProcessExit(sessionID, runtimeID, deviceID, agen
 	// decides whether to surface it based on its own foreground/background
 	// state. Dispatched asynchronously inside sendPushNotification.
 	if crashed && !intentional && deviceIDForPush != "" {
-		rs.sendPushNotification(deviceIDForPush, acpSessionIDForPush, "Agent Crashed", "Your agent has stopped unexpectedly.", push.CategoryAgentCrash)
+		rs.sendPushNotification(deviceIDForPush, acpSessionIDForPush, cwdForPush, "Agent Crashed", "Your agent has stopped unexpectedly.", push.CategoryAgentCrash)
 	}
 }
 

@@ -158,6 +158,20 @@ func TestSessionNewCwdBindsOnResponse(t *testing.T) {
 	}
 }
 
+// Reopened chats name their session in the request, so load and resume bind
+// their cwd immediately; pushes for them carry it for the client's deep-link.
+func TestSessionLoadAndResumeCwdBindImmediately(t *testing.T) {
+	p := newRecoveryPump()
+	p.snoopInboundCwd([]byte(`{"jsonrpc":"2.0","id":1,"method":"session/load","params":{"sessionId":"sl","cwd":"/l"}}`))
+	p.snoopInboundCwd([]byte(`{"jsonrpc":"2.0","id":2,"method":"session/resume","params":{"sessionId":"sr","cwd":"/r"}}`))
+	if got := p.AcpCwdFor("sl"); got != "/l" {
+		t.Fatalf("AcpCwdFor(sl) = %q, want /l", got)
+	}
+	if got := p.AcpCwdFor("sr"); got != "/r" {
+		t.Fatalf("AcpCwdFor(sr) = %q, want /r", got)
+	}
+}
+
 func TestSnoopInboundCwd(t *testing.T) {
 	p := newRecoveryPump()
 

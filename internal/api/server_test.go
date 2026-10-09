@@ -723,7 +723,7 @@ func TestPairingRoundTripWithCodeOnlyComplete(t *testing.T) {
 }
 
 func TestAuthRefreshRotatesCredentialToken(t *testing.T) {
-	server := newConfiguredTestServer(config.Config{ListenAddr: "127.0.0.1:0", CredentialTTL: 24 * time.Hour})
+	server := newConfiguredTestServer(config.Config{ListenAddr: "127.0.0.1:0", CredentialTTL: 24 * time.Hour, GatewayID: "gw-test-id"})
 	oldToken := pairDevice(t, server)
 
 	refreshRequest := httptest.NewRequest(http.MethodPost, "/v1/auth/refresh", nil)
@@ -744,6 +744,9 @@ func TestAuthRefreshRotatesCredentialToken(t *testing.T) {
 	}
 	if refreshed.Token == oldToken {
 		t.Fatal("refresh should rotate the token")
+	}
+	if refreshed.GatewayID != "gw-test-id" {
+		t.Fatalf("refresh gatewayId = %q, want %q", refreshed.GatewayID, "gw-test-id")
 	}
 
 	oldRequest := httptest.NewRequest(http.MethodGet, "/v1/agents", nil)

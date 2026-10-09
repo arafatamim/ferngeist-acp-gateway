@@ -41,6 +41,9 @@ func (s *Server) handleAuthRefresh(w http.ResponseWriter, r *http.Request) {
 		Token:      refreshed.Token,
 		ExpiresAt:  refreshed.ExpiresAt,
 		Scopes:     refreshed.Scopes,
+		// Lets clients paired before pair/complete returned it backfill the id
+		// their push deep-links resolve against.
+		GatewayID: s.cfg.GatewayID,
 	})
 }
 

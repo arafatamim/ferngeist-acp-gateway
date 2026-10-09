@@ -174,6 +174,7 @@ func TestProcessExitCrashSendsPush(t *testing.T) {
 	const acpID = "ses_crash_test"
 	sess.pump.acpMu.Lock()
 	sess.pump.acpSessionID = acpID
+	sess.pump.cwdBySession = map[string]string{acpID: "/work/repo"}
 	sess.pump.acpMu.Unlock()
 
 	// Agent dies on its own while the session is active — a genuine crash.
@@ -184,8 +185,8 @@ func TestProcessExitCrashSendsPush(t *testing.T) {
 	if n.Category != push.CategoryAgentCrash {
 		t.Errorf("category = %q, want %q", n.Category, push.CategoryAgentCrash)
 	}
-	if n.SessionID != acpID || n.ServerID != "gw-1" {
-		t.Errorf("notification = %+v, want sessionID=%q serverID=gw-1", n, acpID)
+	if n.SessionID != acpID || n.ServerID != "gw-1" || n.Cwd != "/work/repo" {
+		t.Errorf("notification = %+v, want sessionID=%q serverID=gw-1 cwd=/work/repo", n, acpID)
 	}
 	// A genuine crash fully reclaims the session: it is removed from the registry
 	// (so its dead runtime lease and per-device quota slot are freed) rather than
