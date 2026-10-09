@@ -100,6 +100,18 @@ type CustomAgentRecord struct {
 	CreatedAt   time.Time
 }
 
+// WorktreeRecord is a git worktree the gateway created for an agent to work
+// in. BaseCommit is the commit the branch started from; the workspace git
+// endpoints diff against it so committed agent work stays reviewable.
+type WorktreeRecord struct {
+	ID         string
+	Repo       string
+	Path       string
+	Branch     string
+	BaseCommit string
+	CreatedAt  time.Time
+}
+
 // SessionRecord represents a stored resilient session row in gateway_sessions.
 // Nullable time fields (LastClientConnectAt, LastClientDisconnectAt, DisconnectedSince)
 // use pointers so SQLITE NULL maps to Go nil without parsing zero-value timestamps.
@@ -897,6 +909,50 @@ func (s *SQLiteStore) CountCustomAgents(ctx context.Context) (int, error) {
 	return n, nil
 }
 
+func (s *SQLiteStore) SaveWorktree(ctx context.Context, r WorktreeRecord) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO worktrees(worktree_id, repo, path, branch, base_commit, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		r.ID, r.Repo, r.Path, r.Branch, r.BaseCommit, r.CreatedAt.UTC().Format(time.RFC3339Nano),
+	)
+	return err
+}
+
+func (s *SQLiteStore) ListWorktrees(ctx context.Context) ([]WorktreeRecord, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT worktree_id, repo, path, branch, base_commit, created_at FROM worktrees ORDER BY created_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []WorktreeRecord
+	for rows.Next() {
+		var r WorktreeRecord
+		var createdRaw string
+		if err := rows.Scan(&r.ID, &r.Repo, &r.Path, &r.Branch, &r.BaseCommit, &createdRaw); err != nil {
+			return nil, err
+		}
+		if r.CreatedAt, err = time.Parse(time.RFC3339Nano, createdRaw); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+func (s *SQLiteStore) DeleteWorktree(ctx context.Context, id string) error {
+	result, err := s.db.ExecContext(ctx, `DELETE FROM worktrees WHERE worktree_id = ?`, id)
+	if err != nil {
+		return err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // migrate is intentionally append-only and idempotent because the gateway is a
 // local daemon, not a service with a heavyweight migration framework.
 func (s *SQLiteStore) migrate(ctx context.Context) error {
@@ -1004,6 +1060,14 @@ func (s *SQLiteStore) migrate(ctx context.Context) error {
 			command TEXT NOT NULL,
 			args TEXT NOT NULL DEFAULT '[]',
 			hint TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS worktrees (
+			worktree_id TEXT PRIMARY KEY,
+			repo TEXT NOT NULL,
+			path TEXT NOT NULL,
+			branch TEXT NOT NULL,
+			base_commit TEXT NOT NULL,
 			created_at TEXT NOT NULL
 		)`,
 	}

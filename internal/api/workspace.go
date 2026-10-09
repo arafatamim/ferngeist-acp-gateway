@@ -317,6 +317,43 @@ func runGitLimited(ctx context.Context, dir string, max int, args ...string) (st
 	return string(out), nil
 }
 
+// workspaceChanges returns the porcelain status output and the changed files
+// relative to ref. For ref "HEAD" that is just git status; for a managed
+// worktree's base commit it also adds tracked files that differ from the base
+// but are clean in the worktree (i.e. already committed by the agent).
+func workspaceChanges(ctx context.Context, cwd, ref string) (string, []gitChangedFile, error) {
+	out, err := gitStatus(ctx, cwd)
+	if err != nil {
+		return "", nil, err
+	}
+	changed := parseGitStatus(out)
+	if ref == "HEAD" {
+		return out, changed, nil
+	}
+	nameStatus, err := runGit(ctx, cwd, "diff", "--name-status", "--relative", ref, "--", ".")
+	if err != nil {
+		return "", nil, err
+	}
+	seen := make(map[string]bool, len(changed))
+	for _, f := range changed {
+		seen[f.Path] = true
+	}
+	for _, line := range strings.Split(nameStatus, "\n") {
+		// `<status>\t<path>`, or `R<score>\t<old>\t<new>` for renames/copies.
+		fields := strings.Split(line, "\t")
+		if len(fields) < 2 || fields[0] == "" {
+			continue
+		}
+		path := fields[len(fields)-1]
+		if seen[path] {
+			continue
+		}
+		seen[path] = true
+		changed = append(changed, gitChangedFile{Path: path, Status: fields[0][:1]})
+	}
+	return out, changed, nil
+}
+
 // gitStatus runs `git status --porcelain=v2` scoped to cwd. The `-- .`
 // pathspec keeps changes elsewhere in the repo out when the agent works in a
 // subdirectory; v2 reports paths relative to cwd, which is what every
@@ -487,12 +524,12 @@ func (s *Server) handleWorkspaceGitStatus(w http.ResponseWriter, r *http.Request
 	if !ok {
 		return
 	}
-	out, err := gitStatus(r.Context(), cwd)
+	ref := s.workspaceBaseRef(r.Context(), cwd)
+	out, changed, err := workspaceChanges(r.Context(), cwd, ref)
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
-	changed := parseGitStatus(out)
 
 	// Enrich tracked changes with per-file line counts from the diff against
 	// HEAD — the same comparison /git/diff reports — so partially staged files
@@ -501,8 +538,8 @@ func (s *Server) handleWorkspaceGitStatus(w http.ResponseWriter, r *http.Request
 	// directly from disk.
 	// --relative keys numstat by cwd-relative path, matching git status, and
 	// drops changes outside cwd.
-	numstat, err := runGit(r.Context(), cwd, "diff", "HEAD", "--numstat", "--relative")
-	if err != nil {
+	numstat, err := runGit(r.Context(), cwd, "diff", ref, "--numstat", "--relative")
+	if err != nil && ref == "HEAD" {
 		// No HEAD yet (fresh repo with staged-but-uncommitted files): git diff
 		// HEAD fails, so fall back to the staged diff (index vs the empty tree)
 		// to still report real counts for tracked changes.
@@ -575,7 +612,7 @@ func (s *Server) handleWorkspaceGitDiff(w http.ResponseWriter, r *http.Request) 
 			writeError(w, http.StatusBadRequest, "path is a directory or submodule, not a file: "+rel)
 			return
 		}
-		entry, err := s.gitDiffEntry(r.Context(), cwd, rel, abs)
+		entry, err := s.gitDiffEntry(r.Context(), cwd, s.workspaceBaseRef(r.Context(), cwd), rel, abs)
 		if err != nil {
 			writeError(w, http.StatusUnprocessableEntity, err.Error())
 			return
@@ -586,12 +623,12 @@ func (s *Server) handleWorkspaceGitDiff(w http.ResponseWriter, r *http.Request) 
 
 	// Whole-tree: enumerate changed files via git status and emit one entry
 	// per file that has readable or deleted working content.
-	out, err := gitStatus(r.Context(), cwd)
+	ref := s.workspaceBaseRef(r.Context(), cwd)
+	_, changed, err := workspaceChanges(r.Context(), cwd, ref)
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
-	changed := parseGitStatus(out)
 	entries := make([]acp.ToolCallContentDiff, 0, len(changed))
 	for _, f := range changed {
 		// Submodules and collapsed untracked dirs are directories, not files;
@@ -605,7 +642,7 @@ func (s *Server) handleWorkspaceGitDiff(w http.ResponseWriter, r *http.Request) 
 		if err != nil {
 			continue
 		}
-		entry, err := s.gitDiffEntry(r.Context(), cwd, f.Path, abs)
+		entry, err := s.gitDiffEntry(r.Context(), cwd, ref, f.Path, abs)
 		if err != nil {
 			// Skip files we cannot build a diff for (e.g. unreadable), but
 			// keep going for the rest.
@@ -617,14 +654,14 @@ func (s *Server) handleWorkspaceGitDiff(w http.ResponseWriter, r *http.Request) 
 }
 
 // gitDiffEntry builds one ToolCallContentDiff for a changed file. oldText is
-// the committed version from git show HEAD:<path> (nil when that fails, e.g.
+// the version at ref (HEAD, or a managed worktree's base) from git show (nil when that fails, e.g.
 // new/untracked files or no HEAD). newText is the working-tree content, or ""
 // for a deleted file (working copy gone but present in HEAD). The 1 MiB cap is
 // applied to both texts; truncation is documented in docs/api.md.
-func (s *Server) gitDiffEntry(ctx context.Context, cwd, rel, abs string) (acp.ToolCallContentDiff, error) {
-	// HEAD:<path> is repo-root relative; HEAD:./<path> resolves against cwd,
+func (s *Server) gitDiffEntry(ctx context.Context, cwd, ref, rel, abs string) (acp.ToolCallContentDiff, error) {
+	// <ref>:<path> is repo-root relative; <ref>:./<path> resolves against cwd,
 	// which is what rel is relative to.
-	oldText, err := runGitLimited(ctx, cwd, maxFileReadBytes, "show", "HEAD:./"+rel)
+	oldText, err := runGitLimited(ctx, cwd, maxFileReadBytes, "show", ref+":./"+rel)
 	var oldPtr *string
 	if err == nil {
 		oldPtr = truncateStringPtr(oldText, maxFileReadBytes)

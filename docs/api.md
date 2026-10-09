@@ -260,6 +260,10 @@ symlink escape) is rejected with `400`. "Not found / not known yet" cases return
 `404`, and git failures (no `git` on PATH, or the cwd is not a git repository)
 return `422`.
 
+When that directory is inside a [managed worktree](#worktrees), `/git/status` and
+`/git/diff` compare against the worktree's `baseCommit` instead of `HEAD`, so
+changes the agent already committed on its branch are still listed and diffed.
+
 One agent can host several ACP sessions, each with its own `cwd`. Every
 workspace endpoint accepts an optional `acpSessionId=<id>` query parameter (the
 ACP session id from `session/new` or `session/load`, not the gateway session id)
@@ -395,6 +399,60 @@ opened or loaded on this runtime returns `404`.
       symlink escape)
     - `404` — runtime has no session, or working directory unknown (see above)
     - `422` — `git` is missing from PATH, or the directory is not a git repository
+
+### Worktrees
+
+Gateway-managed git worktrees give each chat its own directory and branch, so
+parallel agents do not edit the same checkout. The gateway creates the worktree
+and returns its `path`; the client then uses that path as the `session/new`
+`cwd`. Each worktree lives at `<repo>/.worktrees/<branch>` (slashes in the branch
+become `-`, so `feat/x` is `.worktrees/feat-x`), where plain `git worktree list`
+and editors find it too. The gateway adds `/.worktrees/` to the repo's local
+`.git/info/exclude` (never the committed `.gitignore`) so the main checkout stays
+clean. Worktrees outlive the chats that use them: they are removed only on an explicit `DELETE`.
+
+- `POST /v1/worktrees`
+  - Requires `control` scope.
+  - Request body (`base` defaults to the repo's `HEAD`; `branch` defaults to
+    `ferngeist/<id>`):
+    ```json
+    { "repo": "/abs/path/to/repo", "base": "origin/main", "branch": "feat/x" }
+    ```
+  - Creates a new branch at `base` and checks it out in a fresh worktree.
+  - Response:
+    ```json
+    {
+      "id": "1a2b3c4d",
+      "repo": "/abs/path/to/repo",
+      "path": "/abs/path/to/repo/.worktrees/feat-x",
+      "branch": "feat/x",
+      "baseCommit": "<sha>",
+      "createdAt": "2026-10-09T10:00:00Z"
+    }
+    ```
+  - Error responses:
+    - `400` — `repo` is not an absolute path, or `branch` is not a valid branch name
+    - `409` — `branch` already exists, or its `.worktrees/` folder already exists
+    - `422` — `repo` is not a git repository, `base` does not resolve to a
+      commit, or `git worktree add` failed
+
+- `GET /v1/worktrees`
+  - Requires `read` scope.
+  - Lists managed worktrees (the create response shape) plus `ahead` (commits
+    on the branch since `baseCommit`) and `dirty` (uncommitted changes).
+    Worktrees whose directory was deleted outside the gateway are dropped from
+    the list.
+
+- `DELETE /v1/worktrees/{worktreeId}?force=true`
+  - Requires `control` scope.
+  - Removes the worktree directory. Without `force=true` git refuses when the
+    worktree has uncommitted changes (`409`).
+  - The branch is deleted only when git considers it merged (`git branch -d`);
+    otherwise it is kept so committed work survives. Response:
+    `{"deleted": "<id>", "branchDeleted": false}`.
+  - Error responses:
+    - `404` — unknown worktree
+    - `409` — the worktree has uncommitted changes (retry with `force=true`)
 
 ### Gateway sessions
 

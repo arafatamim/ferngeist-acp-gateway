@@ -247,7 +247,7 @@ func TestGitDiffEntry(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := &Server{}
-	entry, err := s.gitDiffEntry(context.Background(), dir, "new.txt", filepath.Join(dir, "new.txt"))
+	entry, err := s.gitDiffEntry(context.Background(), dir, "HEAD", "new.txt", filepath.Join(dir, "new.txt"))
 	if err != nil {
 		t.Fatalf("gitDiffEntry(untracked): %v", err)
 	}
@@ -259,7 +259,7 @@ func TestGitDiffEntry(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("new\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	entry, err = s.gitDiffEntry(context.Background(), dir, "a.txt", filepath.Join(dir, "a.txt"))
+	entry, err = s.gitDiffEntry(context.Background(), dir, "HEAD", "a.txt", filepath.Join(dir, "a.txt"))
 	if err != nil {
 		t.Fatalf("gitDiffEntry(modified): %v", err)
 	}
@@ -275,7 +275,7 @@ func TestGitDiffEntry(t *testing.T) {
 	if err := os.Remove(filepath.Join(dir, "a.txt")); err != nil {
 		t.Fatal(err)
 	}
-	entry, err = s.gitDiffEntry(context.Background(), dir, "a.txt", filepath.Join(dir, "a.txt"))
+	entry, err = s.gitDiffEntry(context.Background(), dir, "HEAD", "a.txt", filepath.Join(dir, "a.txt"))
 	if err != nil {
 		t.Fatalf("gitDiffEntry(deleted): %v", err)
 	}
@@ -343,7 +343,7 @@ func TestGitStatusScopedToSubdirectory(t *testing.T) {
 	}
 
 	s := &Server{}
-	entry, err := s.gitDiffEntry(context.Background(), cwd, "a.txt", filepath.Join(cwd, "a.txt"))
+	entry, err := s.gitDiffEntry(context.Background(), cwd, "HEAD", "a.txt", filepath.Join(cwd, "a.txt"))
 	if err != nil {
 		t.Fatalf("gitDiffEntry: %v", err)
 	}
