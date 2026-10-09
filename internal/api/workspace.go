@@ -391,9 +391,11 @@ type gitStatusResponse struct {
 
 // resolveWorkspaceCwd resolves a runtime's ACP project directory via the session
 // layer, mapping session-layer errors to HTTP statuses. Returns the absolute
-// cwd on success.
+// cwd on success. The optional ?acpSessionId= picks one ACP session's project
+// when the agent hosts several; without it the most recently opened one wins.
 func (s *Server) resolveWorkspaceCwd(w http.ResponseWriter, r *http.Request, runtimeID string) (string, bool) {
-	cwd, err := s.sessionSvc.WorkingDir(runtimeID)
+	acpSessionID := strings.TrimSpace(r.URL.Query().Get("acpSessionId"))
+	cwd, err := s.sessionSvc.WorkingDir(runtimeID, acpSessionID)
 	switch {
 	case err == nil:
 		return cwd, true

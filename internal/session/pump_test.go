@@ -125,6 +125,39 @@ func TestMaybeNotifyProgressThrottlesAndDedupes(t *testing.T) {
 	}
 }
 
+// session/new only learns its ACP session id from the agent's response, so its
+// cwd binds when that response comes back with the same request id.
+func TestSessionNewCwdBindsOnResponse(t *testing.T) {
+	p := newRecoveryPump()
+	p.snoopInboundCwd([]byte(`{"jsonrpc":"2.0","id":7,"method":"session/new","params":{"cwd":"/a"}}`))
+	p.snoopInboundCwd([]byte(`{"jsonrpc":"2.0","id":8,"method":"session/new","params":{"cwd":"/b"}}`))
+
+	respond := func(line string) {
+		t.Helper()
+		probe, ok := parseFrameProbe([]byte(line))
+		if !ok {
+			t.Fatalf("parseFrameProbe(%s) failed", line)
+		}
+		p.snoopSessionCwdProbe(probe)
+	}
+	// Responses arrive out of order; each binds to its own request's cwd.
+	respond(`{"jsonrpc":"2.0","id":8,"result":{"sessionId":"sb"}}`)
+	respond(`{"jsonrpc":"2.0","id":7,"result":{"sessionId":"sa"}}`)
+	if got := p.AcpCwdFor("sa"); got != "/a" {
+		t.Fatalf("AcpCwdFor(sa) = %q, want /a", got)
+	}
+	if got := p.AcpCwdFor("sb"); got != "/b" {
+		t.Fatalf("AcpCwdFor(sb) = %q, want /b", got)
+	}
+
+	// A failed session/new binds nothing and drops its pending entry.
+	p.snoopInboundCwd([]byte(`{"jsonrpc":"2.0","id":9,"method":"session/new","params":{"cwd":"/c"}}`))
+	respond(`{"jsonrpc":"2.0","id":9,"error":{"code":-32000,"message":"nope"}}`)
+	if len(p.pendingCwd) != 0 {
+		t.Fatalf("pendingCwd = %v, want empty after error response", p.pendingCwd)
+	}
+}
+
 func TestSnoopInboundCwd(t *testing.T) {
 	p := newRecoveryPump()
 

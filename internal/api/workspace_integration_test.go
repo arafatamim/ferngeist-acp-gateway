@@ -113,7 +113,12 @@ func TestWorkspaceEndpoints_EndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	sendWSMessage(t, ws, string(newFrame))
-	readWSMessage(t, ws) // session/new result
+	var newResult struct {
+		SessionID string `json:"sessionId"`
+	}
+	if err := json.Unmarshal(readWSMessage(t, ws).Result, &newResult); err != nil || newResult.SessionID == "" {
+		t.Fatalf("session/new result: sessionId missing (err %v)", err)
+	}
 	readWSMessage(t, ws) // session_info_update notification
 
 	do := func(t *testing.T, path string) *httptest.ResponseRecorder {
@@ -172,6 +177,17 @@ func TestWorkspaceEndpoints_EndToEnd(t *testing.T) {
 	rec = do(t, "/v1/runtimes/"+h.runtimeID+"/files?path=../../outside.txt")
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("traversal status = %d, want 400", rec.Code)
+	}
+
+	// Scoping to the ACP session the agent just created resolves the same
+	// project; a session the gateway never saw opened is unknown.
+	rec = do(t, "/v1/runtimes/"+h.runtimeID+"/git/status?acpSessionId="+newResult.SessionID)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("scoped git status code = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	rec = do(t, "/v1/runtimes/"+h.runtimeID+"/git/status?acpSessionId=never-opened")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown acpSessionId code = %d, want 404", rec.Code)
 	}
 
 	// 3. Git status lists the untracked and modified files.

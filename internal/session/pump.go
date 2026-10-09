@@ -211,6 +211,13 @@ type StdioPump struct {
 	// user opened in the agent — the anchor for the gateway's file/diff/status
 	// workspace endpoints. Empty until the client issues session/new.
 	acpCwd string
+	// cwdBySession maps each ACP session id to its own cwd, so the workspace
+	// endpoints can target one chat when the agent hosts several. session/load
+	// carries both; session/new only learns its id from the agent's response,
+	// so its cwd waits in pendingCwd, keyed by the raw request id, until then.
+	// ponytail: never pruned, bounded by the sessions one agent process opens.
+	cwdBySession map[string]string
+	pendingCwd   map[string]string
 
 	// Resilient re-load support: buffers session/update history and recovers
 	// "already loaded" rejections from agents that keep the session loaded
@@ -400,6 +407,7 @@ func (p *StdioPump) handleStdoutLine(line string) {
 	}
 	p.snoopInitializeProbe(probe, line, frameBytes)
 	p.snoopSessionIDProbe(probe)
+	p.snoopSessionCwdProbe(probe)
 	replaced := false
 	if replacement, handled := p.markTurnActivityProbe(probe); handled {
 		line = replacement
@@ -1043,9 +1051,11 @@ func (p *StdioPump) snoopInboundCwd(payload []byte) {
 		return
 	}
 	var probe struct {
-		Method string `json:"method"`
+		Method string           `json:"method"`
+		ID     *json.RawMessage `json:"id"`
 		Params *struct {
-			Cwd string `json:"cwd"`
+			Cwd       string `json:"cwd"`
+			SessionID string `json:"sessionId"`
 		} `json:"params"`
 	}
 	if err := json.Unmarshal(payload, &probe); err != nil ||
@@ -1053,17 +1063,64 @@ func (p *StdioPump) snoopInboundCwd(payload []byte) {
 		probe.Params == nil || probe.Params.Cwd == "" {
 		return
 	}
+	cwd := probe.Params.Cwd
 	p.acpMu.Lock()
-	p.acpCwd = probe.Params.Cwd
-	p.acpMu.Unlock()
+	defer p.acpMu.Unlock()
+	p.acpCwd = cwd
+	switch {
+	case probe.Method == "session/load" && probe.Params.SessionID != "":
+		if p.cwdBySession == nil {
+			p.cwdBySession = make(map[string]string)
+		}
+		p.cwdBySession[probe.Params.SessionID] = cwd
+	case probe.Method == "session/new" && probe.ID != nil:
+		if p.pendingCwd == nil {
+			p.pendingCwd = make(map[string]string)
+		}
+		p.pendingCwd[string(*probe.ID)] = cwd
+	}
+}
+
+// snoopSessionCwdProbe binds a pending session/new cwd to the session id the
+// agent's response assigns. The request id is the one written to the agent
+// (after rewriting), so the agent echoes it verbatim. An error response just
+// drops the pending entry.
+func (p *StdioPump) snoopSessionCwdProbe(probe frameProbe) {
+	if probe.Method != "" || probe.ID == nil {
+		return
+	}
+	p.acpMu.Lock()
+	defer p.acpMu.Unlock()
+	key := string(*probe.ID)
+	cwd, ok := p.pendingCwd[key]
+	if !ok {
+		return
+	}
+	delete(p.pendingCwd, key)
+	if probe.Result == nil || probe.Result.SessionID == "" {
+		return
+	}
+	if p.cwdBySession == nil {
+		p.cwdBySession = make(map[string]string)
+	}
+	p.cwdBySession[probe.Result.SessionID] = cwd
 }
 
 // AcpCwd returns the snooped ACP session working directory, or "" if the client
-// has not issued session/new yet.
+// has not issued session/new yet. With several sessions on one agent this is
+// whichever was opened last; AcpCwdFor targets one.
 func (p *StdioPump) AcpCwd() string {
 	p.acpMu.Lock()
 	defer p.acpMu.Unlock()
 	return p.acpCwd
+}
+
+// AcpCwdFor returns the cwd of one ACP session, or "" if the gateway has not
+// seen that session opened or loaded.
+func (p *StdioPump) AcpCwdFor(acpSessionID string) string {
+	p.acpMu.Lock()
+	defer p.acpMu.Unlock()
+	return p.cwdBySession[acpSessionID]
 }
 
 // Attach claims the pump for a new client: bumps the connection generation and

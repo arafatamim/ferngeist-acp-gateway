@@ -2185,7 +2185,7 @@ func TestWorkingDirByRuntime(t *testing.T) {
 	defer store.Close()
 
 	// No sessions yet -> ErrSessionNotFound.
-	if _, err := rs.WorkingDir("rt-1"); err != ErrSessionNotFound {
+	if _, err := rs.WorkingDir("rt-1", ""); err != ErrSessionNotFound {
 		t.Fatalf("WorkingDir(no session) error = %v, want ErrSessionNotFound", err)
 	}
 
@@ -2194,18 +2194,32 @@ func TestWorkingDirByRuntime(t *testing.T) {
 	rs.mu.Lock()
 	rs.sessions["sess-1"] = &Session{ID: "sess-1", RuntimeID: "rt-1", pump: pump1}
 	rs.mu.Unlock()
-	if _, err := rs.WorkingDir("rt-1"); err != ErrCwdUnknown {
+	if _, err := rs.WorkingDir("rt-1", ""); err != ErrCwdUnknown {
 		t.Fatalf("WorkingDir(no cwd) error = %v, want ErrCwdUnknown", err)
 	}
 
 	// After the pump captures a cwd, WorkingDir returns it.
 	pump1.snoopInboundCwd([]byte(`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/proj"}}`))
-	got, err := rs.WorkingDir("rt-1")
+	got, err := rs.WorkingDir("rt-1", "")
 	if err != nil {
 		t.Fatalf("WorkingDir(with cwd) error = %v", err)
 	}
 	if got != "/proj" {
 		t.Fatalf("WorkingDir() = %q, want /proj", got)
+	}
+
+	// Two ACP sessions on one agent: each resolves to its own project, while
+	// the unscoped lookup still follows the most recently opened one.
+	pump1.snoopInboundCwd([]byte(`{"jsonrpc":"2.0","id":2,"method":"session/load","params":{"sessionId":"acp-x","cwd":"/x"}}`))
+	pump1.snoopInboundCwd([]byte(`{"jsonrpc":"2.0","id":3,"method":"session/load","params":{"sessionId":"acp-y","cwd":"/y"}}`))
+	if got, err := rs.WorkingDir("rt-1", "acp-x"); err != nil || got != "/x" {
+		t.Fatalf("WorkingDir(acp-x) = (%q, %v), want /x", got, err)
+	}
+	if got, err := rs.WorkingDir("rt-1", ""); err != nil || got != "/y" {
+		t.Fatalf("WorkingDir(unscoped) = (%q, %v), want /y", got, err)
+	}
+	if _, err := rs.WorkingDir("rt-1", "acp-unknown"); err != ErrCwdUnknown {
+		t.Fatalf("WorkingDir(unknown acp session) error = %v, want ErrCwdUnknown", err)
 	}
 }
 

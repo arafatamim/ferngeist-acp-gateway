@@ -260,6 +260,13 @@ symlink escape) is rejected with `400`. "Not found / not known yet" cases return
 `404`, and git failures (no `git` on PATH, or the cwd is not a git repository)
 return `422`.
 
+One agent can host several ACP sessions, each with its own `cwd`. Every
+workspace endpoint accepts an optional `acpSessionId=<id>` query parameter (the
+ACP session id from `session/new` or `session/load`, not the gateway session id)
+to read that session's project. Without it, the endpoints use the most recently
+opened or loaded session's directory. An `acpSessionId` the gateway has not seen
+opened or loaded on this runtime returns `404`.
+
 - `GET /v1/runtimes/{runtimeId}/files?path=<rel>`
   - Reads a file inside the runtime's project directory.
   - Requires `read` scope.

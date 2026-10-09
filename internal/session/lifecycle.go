@@ -251,8 +251,9 @@ func (rs *RuntimeSession) FindReconnectableByRuntime(runtimeID, deviceID string)
 // WorkingDir returns the ACP project directory for the session bound to the
 // given runtime, or ErrSessionNotFound if no session references that runtime,
 // or ErrCwdUnknown if the session exists but the client has not issued
-// session/new yet (so params.cwd was never captured).
-func (rs *RuntimeSession) WorkingDir(runtimeID string) (string, error) {
+// session/new yet (so params.cwd was never captured). A non-empty acpSessionID
+// selects that ACP session's cwd; empty means the most recently opened one.
+func (rs *RuntimeSession) WorkingDir(runtimeID, acpSessionID string) (string, error) {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
 	for _, sess := range rs.sessions {
@@ -263,6 +264,9 @@ func (rs *RuntimeSession) WorkingDir(runtimeID string) (string, error) {
 		sess.mu.Unlock()
 		if match {
 			cwd := sess.pump.AcpCwd()
+			if acpSessionID != "" {
+				cwd = sess.pump.AcpCwdFor(acpSessionID)
+			}
 			if cwd == "" {
 				return "", ErrCwdUnknown
 			}
