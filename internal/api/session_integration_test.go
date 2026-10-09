@@ -413,12 +413,13 @@ func TestResilientSession_FullLifecycle(t *testing.T) {
 	defer func() { _ = conn2.CloseNow() }()
 
 	sendWSMessage(t, conn2, `{"jsonrpc":"2.0","id":"5","method":"session/load","params":{"sessionId":"mock_sess_1"}}`)
-	msg = readWSMessage(t, conn2)
-	assertNotification(t, msg, "session/update")
-	msg = readWSMessage(t, conn2)
-	assertNotification(t, msg, "session/update")
+	// ACP: the agent answers session/load first, then replays history.
 	msg = readWSMessage(t, conn2)
 	assertResult(t, msg, "5")
+	msg = readWSMessage(t, conn2)
+	assertNotification(t, msg, "session/update")
+	msg = readWSMessage(t, conn2)
+	assertNotification(t, msg, "session/update")
 
 	sendWSMessage(t, conn2, `{"jsonrpc":"2.0","id":"6","method":"session/prompt","params":{"sessionId":"mock_sess_1","prompt":[{"type":"text","text":"Continue"}]}}`)
 	msg = readWSMessage(t, conn2)
