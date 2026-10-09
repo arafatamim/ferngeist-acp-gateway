@@ -233,22 +233,46 @@ func (s *Server) handleWorktreeDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, err := os.Stat(rec.Path); err == nil {
-		args := []string{"worktree", "remove"}
-		if r.URL.Query().Get("force") == "true" {
-			args = append(args, "--force")
+		// The dirty check is ours rather than git's: git deregisters a worktree even
+		// when it fails to delete the folder (on Windows, a process still holding it
+		// as cwd), so a refused `git worktree remove` could not be told apart from a
+		// half-done one, and a retry would only report "is not a working tree".
+		// A leftover folder without its .git file has nothing git can check.
+		if r.URL.Query().Get("force") != "true" {
+			if _, err := os.Stat(filepath.Join(rec.Path, ".git")); err == nil {
+				if st, err := runGit(ctx, rec.Path, "status", "--porcelain"); err == nil && strings.TrimSpace(st) != "" {
+					writeError(w, http.StatusConflict, "worktree has uncommitted changes")
+					return
+				}
+			}
 		}
-		if _, err := runGit(ctx, rec.Repo, append(args, rec.Path)...); err != nil {
-			writeError(w, http.StatusConflict, err.Error())
+		_, _ = runGit(ctx, rec.Repo, "worktree", "remove", "--force", rec.Path)
+		if err := removeAllRetrying(rec.Path); err != nil {
+			s.logger.Error("delete worktree folder", "path", rec.Path, "error", err)
+			writeError(w, http.StatusInternalServerError, "worktree folder is still in use; close its chat and try again")
 			return
 		}
-	} else {
-		_, _ = runGit(ctx, rec.Repo, "worktree", "prune")
 	}
+	_, _ = runGit(ctx, rec.Repo, "worktree", "prune")
 	_, branchErr := runGit(ctx, rec.Repo, "branch", "-d", rec.Branch)
 	if err := s.store.DeleteWorktree(ctx, rec.ID); err != nil && !errors.Is(err, storage.ErrNotFound) {
 		s.logger.Error("delete worktree record", "id", rec.ID, "error", err)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"deleted": rec.ID, "branchDeleted": branchErr == nil})
+}
+
+// removeAllRetrying deletes dir, retrying briefly: on Windows a just-closed
+// agent process can hold the folder for a moment after it exits.
+// ponytail: fixed ~2s budget; make it configurable if slow agents need longer.
+func removeAllRetrying(dir string) error {
+	var err error
+	for range 10 {
+		if err = os.RemoveAll(dir); err == nil {
+			return nil
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return err
 }
 
 // findWorktree returns the first managed worktree matching match.

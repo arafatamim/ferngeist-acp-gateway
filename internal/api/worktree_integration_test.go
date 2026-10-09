@@ -139,4 +139,29 @@ func TestWorktrees_EndToEnd(t *testing.T) {
 	if rec := do(t, http.MethodGet, "/v1/worktrees", ""); strings.TrimSpace(rec.Body.String()) != "[]" {
 		t.Fatalf("list after delete = %s", rec.Body.String())
 	}
+
+	// Uncommitted changes need force.
+	rec = do(t, http.MethodPost, "/v1/worktrees", `{"repo":`+string(repoJSON)+`,"branch":"feat/dirty"}`)
+	if err := json.Unmarshal(rec.Body.Bytes(), &wt); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wt.Path, "wip.txt"), []byte("wip\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if rec := do(t, http.MethodDelete, "/v1/worktrees/"+wt.ID, ""); rec.Code != http.StatusConflict {
+		t.Fatalf("dirty delete = %d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	// A worktree git already forgot (a removal that could not delete the folder)
+	// still removes, with or without force.
+	if err := os.Remove(filepath.Join(wt.Path, ".git")); err != nil {
+		t.Fatal(err)
+	}
+	runGitCLI(t, repo, "worktree", "prune")
+	if rec := do(t, http.MethodDelete, "/v1/worktrees/"+wt.ID, ""); rec.Code != http.StatusOK {
+		t.Fatalf("leftover delete = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if _, err := os.Stat(wt.Path); !os.IsNotExist(err) {
+		t.Fatalf("leftover dir still exists: %v", err)
+	}
 }
