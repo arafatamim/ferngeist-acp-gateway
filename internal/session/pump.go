@@ -242,7 +242,7 @@ type StdioPump struct {
 	// chat's progress never mutes another's on a shared agent. Guarded by
 	// progressMu. ponytail: entries are never evicted; one per chat the pump hosts.
 	progressMu sync.Mutex
-	progress   map[string]progressState
+	progress   map[string]*progressState
 	// Each running tool call's kind: a tool_call_update usually omits it. Entries
 	// leave when the call completes or fails. Guarded by progressMu.
 	toolKinds map[string]string
@@ -520,21 +520,23 @@ func (p *StdioPump) checkAndNotifyProbe(probe frameProbe, ok bool) {
 	acpID := p.pushAcpSessionID(probe, origin)
 	switch {
 	case probe.Result != nil && probe.Result.StopReason != "":
+		p.endProgress(acpID)
 		// The user cancelled this turn themselves; telling them it ended is noise.
 		if probe.Result.StopReason != acp.StopReasonCancelled {
-			p.onPushNotification(PushEvent{SessionID: p.sessionID, AcpSessionID: acpID, Category: push.CategoryTurnComplete, Title: "Turn Complete", Body: "Your agent has finished processing."})
+			p.onPushNotification(PushEvent{SessionID: p.sessionID, AcpSessionID: acpID, Category: push.CategoryTurnComplete, Title: "Turn Complete", Body: p.AgentName("Your agent") + " has finished processing."})
 		}
 	case probe.Method == "session/request_permission":
-		p.onPushNotification(PushEvent{SessionID: p.sessionID, AcpSessionID: acpID, Category: push.CategoryPermissionRequest, Title: "Permission Required", Body: "Your agent needs approval to run a tool."})
+		p.onPushNotification(PushEvent{SessionID: p.sessionID, AcpSessionID: acpID, Category: push.CategoryPermissionRequest, Title: "Permission Required", Body: p.AgentName("Your agent") + " needs approval to run a tool."})
 	case probe.Method == elicitationMethod:
 		// ponytail: shares the permission category so clients route it without a new case.
-		p.onPushNotification(PushEvent{SessionID: p.sessionID, AcpSessionID: acpID, Category: push.CategoryPermissionRequest, Title: "Input Required", Body: "Your agent needs your input."})
+		p.onPushNotification(PushEvent{SessionID: p.sessionID, AcpSessionID: acpID, Category: push.CategoryPermissionRequest, Title: "Input Required", Body: p.AgentName("Your agent") + " needs your input."})
 	case probe.Error != nil:
 		// Only a failed prompt is worth a push: errors for optional methods,
 		// replies to an earlier connection, and the "already loaded" rejection
 		// load recovery hides from the client are not.
 		if isReply && origin.method == "session/prompt" {
-			p.onPushNotification(PushEvent{SessionID: p.sessionID, AcpSessionID: acpID, Category: push.CategoryError, Title: "Agent Error", Body: "Your agent encountered an unexpected error."})
+			p.endProgress(acpID)
+			p.onPushNotification(PushEvent{SessionID: p.sessionID, AcpSessionID: acpID, Category: push.CategoryError, Title: "Agent Error", Body: p.AgentName("Your agent") + " encountered an unexpected error."})
 		}
 	default:
 		// Only while a prompt runs: session/load replays finished tool calls as
@@ -563,12 +565,17 @@ func (p *StdioPump) pushAcpSessionID(probe frameProbe, origin pendingRequest) st
 type progressState struct {
 	at      time.Time
 	summary string
+	// A throttled summary, sent when the window ends so the notification never
+	// keeps naming a call the agent has moved past.
+	pending string
+	timer   *time.Timer
 }
 
 // maybeNotifyProgress pushes the generic verb of a tool call that starts running,
 // e.g. "Reading a file", the way the app's tool group summary names running calls.
 // A finished call never pushes: its verb would claim work that is already done.
-// Throttled by ProgressInterval and deduplicated against the previous summary.
+// Throttled by ProgressInterval (the latest throttled summary goes out when the
+// window ends) and deduplicated against the previous summary.
 func (p *StdioPump) maybeNotifyProgress(ev *progressEvent) {
 	p.progressMu.Lock()
 	defer p.progressMu.Unlock()
@@ -593,25 +600,60 @@ func (p *StdioPump) maybeNotifyProgress(ev *progressEvent) {
 		return
 	}
 
-	summary := verbForKind(kind)
-	last := p.progress[ev.acpSessionID]
-	if summary == last.summary {
-		return
-	}
-	if p.ProgressInterval > 0 && time.Since(last.at) < p.ProgressInterval {
-		return
-	}
 	if p.progress == nil {
-		p.progress = make(map[string]progressState)
+		p.progress = make(map[string]*progressState)
 	}
-	p.progress[ev.acpSessionID] = progressState{at: time.Now(), summary: summary}
+	st := p.progress[ev.acpSessionID]
+	if st == nil {
+		st = &progressState{}
+		p.progress[ev.acpSessionID] = st
+	}
+	summary := verbForKind(kind)
+	wait := p.ProgressInterval - time.Since(st.at)
+	if p.ProgressInterval <= 0 || wait <= 0 {
+		p.sendProgressLocked(ev.acpSessionID, st, summary)
+		return
+	}
+	st.pending = summary
+	if st.timer == nil {
+		acpID := ev.acpSessionID
+		st.timer = time.AfterFunc(wait, func() {
+			p.progressMu.Lock()
+			defer p.progressMu.Unlock()
+			if p.progress[acpID] != st || st.timer == nil {
+				return // the turn ended first
+			}
+			st.timer = nil
+			p.sendProgressLocked(acpID, st, st.pending)
+		})
+	}
+}
+
+// sendProgressLocked pushes summary unless it repeats the last push. Caller holds progressMu.
+func (p *StdioPump) sendProgressLocked(acpID string, st *progressState, summary string) {
+	st.pending = ""
+	if summary == st.summary {
+		return
+	}
+	st.at, st.summary = time.Now(), summary
 	p.onPushNotification(PushEvent{
 		SessionID:    p.sessionID,
-		AcpSessionID: ev.acpSessionID,
+		AcpSessionID: acpID,
 		Category:     push.CategoryProgress,
 		Title:        p.workingTitle(),
 		Body:         summary,
 	})
+}
+
+// endProgress drops a session's throttled progress at turn end: a push landing
+// after "Turn Complete" would claim the agent is still working.
+func (p *StdioPump) endProgress(acpID string) {
+	p.progressMu.Lock()
+	defer p.progressMu.Unlock()
+	if st := p.progress[acpID]; st != nil && st.timer != nil {
+		st.timer.Stop()
+	}
+	delete(p.progress, acpID)
 }
 
 // snoopInitialize inspects an outbound frame for the agent's `initialize`
@@ -661,15 +703,20 @@ func (p *StdioPump) snoopInitializeProbe(probe frameProbe, line string, frameByt
 	}
 }
 
+// AgentName is the agent's name for push text, e.g. "Claude Code", or fallback
+// when initialize carried no agentInfo.
+func (p *StdioPump) AgentName(fallback string) string {
+	p.initMu.Lock()
+	defer p.initMu.Unlock()
+	if p.agentName == "" {
+		return fallback
+	}
+	return p.agentName
+}
+
 // workingTitle is the progress push title, e.g. "Claude Code working".
 func (p *StdioPump) workingTitle() string {
-	p.initMu.Lock()
-	name := p.agentName
-	p.initMu.Unlock()
-	if name == "" {
-		name = "Agent"
-	}
-	return name + " working"
+	return p.AgentName("Agent") + " working"
 }
 
 func (p *StdioPump) initResponseCached() bool {
@@ -852,7 +899,7 @@ func (p *StdioPump) markTurnActivityProbe(probe frameProbe) (out string, handled
 			AcpSessionID: p.pushAcpSessionID(probe, origin),
 			Category:     push.CategoryError,
 			Title:        "Agent Error",
-			Body:         "The agent finished without producing anything. This usually means the model call failed (rate limit or invalid setting). Check the gateway logs for details.",
+			Body:         p.AgentName("The agent") + " finished without producing anything. This usually means the model call failed (rate limit or invalid setting). Check the gateway logs for details.",
 		})
 	}
 

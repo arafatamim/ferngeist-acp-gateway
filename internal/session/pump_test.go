@@ -74,17 +74,35 @@ func TestMaybeNotifyProgressPushesRunningVerbs(t *testing.T) {
 	}
 }
 
-func TestMaybeNotifyProgressThrottles(t *testing.T) {
-	var fired []string
+func TestMaybeNotifyProgressSendsLatestWhenWindowEnds(t *testing.T) {
+	fired := make(chan string, 10)
 	p := &StdioPump{
 		logger:             slog.New(slog.NewTextHandler(io.Discard, nil)),
-		ProgressInterval:   time.Hour,
-		onPushNotification: func(e PushEvent) { fired = append(fired, e.Body) },
+		ProgressInterval:   50 * time.Millisecond,
+		onPushNotification: func(e PushEvent) { fired <- e.Body },
 	}
-	p.maybeNotifyProgress(&progressEvent{toolCallID: "c1", kind: "edit", status: "in_progress"})
-	p.maybeNotifyProgress(&progressEvent{toolCallID: "c2", kind: "execute", status: "in_progress"})
-	if len(fired) != 1 {
-		t.Fatalf("throttle failed, fired = %v", fired)
+	p.maybeNotifyProgress(&progressEvent{acpSessionID: "s", toolCallID: "c1", kind: "edit", status: "in_progress"})
+	p.maybeNotifyProgress(&progressEvent{acpSessionID: "s", toolCallID: "c2", kind: "execute", status: "in_progress"})
+	p.maybeNotifyProgress(&progressEvent{acpSessionID: "s", toolCallID: "c3", kind: "read", status: "in_progress"})
+	if got := <-fired; got != "Editing a file" {
+		t.Fatalf("first push = %q", got)
+	}
+	select {
+	case got := <-fired:
+		if got != "Reading a file" {
+			t.Fatalf("window-end push = %q, want the latest", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("throttled summary never sent")
+	}
+
+	// A turn that ends inside the window drops its throttled summary.
+	p.maybeNotifyProgress(&progressEvent{acpSessionID: "s", toolCallID: "c4", kind: "search", status: "in_progress"})
+	p.endProgress("s")
+	select {
+	case got := <-fired:
+		t.Fatalf("push after turn end = %q", got)
+	case <-time.After(150 * time.Millisecond):
 	}
 }
 

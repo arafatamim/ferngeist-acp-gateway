@@ -186,6 +186,7 @@ func (rs *RuntimeSession) handleProcessExit(sessionID, runtimeID, deviceID, agen
 	var acpSessionIDForPush string
 	var cwdForPush string
 	var crashed bool
+	var agentForPush string
 	if s, ok := rs.sessions[sessionID]; ok {
 		s.mu.Lock()
 		// The supervisor fires this callback on every process exit — including
@@ -203,6 +204,7 @@ func (rs *RuntimeSession) handleProcessExit(sessionID, runtimeID, deviceID, agen
 			// ACP session id (the id the client navigates by), for the crash push.
 			acpSessionIDForPush = s.pump.AcpSessionID()
 			cwdForPush = s.pump.AcpCwdFor(acpSessionIDForPush)
+			agentForPush = s.pump.AgentName("Your agent")
 		}
 		s.mu.Unlock()
 		if crashed {
@@ -226,7 +228,7 @@ func (rs *RuntimeSession) handleProcessExit(sessionID, runtimeID, deviceID, agen
 	// decides whether to surface it based on its own foreground/background
 	// state. Dispatched asynchronously inside sendPushNotification.
 	if crashed && !intentional && deviceIDForPush != "" {
-		rs.sendPushNotification(deviceIDForPush, acpSessionIDForPush, cwdForPush, "Agent Crashed", "Your agent has stopped unexpectedly.", push.CategoryAgentCrash)
+		rs.sendPushNotification(deviceIDForPush, acpSessionIDForPush, cwdForPush, "Agent Crashed", agentForPush+" has stopped unexpectedly.", push.CategoryAgentCrash)
 	}
 }
 
