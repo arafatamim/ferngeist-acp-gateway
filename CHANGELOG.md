@@ -1,3 +1,23 @@
+## [0.13.0] - 2026-10-10
+
+### 🚀 Features
+
+- *(workspace)* Scope workspace endpoints to an ACP session
+- *(worktree)* Gateway-managed git worktrees for parallel chats
+- *(push)* Name the agent and its running tool kind in progress pushes
+- *(push)* Name the agent in every push and send the latest throttled progress
+
+### 🐛 Bug Fixes
+
+- *(pairing)* Keep rotated tokens exchangeable for 48h after refresh
+- *(workspace)* Scope git status to the agent's cwd and report conflicts
+- *(mock)* Answer session/load before replaying history
+- *(worktree)* Own the dirty check and retry the folder delete
+- *(push)* Carry session cwd in push deep-links
+
+### 💼 Other
+
+- Update ferngeist-gateway formula to v0.12.0
 ## [0.9.1] - 2026-08-17
 
 ### 🐛 Bug Fixes
