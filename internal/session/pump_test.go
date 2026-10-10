@@ -16,60 +16,18 @@ func newRecoveryPump() *StdioPump {
 	return &StdioPump{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 }
 
-func TestIsProgressEventToolCallCreate(t *testing.T) {
+func TestIsProgressEventReadsToolCall(t *testing.T) {
 	line := `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"tool_call","toolCallId":"c1","kind":"edit","status":"in_progress","title":"Editing auth.go"}}}`
 	ev := isProgressEvent(line)
-	if ev == nil {
-		t.Fatal("expected progress event, got nil")
-	}
-	if ev.summary != "Editing auth.go" {
-		t.Errorf("summary = %q, want %q", ev.summary, "Editing auth.go")
-	}
-	if ev.terminal {
-		t.Error("in_progress should not be terminal")
-	}
-	if ev.toolCallID != "c1" {
-		t.Errorf("toolCallID = %q, want c1", ev.toolCallID)
+	want := progressEvent{toolCallID: "c1", kind: "edit", status: "in_progress"}
+	if ev == nil || *ev != want {
+		t.Fatalf("isProgressEvent = %+v, want %+v", ev, want)
 	}
 }
 
-func TestIsProgressEventFallsBackToContentText(t *testing.T) {
-	line := `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"tool_call_update","toolCallId":"c1","status":"in_progress","content":[{"type":"text","text":"Running go test..."}]}}}`
-	ev := isProgressEvent(line)
-	if ev == nil {
-		t.Fatal("expected progress event, got nil")
-	}
-	if ev.summary != "Running go test..." {
-		t.Errorf("summary = %q, want %q", ev.summary, "Running go test...")
-	}
-}
-
-func TestIsProgressEventFallsBackToKindVerb(t *testing.T) {
-	line := `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"tool_call","toolCallId":"c1","kind":"execute","status":"in_progress"}}}`
-	ev := isProgressEvent(line)
-	if ev == nil {
-		t.Fatal("expected progress event, got nil")
-	}
-	if ev.summary != "Running a command" {
-		t.Errorf("summary = %q, want %q", ev.summary, "Running a command")
-	}
-}
-
-func TestIsProgressEventTerminal(t *testing.T) {
-	line := `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"tool_call_update","toolCallId":"c1","status":"completed","title":"Edited auth.go"}}}`
-	ev := isProgressEvent(line)
-	if ev == nil {
-		t.Fatal("expected progress event, got nil")
-	}
-	if !ev.terminal {
-		t.Error("completed should be terminal")
-	}
-}
-
-func TestIsProgressEventIgnoresNonToolAndNonProgress(t *testing.T) {
+func TestIsProgressEventIgnoresNonTool(t *testing.T) {
 	cases := []string{
 		`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","text":"hi"}}}`,
-		`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"tool_call","toolCallId":"c1","status":"pending","title":"Waiting"}}}`,
 		`{"jsonrpc":"2.0","method":"other","params":{}}`,
 		`not json`,
 	}
@@ -84,44 +42,60 @@ func TestVerbForKind(t *testing.T) {
 	if got := verbForKind("execute"); got != "Running a command" {
 		t.Errorf("execute verb = %q", got)
 	}
-	if got := verbForKind("other"); got != "" {
-		t.Errorf("other verb = %q, want empty", got)
+	if got := verbForKind("other"); got != "Using a tool" {
+		t.Errorf("other verb = %q", got)
 	}
-	if got := verbForKind(""); got != "" {
-		t.Errorf("empty verb = %q, want empty", got)
+	if got := verbForKind(""); got != "Using a tool" {
+		t.Errorf("empty verb = %q", got)
 	}
 }
 
-func TestMaybeNotifyProgressThrottlesAndDedupes(t *testing.T) {
+func TestMaybeNotifyProgressPushesRunningVerbs(t *testing.T) {
 	var fired []string
 	p := &StdioPump{
 		logger:             slog.New(slog.NewTextHandler(io.Discard, nil)),
-		ProgressInterval:   time.Hour, // effectively disable throttle between first and second
 		onPushNotification: func(e PushEvent) { fired = append(fired, e.Body) },
 	}
 
-	// First in_progress: fires.
-	p.maybeNotifyProgress(&progressEvent{summary: "Editing auth.go", toolCallID: "c1"})
-	if len(fired) != 1 || fired[0] != "Editing auth.go" {
-		t.Fatalf("first push = %v, want [Editing auth.go]", fired)
-	}
+	// Pending: nothing runs yet. The update that starts it omits the kind.
+	p.maybeNotifyProgress(&progressEvent{toolCallID: "c1", kind: "read", status: "pending"})
+	p.maybeNotifyProgress(&progressEvent{toolCallID: "c1", status: "in_progress"})
+	// Finished calls never push.
+	p.maybeNotifyProgress(&progressEvent{toolCallID: "c1", status: "completed"})
+	// Another read says the same thing: deduped.
+	p.maybeNotifyProgress(&progressEvent{toolCallID: "c2", kind: "read", status: "in_progress"})
+	p.maybeNotifyProgress(&progressEvent{toolCallID: "c3", kind: "execute", status: "in_progress"})
 
-	// Same tool + same summary: deduped, no throttled push.
-	p.maybeNotifyProgress(&progressEvent{summary: "Editing auth.go", toolCallID: "c1"})
-	if len(fired) != 1 {
-		t.Fatalf("dedupe failed, fired = %v", fired)
+	if want := []string{"Reading a file", "Running a command"}; fmt.Sprint(fired) != fmt.Sprint(want) {
+		t.Fatalf("pushes = %v, want %v", fired, want)
 	}
+	if _, ok := p.toolKinds["c1"]; ok {
+		t.Error("finished call's kind was kept")
+	}
+}
 
-	// New tool + new summary within interval: throttled.
-	p.maybeNotifyProgress(&progressEvent{summary: "Editing routes.go", toolCallID: "c2"})
+func TestMaybeNotifyProgressThrottles(t *testing.T) {
+	var fired []string
+	p := &StdioPump{
+		logger:             slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProgressInterval:   time.Hour,
+		onPushNotification: func(e PushEvent) { fired = append(fired, e.Body) },
+	}
+	p.maybeNotifyProgress(&progressEvent{toolCallID: "c1", kind: "edit", status: "in_progress"})
+	p.maybeNotifyProgress(&progressEvent{toolCallID: "c2", kind: "execute", status: "in_progress"})
 	if len(fired) != 1 {
 		t.Fatalf("throttle failed, fired = %v", fired)
 	}
+}
 
-	// Terminal event: fires immediately despite interval.
-	p.maybeNotifyProgress(&progressEvent{summary: "Edited auth.go", toolCallID: "c1", terminal: true})
-	if len(fired) != 2 || fired[1] != "Edited auth.go" {
-		t.Fatalf("terminal push = %v, want appends", fired)
+func TestWorkingTitleUsesAgentInfo(t *testing.T) {
+	p := newRecoveryPump()
+	if got := p.workingTitle(); got != "Agent working" {
+		t.Errorf("before initialize = %q", got)
+	}
+	p.snoopInitialize(`{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentInfo":{"name":"claude-code-acp","title":"Claude Code","version":"1"}}}`)
+	if got := p.workingTitle(); got != "Claude Code working" {
+		t.Errorf("after initialize = %q", got)
 	}
 }
 

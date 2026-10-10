@@ -198,6 +198,9 @@ type StdioPump struct {
 	// the duplicate to the agent.
 	initMu       sync.Mutex
 	initResponse []byte
+	// The agent's human-readable name from initialize's agentInfo, "" until known.
+	// Guarded by initMu.
+	agentName string
 
 	// Cached ACP session id ("ses_…"), snooped from the agent's session/new
 	// response. Sent as the push SessionID so it matches the id the client
@@ -231,8 +234,8 @@ type StdioPump struct {
 	lastStdoutAt time.Time // updated on each agent stdout line; used by reaper to avoid killing active agents
 	lastStdoutMu sync.Mutex
 
-	// ProgressInterval is the minimum time between non-terminal progress pushes.
-	// 0 means push every new/different tool with no throttle.
+	// ProgressInterval is the minimum time between progress pushes.
+	// 0 means push every changed summary with no throttle.
 	ProgressInterval time.Duration
 
 	// Throttle/dedupe state for live progress pushes, per ACP session so one
@@ -240,6 +243,9 @@ type StdioPump struct {
 	// progressMu. ponytail: entries are never evicted; one per chat the pump hosts.
 	progressMu sync.Mutex
 	progress   map[string]progressState
+	// Each running tool call's kind: a tool_call_update usually omits it. Entries
+	// leave when the call completes or fails. Guarded by progressMu.
+	toolKinds map[string]string
 
 	// Swallowed-failure detection. Some agents (e.g. Opencode) never send a
 	// JSON-RPC error for a failed LLM call — they return a success with
@@ -555,14 +561,14 @@ func (p *StdioPump) pushAcpSessionID(probe frameProbe, origin pendingRequest) st
 }
 
 type progressState struct {
-	at       time.Time
-	toolCall string
-	summary  string
+	at      time.Time
+	summary string
 }
 
-// maybeNotifyProgress fires a progress push, throttled by ProgressInterval and
-// deduplicated against the previous tool call + summary. Terminal events
-// (completed/failed) always push immediately so the user sees the boundary.
+// maybeNotifyProgress pushes the generic verb of a tool call that starts running,
+// e.g. "Reading a file", the way the app's tool group summary names running calls.
+// A finished call never pushes: its verb would claim work that is already done.
+// Throttled by ProgressInterval and deduplicated against the previous summary.
 func (p *StdioPump) maybeNotifyProgress(ev *progressEvent) {
 	p.progressMu.Lock()
 	defer p.progressMu.Unlock()
@@ -570,27 +576,41 @@ func (p *StdioPump) maybeNotifyProgress(ev *progressEvent) {
 		ev.acpSessionID = p.AcpSessionID()
 	}
 
+	if p.toolKinds == nil {
+		p.toolKinds = make(map[string]string)
+	}
+	kind := ev.kind
+	if kind != "" {
+		p.toolKinds[ev.toolCallID] = kind
+	} else {
+		kind = p.toolKinds[ev.toolCallID]
+	}
+	if ev.status == "completed" || ev.status == "failed" {
+		delete(p.toolKinds, ev.toolCallID)
+		return
+	}
+	if ev.status != "in_progress" {
+		return
+	}
+
+	summary := verbForKind(kind)
 	last := p.progress[ev.acpSessionID]
-	if !ev.terminal {
-		// Dedupe: same tool call, same summary → skip.
-		if ev.toolCallID == last.toolCall && ev.summary == last.summary {
-			return
-		}
-		// Throttle: respect the minimum interval for non-terminal updates.
-		if p.ProgressInterval > 0 && time.Since(last.at) < p.ProgressInterval {
-			return
-		}
+	if summary == last.summary {
+		return
+	}
+	if p.ProgressInterval > 0 && time.Since(last.at) < p.ProgressInterval {
+		return
 	}
 	if p.progress == nil {
 		p.progress = make(map[string]progressState)
 	}
-	p.progress[ev.acpSessionID] = progressState{at: time.Now(), toolCall: ev.toolCallID, summary: ev.summary}
+	p.progress[ev.acpSessionID] = progressState{at: time.Now(), summary: summary}
 	p.onPushNotification(PushEvent{
 		SessionID:    p.sessionID,
 		AcpSessionID: ev.acpSessionID,
 		Category:     push.CategoryProgress,
-		Title:        "Agent working",
-		Body:         ev.summary,
+		Title:        p.workingTitle(),
+		Body:         summary,
 	})
 }
 
@@ -624,11 +644,32 @@ func (p *StdioPump) snoopInitializeProbe(probe frameProbe, line string, frameByt
 	var typed struct {
 		Result *acp.InitializeResponse `json:"result"`
 	}
-	if err := json.Unmarshal(frameBytes, &typed); err == nil &&
-		typed.Result != nil &&
-		typed.Result.AgentCapabilities.SessionCapabilities.Close != nil {
+	if err := json.Unmarshal(frameBytes, &typed); err != nil || typed.Result == nil {
+		return
+	}
+	if typed.Result.AgentCapabilities.SessionCapabilities.Close != nil {
 		p.supportsClose.Store(true)
 	}
+	if info := typed.Result.AgentInfo; info != nil {
+		name := info.Name
+		if info.Title != nil && *info.Title != "" {
+			name = *info.Title
+		}
+		p.initMu.Lock()
+		p.agentName = name
+		p.initMu.Unlock()
+	}
+}
+
+// workingTitle is the progress push title, e.g. "Claude Code working".
+func (p *StdioPump) workingTitle() string {
+	p.initMu.Lock()
+	name := p.agentName
+	p.initMu.Unlock()
+	if name == "" {
+		name = "Agent"
+	}
+	return name + " working"
 }
 
 func (p *StdioPump) initResponseCached() bool {
@@ -869,24 +910,18 @@ func isJSONRPCError(data []byte) bool {
 	return resp.Error != nil
 }
 
-// progressEvent is a parsed live-progress signal from an agent's session/update
-// notification. summary is the human-readable line to push; terminal is true
-// when the tool call completed or failed (which should push immediately, not
-// throttled).
+// progressEvent is a tool call's status change from an agent's session/update
+// notification. kind is empty when the frame omits it (usual for updates).
 type progressEvent struct {
-	summary    string
-	terminal   bool
 	toolCallID string
+	kind       string
+	status     string
 	// The ACP session the push deep-links to; filled in by the notifier.
 	acpSessionID string
 }
 
 // isProgressEvent parses a stdout line for an ACP session/update tool_call or
-// tool_call_update event and returns a progressEvent, or nil when the line is
-// not a progress-relevant session/update frame. Summary resolution order:
-// required `title` (tool_call) or optional `title` (tool_call_update), then the
-// first text content block, then a verb derived from `kind`. A frame with no
-// resolvable summary, or a non-tool session/update variant, yields nil.
+// tool_call_update event and returns a progressEvent, or nil for any other frame.
 func isProgressEvent(line string) *progressEvent {
 	probe, ok := parseFrameProbe([]byte(line))
 	if !ok {
@@ -907,58 +942,21 @@ func progressEventFromProbe(probe frameProbe) *progressEvent {
 	default:
 		return nil
 	}
-	if u.Status != "in_progress" && u.Status != "completed" && u.Status != "failed" {
-		return nil
-	}
-	summary := u.Title
-	if summary == "" {
-		summary = firstContentText(u.Content)
-	}
-	if summary == "" {
-		summary = verbForKind(u.Kind)
-		if summary == "" {
-			return nil
-		}
-	}
-	return &progressEvent{
-		summary:    summary,
-		terminal:   u.Status == "completed" || u.Status == "failed",
-		toolCallID: u.ToolCallID,
-	}
+	return &progressEvent{toolCallID: u.ToolCallID, kind: u.Kind, status: u.Status}
 }
 
-// firstContentText extracts the first text block from session/update content,
-// accepting both the array shape and the legacy single-object shape.
-func firstContentText(raw json.RawMessage) string {
-	if len(raw) == 0 {
-		return ""
-	}
-	var arr []struct {
-		Text string `json:"text"`
-	}
-	if err := json.Unmarshal(raw, &arr); err == nil && len(arr) > 0 {
-		return arr[0].Text
-	}
-	var single struct {
-		Text string `json:"text"`
-	}
-	if err := json.Unmarshal(raw, &single); err == nil {
-		return single.Text
-	}
-	return ""
-}
-
-// verbForKind maps a ToolKind to a generic progress verb, or "" for unknown/other.
+// verbForKind maps a ToolKind to the generic verb of one running call, worded
+// like the app's tool group summary.
 func verbForKind(kind string) string {
 	switch kind {
 	case "read":
-		return "Reading files"
+		return "Reading a file"
 	case "edit":
-		return "Editing files"
+		return "Editing a file"
 	case "delete":
-		return "Removing files"
+		return "Deleting a file"
 	case "move":
-		return "Moving files"
+		return "Moving a file"
 	case "search":
 		return "Searching"
 	case "execute":
@@ -966,11 +964,11 @@ func verbForKind(kind string) string {
 	case "think":
 		return "Thinking"
 	case "fetch":
-		return "Fetching data"
+		return "Fetching a URL"
 	case "switch_mode":
 		return "Switching mode"
 	default:
-		return ""
+		return "Using a tool"
 	}
 }
 
