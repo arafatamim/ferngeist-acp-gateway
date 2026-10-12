@@ -617,6 +617,7 @@ prompt runs, and always fire on each tool call that completes or fails.
     ```
     `replayedFrames` `session/update` notifications follow, and then the response to the client's `session/load`: the cached first-load result rewritten with the request's id, or a `null` result when no successful load was cached. `_ferngeist/resumed` means the gateway, not the agent, restored the session, so a client may treat that history and that response as the gateway's resume contract instead of defending against a fabricated agent reply. Clients that do not know the notification ignore it, as ACP requires for unknown notifications. Underscore-prefixed per ACP's extension rule, like `_ferngeist/turn_ended`.
   - On reconnect, a prompt issued on an earlier connection cannot be answered with a JSON-RPC result, because the id it would carry was never issued on the new connection; its turn ends with a `_ferngeist/turn_ended` notification instead (see `docs/changelog.md`).
+  - A `session/prompt` result carries the turn's length as `_meta.ferngeist.durationMs`, measured on the gateway from the prompt's arrival to the agent's reply. A client that heard the reply late (a stalled connection) can time the turn with it instead of its own clock. The agent's own `_meta` keys are kept.
 
 ### Attach tokens
 

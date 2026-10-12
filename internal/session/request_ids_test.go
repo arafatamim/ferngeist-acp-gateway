@@ -52,6 +52,43 @@ func TestRequestIDsKeepConnectionsApart(t *testing.T) {
 	}
 }
 
+// A prompt's reply carries how long the turn ran, next to the agent's own _meta.
+func TestRequestIDsTimePromptReplies(t *testing.T) {
+	var ids requestIDs
+	out := ids.outbound(1, parseClientFrame([]byte(`{"jsonrpc":"2.0","id":7,"method":"session/prompt","params":{"sessionId":"s","prompt":[]}}`)))
+	reply := `{"jsonrpc":"2.0","id":` + agentIDOf(t, out) + `,"result":{"stopReason":"end_turn","_meta":{"agent":1}}}`
+	frames := ids.reply(1, replyProbe(t, reply), []string{reply})
+
+	var msg struct {
+		ID     json.RawMessage `json:"id"`
+		Result struct {
+			StopReason string `json:"stopReason"`
+			Meta       struct {
+				Agent     *int `json:"agent"`
+				Ferngeist struct {
+					DurationMs *int64 `json:"durationMs"`
+				} `json:"ferngeist"`
+			} `json:"_meta"`
+		} `json:"result"`
+	}
+	if len(frames) != 1 || json.Unmarshal([]byte(frames[0]), &msg) != nil {
+		t.Fatalf("want one JSON reply, got %v", frames)
+	}
+	if string(msg.ID) != "7" || msg.Result.StopReason != "end_turn" || msg.Result.Meta.Agent == nil {
+		t.Fatalf("reply lost its id, stop reason or the agent's _meta: %s", frames[0])
+	}
+	if d := msg.Result.Meta.Ferngeist.DurationMs; d == nil || *d < 0 {
+		t.Fatalf("reply carries no turn duration: %s", frames[0])
+	}
+
+	// An error reply has no result to annotate and passes untouched.
+	out = ids.outbound(1, parseClientFrame([]byte(`{"jsonrpc":"2.0","id":8,"method":"session/prompt","params":{"sessionId":"s","prompt":[]}}`)))
+	failed := `{"jsonrpc":"2.0","id":` + agentIDOf(t, out) + `,"error":{"code":-1,"message":"x"}}`
+	if frames := ids.reply(1, replyProbe(t, failed), []string{failed}); strings.Contains(frames[0], "durationMs") {
+		t.Fatalf("error reply was annotated: %s", frames[0])
+	}
+}
+
 func TestRequestIDsDropOtherRepliesForAnEarlierConnection(t *testing.T) {
 	var ids requestIDs
 	out := ids.outbound(1, parseClientFrame([]byte(`{"jsonrpc":"2.0","id":1,"method":"session/set_mode","params":{"sessionId":"s"}}`)))

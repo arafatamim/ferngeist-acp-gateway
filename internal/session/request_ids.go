@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strconv"
 	"sync"
+	"time"
 )
 
 // turnEndedMethod tells a client that a prompt sent by an earlier connection has
@@ -54,6 +55,8 @@ type pendingRequest struct {
 	method   string
 	// The ACP session a session/prompt drives; empty for every other method.
 	promptSession string
+	// When a session/prompt reached the gateway; zero for every other method.
+	startedAt time.Time
 	// The ACP session a session/load restores; empty for every other method.
 	loadSession string
 }
@@ -89,6 +92,7 @@ func (r *requestIDs) outbound(gen int64, f *clientFrame) []byte {
 	switch f.Method {
 	case "session/prompt":
 		origin.promptSession = f.Params.SessionID
+		origin.startedAt = time.Now()
 	case "session/load":
 		origin.loadSession = f.Params.SessionID
 	}
@@ -294,7 +298,39 @@ func (r *requestIDs) reply(currentGen int64, probe frameProbe, frames []string) 
 	if out, rewritten := rewriteResponseID([]byte(frames[last]), origin.clientID); rewritten {
 		frames[last] = string(out)
 	}
+	if origin.promptSession != "" {
+		frames[last] = withTurnDuration(frames[last], time.Since(origin.startedAt))
+	}
 	return frames
+}
+
+// withTurnDuration adds _meta.ferngeist.durationMs to a prompt's result: how long
+// the turn ran, timed here on a monotonic clock. A phone that dozed hears the
+// reply late, so its own clock would time the nap too. The agent's own _meta
+// keys are kept. Anything that is not an object result passes unchanged.
+func withTurnDuration(frame string, d time.Duration) string {
+	var msg, result, meta map[string]json.RawMessage
+	if json.Unmarshal([]byte(frame), &msg) != nil || json.Unmarshal(msg["result"], &result) != nil || result == nil {
+		return frame
+	}
+	if raw, ok := result["_meta"]; ok && json.Unmarshal(raw, &meta) != nil {
+		return frame
+	}
+	if meta == nil {
+		meta = make(map[string]json.RawMessage)
+	}
+	ferngeist, err := json.Marshal(map[string]int64{"durationMs": d.Milliseconds()})
+	if err != nil {
+		return frame
+	}
+	meta["ferngeist"] = ferngeist
+	if result["_meta"], err = json.Marshal(meta); err != nil {
+		return frame
+	}
+	if msg["result"], err = json.Marshal(result); err != nil {
+		return frame
+	}
+	return string(marshalOr(msg, []byte(frame)))
 }
 
 func turnEndedFrame(sessionID string, probe frameProbe) string {

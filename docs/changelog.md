@@ -204,6 +204,13 @@ not be coupled. Full release notes live in GitHub Releases.
   `gateway_sessions.leaseholder` column on first start. Gateway `v0.13.0` and
   earlier cannot use the migrated database, so downgrading the gateway is not
   supported. (2026-10-11)
+- `[additive]` `session/prompt` results gain `_meta.ferngeist.durationMs`: how
+  long the turn ran, in milliseconds, from the prompt reaching the gateway to
+  the agent's reply, measured on the gateway's monotonic clock. A client whose
+  connection stalled (a dozing phone) hears the reply late, so it should time
+  the turn with this instead of its own clock. Any `_meta` the agent sent is
+  kept. Only on the result sent to the connection that issued the prompt;
+  error replies and `_ferngeist/turn_ended` do not carry it. (2026-10-13)
 
 ## History
 
