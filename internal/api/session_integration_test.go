@@ -186,6 +186,7 @@ type acpMessage struct {
 	JSONRPC string          `json:"jsonrpc"`
 	ID      json.RawMessage `json:"id,omitempty"`
 	Method  string          `json:"method,omitempty"`
+	Params  json.RawMessage `json:"params,omitempty"`
 	Result  json.RawMessage `json:"result,omitempty"`
 	Error   *struct {
 		Code    int    `json:"code"`
@@ -392,6 +393,23 @@ func TestResilientSession_FullLifecycle(t *testing.T) {
 	defer func() { _ = conn2.CloseNow() }()
 
 	sendWSMessage(t, conn2, `{"jsonrpc":"2.0","id":"5","method":"session/load","params":{"sessionId":"mock_sess_1"}}`)
+	// The prompt issued while no client was attached completed detached; the
+	// gateway kept its outcome and replays it ahead of the load reply.
+	msg = readWSMessage(t, conn2)
+	assertNotification(t, msg, "_ferngeist/turn_result")
+	var detachedResult struct {
+		SessionID  string `json:"sessionId"`
+		StopReason string `json:"stopReason"`
+	}
+	if err := json.Unmarshal(msg.Params, &detachedResult); err != nil {
+		t.Fatalf("Unmarshal(turn_result params) error = %v", err)
+	}
+	if detachedResult.SessionID != acpSessionID {
+		t.Fatalf("turn_result sessionId = %q, want %q", detachedResult.SessionID, acpSessionID)
+	}
+	if detachedResult.StopReason != "end_turn" {
+		t.Fatalf("turn_result stopReason = %q, want %q", detachedResult.StopReason, "end_turn")
+	}
 	// ACP: the agent answers session/load first, then replays history.
 	msg = readWSMessage(t, conn2)
 	assertResult(t, msg, "5")
