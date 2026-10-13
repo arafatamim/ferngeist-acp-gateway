@@ -273,8 +273,10 @@ symlink escape) is rejected with `400`. "Not found / not known yet" cases return
 return `422`.
 
 When that directory is inside a [managed worktree](#worktrees), `/git/status` and
-`/git/diff` compare against the worktree's `baseCommit` instead of `HEAD`, so
-changes the agent already committed on its branch are still listed and diffed.
+`/git/diff` compare against the worktree's base — the merge-base of the branch
+it was cut from and its current `HEAD` — instead of `HEAD`, so changes the
+agent already committed on its branch are still listed and diffed, even after
+the branch is rebased onto a newer base.
 
 One agent can host several ACP sessions, each with its own `cwd`. Every
 workspace endpoint accepts an optional `acpSessionId=<id>` query parameter (the

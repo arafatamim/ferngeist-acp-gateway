@@ -23,6 +23,7 @@ type migration struct {
 // the v1 shape and use plain, unconditional DDL.
 var migrations = []migration{
 	{version: 1, name: "baseline", up: migrateBaseline},
+	{version: 2, name: "worktree_base_ref", up: migrateWorktreeBaseRef},
 }
 
 // latestMigrationVersion is the schema version a fully migrated database reports.
@@ -169,6 +170,7 @@ var baselineSchema = []string{
 		path TEXT NOT NULL,
 		branch TEXT NOT NULL,
 		base_commit TEXT NOT NULL,
+		base_ref TEXT NOT NULL DEFAULT '',
 		created_at TEXT NOT NULL
 	)`,
 }
@@ -220,6 +222,16 @@ func migrateBaseline(ctx context.Context, tx *sql.Tx) error {
 	}
 
 	return nil
+}
+
+// migrateWorktreeBaseRef records the branch each managed worktree was cut
+// from, so the workspace git endpoints can merge-base against it after the
+// branch is rebased. Databases already at v1 gain the column with an empty
+// default (old rows fall back to their fixed base commit); fresh databases
+// already have it from the baseline schema above.
+func migrateWorktreeBaseRef(ctx context.Context, tx *sql.Tx) error {
+	return ensureColumn(ctx, tx, "worktrees", "base_ref",
+		`ALTER TABLE worktrees ADD COLUMN base_ref TEXT NOT NULL DEFAULT ''`)
 }
 
 // ensureColumn adds a column only when it is missing. modernc.org/sqlite's

@@ -166,7 +166,7 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (storage.Worktr
 	if _, err := RunGit(ctx, top, "worktree", "add", "-b", branch, path, baseCommit); err != nil {
 		return storage.WorktreeRecord{}, errStatus(422, err.Error())
 	}
-	rec := storage.WorktreeRecord{ID: id, Repo: top, Path: path, Branch: branch, BaseCommit: baseCommit, CreatedAt: s.now()}
+	rec := storage.WorktreeRecord{ID: id, Repo: top, Path: path, Branch: branch, BaseCommit: baseCommit, BaseRef: baseRefOf(ctx, top, base), CreatedAt: s.now()}
 	if err := s.store().SaveWorktree(ctx, rec); err != nil {
 		s.logger.Error("save worktree", "path", path, "error", err)
 		_, _ = RunGit(context.Background(), top, "worktree", "remove", "--force", path)
@@ -243,17 +243,53 @@ func (s *Service) Delete(ctx context.Context, id string, force bool) (bool, erro
 	return branchErr == nil, nil
 }
 
+// baseRefOf resolves what to remember as the worktree's base ref: the base
+// the caller named, except a default HEAD is resolved to the branch it points
+// at. A literal "HEAD" would merge-base against the worktree tip itself and
+// hide every commit, and HEAD moves; the branch name stays put. A detached
+// HEAD has no branch, so it records "" and BaseRef falls back to BaseCommit.
+func baseRefOf(ctx context.Context, top, base string) string {
+	if base != "HEAD" {
+		return base
+	}
+	if sym, err := RunGit(ctx, top, "symbolic-ref", "--quiet", "--short", "HEAD"); err == nil {
+		if name := strings.TrimSpace(sym); name != "" {
+			return name
+		}
+	}
+	return ""
+}
+
 // BaseRef is the commit the workspace git endpoints compare against: a managed
 // worktree's base commit (so the agent's commits stay visible in the review),
 // otherwise HEAD.
-// ponytail: fixed base commit; after rebasing the branch onto a newer base the
-// diff also shows the base's new commits. Use merge-base with the original base
-// ref if that matters.
 func (s *Service) BaseRef(ctx context.Context, cwd string) string {
 	if rec, ok := s.find(ctx, func(rec storage.WorktreeRecord) bool { return SubpathOf(cwd, rec.Path) }); ok {
+		if mb, ok := s.mergeBase(ctx, rec); ok {
+			return mb
+		}
 		return rec.BaseCommit
 	}
 	return "HEAD"
+}
+
+// mergeBase returns merge-base of the worktree's recorded base ref and its
+// HEAD: the fork point even after the branch is rebased onto a newer base.
+// It reports false when no ref was recorded (pre-migration rows) or the ref
+// no longer resolves (a deleted base branch), and the caller falls back to
+// the fixed base commit.
+func (s *Service) mergeBase(ctx context.Context, rec storage.WorktreeRecord) (string, bool) {
+	if rec.BaseRef == "" {
+		return "", false
+	}
+	mb, err := RunGit(ctx, rec.Path, "merge-base", "--end-of-options", rec.BaseRef, "HEAD")
+	if err != nil {
+		return "", false
+	}
+	if mb = strings.TrimSpace(mb); mb == "" {
+		return "", false
+	}
+	return mb, true
 }
 
 // find returns the first managed worktree matching match.

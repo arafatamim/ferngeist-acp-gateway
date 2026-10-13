@@ -211,6 +211,14 @@ not be coupled. Full release notes live in GitHub Releases.
   the turn with this instead of its own clock. Any `_meta` the agent sent is
   kept. Only on the result sent to the connection that issued the prompt;
   error replies and `_ferngeist/turn_ended` do not carry it. (2026-10-13)
+- `[semantic]` Managed-worktree git endpoints (`GET /v1/runtimes/{id}/git/status`
+  and `/git/diff`) — the base they compare against is now `git merge-base` of
+  the branch the worktree was cut from and the worktree's `HEAD`, instead of
+  the fixed `baseCommit` recorded at creation. After the worktree's branch is
+  rebased onto a newer base, the diff shows only the agent's changes rather
+  than the upstream commits the rebase picked up. Worktrees created before
+  this change, and ones whose base branch was deleted, keep comparing against
+  `baseCommit`. (2026-10-13)
 
 ## History
 
