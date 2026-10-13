@@ -30,6 +30,7 @@ type LoadRecovery struct {
 	history      map[string][]historyFrame // acpSessionId -> ordered session/update frames
 	histSize     map[string]int            // acpSessionId -> approximate buffered bytes
 	userFrames   map[string]int            // acpSessionId -> buffered user_message_chunk frames
+	trimmed      map[string]bool           // acpSessionId -> the buffer evicted oldest frames
 	response     map[string][]byte         // acpSessionId -> first successful session/load response
 	pendingLoads map[string]string         // load request id -> acpSessionId
 
@@ -123,7 +124,7 @@ func (r *LoadRecovery) OnFrame(line string, probe frameProbe, ok bool) ([]string
 	// with a synthesized success. The client can trust the replay instead of
 	// defending against a fabricated agent response (see docs/api.md).
 	frames := make([]string, 0, len(r.history[sid])+1)
-	frames = append(frames, resumedFrame(sid, len(r.history[sid])))
+	frames = append(frames, resumedFrame(sid, len(r.history[sid]), r.trimmed[sid]))
 	for _, frame := range r.history[sid] {
 		frames = append(frames, frame.line)
 	}
@@ -204,6 +205,12 @@ func (r *LoadRecovery) appendHistoryLocked(sid, line string, user bool) {
 	for evicted && r.userFrames[sid] > 0 && !r.history[sid][0].user {
 		r.dropOldestLocked(sid)
 	}
+	if evicted {
+		if r.trimmed == nil {
+			r.trimmed = make(map[string]bool)
+		}
+		r.trimmed[sid] = true
+	}
 }
 
 func (r *LoadRecovery) dropOldestLocked(sid string) {
@@ -252,15 +259,21 @@ const resumedMethod = "_ferngeist/resumed"
 // the gateway, not from the agent. The gateway cannot make an agent re-emit a
 // session it still holds, so it synthesizes the reply; saying so lets the
 // client stop treating the synthesized response as an agent contract and rely
-// on the gateway's resume instead (see docs/api.md).
-func resumedFrame(acpSessionID string, replayed int) string {
+// on the gateway's resume instead (see docs/api.md). truncated reports that
+// the buffer evicted the oldest frames, so the replay starts mid-conversation;
+// it is omitted when the history is intact.
+func resumedFrame(acpSessionID string, replayed int, truncated bool) string {
+	params := map[string]any{
+		"sessionId":      acpSessionID,
+		"replayedFrames": replayed,
+	}
+	if truncated {
+		params["truncated"] = true
+	}
 	out, _ := json.Marshal(map[string]any{
 		"jsonrpc": "2.0",
 		"method":  resumedMethod,
-		"params": map[string]any{
-			"sessionId":      acpSessionID,
-			"replayedFrames": replayed,
-		},
+		"params":  params,
 	})
 	return string(out)
 }

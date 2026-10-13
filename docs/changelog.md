@@ -52,6 +52,10 @@ not be coupled. Full release notes live in GitHub Releases.
 
 ## History
 
+- `[additive]` `_ferngeist/resumed` gains an optional `"truncated": true`
+  param: the per-session replay buffer (8 MiB) evicted its oldest frames, so a
+  gateway-restored session starts mid-conversation with earlier history
+  missing. Omitted when the history is intact. (2026-10-13)
 - `[additive]` `_ferngeist/turn_result` — a new gateway→client notification on
   the ACP WebSocket, sent when a `session/prompt` finished while no client was
   attached: `{"jsonrpc":"2.0","method":"_ferngeist/turn_result","params":{"sessionId":…,"stopReason":…,"usage":…,"durationMs":…}}`.

@@ -215,3 +215,57 @@ func TestBufferLoadHistoryEvictsToATurnBoundary(t *testing.T) {
 		t.Fatalf("history should start at the second prompt, starts with %s", first.line)
 	}
 }
+
+// resumeNotice decodes the _ferngeist/resumed frame opening a recovery burst.
+func resumeNotice(t *testing.T, frame string) (replayed int, truncated *bool) {
+	t.Helper()
+	var notice struct {
+		Method string `json:"method"`
+		Params struct {
+			SessionID      string `json:"sessionId"`
+			ReplayedFrames int    `json:"replayedFrames"`
+			Truncated      *bool  `json:"truncated"`
+		} `json:"params"`
+	}
+	if err := json.Unmarshal([]byte(frame), &notice); err != nil {
+		t.Fatalf("resume notice is not valid JSON: %v", err)
+	}
+	if notice.Method != resumedMethod {
+		t.Fatalf("method = %q, want %q", notice.Method, resumedMethod)
+	}
+	return notice.Params.ReplayedFrames, notice.Params.Truncated
+}
+
+// When the buffer evicted, the resume notice says earlier history exists.
+func TestResumeNoticeMarksTrimmedHistory(t *testing.T) {
+	r := newTestLoadRecovery()
+	const sid = "ses_trim"
+	big := strings.Repeat("x", maxLoadHistoryBytes)
+	onFrame(t, r, updateFrame(sid, "first"))
+	onFrame(t, r, updateFrame(sid, big)) // evicts "first"
+
+	r.OnOutbound(loadRequest("1", sid))
+	frames, handled := onFrame(t, r, `{"jsonrpc":"2.0","id":1,"error":{"message":"already loaded"}}`)
+	if !handled {
+		t.Fatal("expected recovery")
+	}
+	if _, truncated := resumeNotice(t, frames[0]); truncated == nil || !*truncated {
+		t.Fatalf("resume notice should carry truncated:true, got %s", frames[0])
+	}
+}
+
+// Without eviction the truncated field is absent, not false.
+func TestResumeNoticeOmitsTruncatedWhenIntact(t *testing.T) {
+	r := newTestLoadRecovery()
+	const sid = "ses_whole"
+	onFrame(t, r, updateFrame(sid, "only"))
+
+	r.OnOutbound(loadRequest("1", sid))
+	frames, handled := onFrame(t, r, `{"jsonrpc":"2.0","id":1,"error":{"message":"already loaded"}}`)
+	if !handled {
+		t.Fatal("expected recovery")
+	}
+	if _, truncated := resumeNotice(t, frames[0]); truncated != nil {
+		t.Fatalf("resume notice should omit truncated, got %s", frames[0])
+	}
+}

@@ -146,7 +146,7 @@ func TestAgentRequestRedeliveredAfterRecoveredLoad(t *testing.T) {
 	pump.loadRecovery.OnOutbound(parseClientFrame(agent))
 	pump.handleStdoutLine(fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"error":{"code":-32602,"message":"Session already loaded"}}`, agentIDOf(t, agent)))
 	got := readFrames(t, pump, c, 3)
-	if got[0] != resumedFrame("ses_a", 0) {
+	if got[0] != resumedFrame("ses_a", 0, false) {
 		t.Fatalf("resume notice = %s", got[0])
 	}
 	if got[1] != `{"id":1,"jsonrpc":"2.0","result":null}` {
