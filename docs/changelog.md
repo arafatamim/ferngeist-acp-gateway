@@ -26,6 +26,10 @@ Format:
 - `[semantic]` — a field's meaning changed but the JSON shape did not. A bump
   is required; the client gate will refuse.
 
+Entries end with the date and the short hash of the commit that introduced
+the change, linked to the commit on GitHub, so any claim can be checked
+against the code.
+
 ## Versioning policy
 
 - `protocolVersion` (served in `GET /v1/status` and the mDNS
@@ -46,64 +50,120 @@ Releases are tagged with semver (`v0.6.0` … `v1.0.0` so far); the Taskfile
 derives the build version from `git describe`. They are independent and should
 not be coupled. Full release notes live in GitHub Releases.
 
-## Unreleased
+## History
 
-- `v1` — gateway protocol version stabilized (promoted from `v1beta1`). The
-  contract is now frozen; `[breaking]`/`[semantic]` changes require a version
-  bump per the policy above.
-- `[additive]` — workspace browsing endpoints:
-  `GET /v1/runtimes/{id}/files`, `GET /v1/runtimes/{id}/git/status`,
-  `GET /v1/runtimes/{id}/git/diff`. (2026-08-06)
-- `[semantic]` `GET /v1/runtimes/{id}/files` — `size` is now the full on-disk
-  file size (was: the truncated payload length). `truncated: true` still
-  signals the payload is capped at 1 MiB. (2026-08-06)
-- `[semantic]` `GET /v1/runtimes/{id}/git/status` — `added`/`removed` are now
-  the full HEAD → working-tree delta via `git diff HEAD --numstat` (was: the
-  unstaged-only delta), so partially staged files count staged + unstaged edits
-  together, matching what `/git/diff` compares. (2026-08-06)
-- `[breaking]` `GET /v1/runtimes/{id}/git/diff` — the raw unified-patch shape
-  (`{path?, diff}`) was replaced by ACP `ToolCallContentDiff` objects
-  (`path`/`oldText`/`newText`/`type:"diff"`); single object with `?path=`,
-  array otherwise. The client must render from `oldText`/`newText` instead of
-  parsing a patch. (2026-08-06)
-- `[semantic]` `POST /v1/auth/refresh` — an **expired** bearer token is now
-  accepted within the configured grace window
-  (`FERNGEIST_GATEWAY_CREDENTIAL_GRACE_SECONDS`, default 90 days) as long as a
-  valid proof-of-possession is attached; previously any expired token was
-  rejected with 401. A credential past the grace window returns a distinct
-  error (`gateway credential expired beyond grace period`) and must re-pair.
-  Response shape is unchanged. (2026-08-07)
-- `[additive]` `GET /v1/agents` — each per-agent object gains a `runtimes`
-  array listing every runtime tracked for the agent (newest first). The legacy
-  `running`/`runtimeId`/`runtimeStatus` fields keep their shape and reflect the
-  **newest** runtime; clients that never create multiple runtimes see identical
-  values as before. (2026-08-21)
-- `[additive]` `POST /v1/agents/{agentId}/stop` — now stops **all** runtimes
-  tracked for the agent and revokes each runtime's gateway token (previously:
-  the single tracked runtime). Returns `404` when the agent has no runtimes.
-  For a device holding one runtime per agent the observable behavior is
-  unchanged. Response still carries a single `runtime` object — the agent's
-  **newest** runtime (the same one `GET /v1/agents` highlights). (2026-08-21)
+- `[additive]` `session/prompt` results gain `_meta.ferngeist.durationMs`: how
+  long the turn ran, in milliseconds, from the prompt reaching the gateway to
+  the agent's reply, measured on the gateway's monotonic clock. A client whose
+  connection stalled (a dozing phone) hears the reply late, so it should time
+  the turn with this instead of its own clock. Any `_meta` the agent sent is
+  kept. Only on the result sent to the connection that issued the prompt;
+  error replies and `_ferngeist/turn_ended` do not carry it. (2026-10-13, [7babdb6](https://github.com/arafatamim/ferngeist-acp-gateway/commit/7babdb6))
+- `[semantic]` Managed-worktree git endpoints (`GET /v1/runtimes/{id}/git/status`
+  and `/git/diff`) — the base they compare against is now `git merge-base` of
+  the branch the worktree was cut from and the worktree's `HEAD`, instead of
+  the fixed `baseCommit` recorded at creation. After the worktree's branch is
+  rebased onto a newer base, the diff shows only the agent's changes rather
+  than the upstream commits the rebase picked up. Worktrees created before
+  this change, and ones whose base branch was deleted, keep comparing against
+  `baseCommit`. (2026-10-13, [2223d1a](https://github.com/arafatamim/ferngeist-acp-gateway/commit/2223d1a))
 
-- `[additive]` `POST /v1/agents/custom`, `PUT /v1/agents/custom/{id}`,
-  `DELETE /v1/agents/custom/{id}` — paired clients holding `control` scope can
-  register, edit and remove their own ACP agents (display name + command +
-  args). The `id` is derived server-side as `custom-<slug>` and is immutable;
-  `command` is a bare `PATH` name or an absolute path. Starting a custom agent
-  whose command is not resolvable on the host returns `409`
-  (`agent is not detected on this host`), and `DELETE` returns `409` while the
-  agent has a live runtime. Existing endpoints and response shapes are
-  unchanged. (2026-09-16)
-- `[additive]` `GET /v1/agents` — each per-agent object gains a `source` field
-  (`embedded` | `registry` | `custom`), and client-registered custom agents
-  appear in the list alongside catalog agents. Older clients ignore the field
-  and see the same catalog they saw before. (2026-09-16)
-- `[additive]` `GET /v1/agents` — the per-agent `registry` block gains an
-  `icon` field carrying the agent's logo URL as published by the ACP registry.
-  Omitted when the entry has none. Present only for `source: "registry"`;
-  embedded and custom agents have no icon and should fall back to a neutral
-  glyph. The URL is forwarded verbatim (always SVG), not re-derived, so older
-  clients keep working unchanged. (2026-09-29)
+- `v1.0.0` — connecting starts the agent, and the gateway protocol moves
+  `v1` → `v2`:
+- `[breaking]` **Connecting starts the agent; `protocolVersion` → `v2`.**
+  `POST /v1/agents/{agentId}/start` and `POST /v1/runtimes/{runtimeId}/connect`
+  are **removed**. Starting an agent and creating its gateway session are now one
+  call: `POST /v1/agents/{agentId}/connect` launches a fresh agent process and
+  returns the connect descriptor (`runtimeId`, `protocol`, `scheme`, `host`,
+  `websocketUrl`, `websocketPath`, `sessionId`, `attachToken`) — the same shape
+  the old connect response returned. Every call launches a new process, so the
+  `{"new": true}` body (which only distinguished reuse from a fresh launch) is
+  gone. Session and runtime are now 1:1: the session owns its agent process, and
+  auto-restart, the stdio pipe lease and the per-runtime exit callback are
+  removed. Reconnect is unchanged: `POST /v1/sessions/{id}/resume` then
+  `GET /v1/acp/{runtimeId}?sessionId=&attachToken=`. (2026-10-11, [b87da6a](https://github.com/arafatamim/ferngeist-acp-gateway/commit/b87da6a))
+- `[semantic]` `POST /v1/agents/{agentId}/stop` — still stops every runtime for
+  the agent, now by closing each gateway session that owns one. Behaves the same
+  from a client's point of view; returns `503` when the session service is
+  unavailable. (2026-10-11, [b87da6a](https://github.com/arafatamim/ferngeist-acp-gateway/commit/b87da6a))
+- `[semantic]` `POST /v1/runtimes/{runtimeId}/restart` — launches a fresh agent
+  and session first and only then closes the session owning the runtime, so a
+  failed launch leaves the old session running. Its response now carries
+  `sessionId` and `attachToken` (additive fields) alongside the new `runtimeId`.
+  Only the device that owns the runtime's session may restart it; another
+  device gets `403`. The `env` override body and its
+  `gateway.runtime.restart_env` scope are unchanged. (2026-10-11, [b87da6a](https://github.com/arafatamim/ferngeist-acp-gateway/commit/b87da6a))
+- `[additive]` `POST /v1/agents/{agentId}/connect` and
+  `POST /v1/runtimes/{runtimeId}/restart` return `502` with the agent's exit
+  error when the agent exits during startup, instead of a generic `500`.
+  (2026-10-11, [85b27ab](https://github.com/arafatamim/ferngeist-acp-gateway/commit/85b27ab))
+- `[semantic]` Agent objects from `GET /v1/agents` no longer carry
+  `launch.restart`: the gateway never restarts an agent, so the policy had no
+  effect. (2026-10-11, [85b27ab](https://github.com/arafatamim/ferngeist-acp-gateway/commit/85b27ab))
+- `[semantic]` `GET /v1/status` `runtimeCounts` and the diagnostics runtime
+  summary — the `stopping` and `circuitOpen` counters are removed (stopping is
+  no longer a distinct runtime state, and the restart circuit breaker is gone).
+  `GET /v1/runtimes` runtime objects likewise drop `restartAttempts`,
+  `failureStreak` and `circuitOpen`. (2026-10-11, [b87da6a](https://github.com/arafatamim/ferngeist-acp-gateway/commit/b87da6a))
+- `[semantic]` Not client-visible: the database drops the unused
+  `gateway_sessions.leaseholder` column on first start. Gateway `v0.13.0` and
+  earlier cannot use the migrated database, so downgrading the gateway is not
+  supported. (2026-10-11, [85b27ab](https://github.com/arafatamim/ferngeist-acp-gateway/commit/85b27ab))
+- `v0.13.0` — gateway-managed worktrees and session-scoped workspace
+  endpoints. Protocol version remains `v1`.
+- `[additive]` `POST /v1/worktrees`, `GET /v1/worktrees`,
+  `DELETE /v1/worktrees/{worktreeId}` — paired clients holding `control` scope
+  can create a git worktree (a new branch checked out at
+  `<repo>/.worktrees/<branch>` for parallel agents), list managed worktrees
+  with `ahead`/`dirty` state, and remove them. (2026-10-11, [3631ac6](https://github.com/arafatamim/ferngeist-acp-gateway/commit/3631ac6))
+- `[additive]` Workspace endpoints (`/files`, `/git/status`, `/git/diff`)
+  accept an `acpSessionId` query parameter to read one chat's project
+  directory when the agent hosts several; without it they use the most
+  recently opened session's directory. An unknown id returns `404`.
+  (2026-10-11, [22c2073](https://github.com/arafatamim/ferngeist-acp-gateway/commit/22c2073))
+- `v0.12.0` — push notifications move from FCM HTTP v1
+  to Web Push, encrypted end to end and signed with a VAPID key the gateway
+  generates on first boot (`GET /v1/devices/push-config` hands the public key
+  out); `FERNGEIST_GATEWAY_FCM_CREDENTIALS_FILE` is gone. ACP
+  `elicitation/create` (unstable) is forwarded to clients and pushed as
+  `permission_request`, and a session whose agent awaits an unanswered request
+  survives up to 24 h. Session and stream reliability: no dropped frames on a
+  `session/load` burst, replays that carry the user's own turns, no false crash
+  pushes or duplicate notifications, and clean cross-platform install, update,
+  and package-upgrade behavior. Protocol version remains `v1`: every change is
+  additive or preserves existing client behavior.
+- `[additive]` ACP `elicitation/create` (unstable) — forwarded to the client
+  like any agent request and pushed as `permission_request` ("Input
+  Required"). A request-scoped elicitation's `params.requestId` is rewritten to
+  the id the client used, since the agent only sees the gateway's translated
+  id; unanswered session-scoped ones are re-sent after `session/load`. A
+  disconnected session whose agent awaits an unanswered request now survives
+  up to 24 h instead of `MaxDisconnected`. (2026-10-07, [7bdc7f5](https://github.com/arafatamim/ferngeist-acp-gateway/commit/7bdc7f5))
+- `[additive]` Web Push delivery — `GET /v1/devices/push-config` returns the
+  gateway's `vapidPublicKey`, and `POST /v1/devices/push-token` accepts
+  `{"platform":"webpush","subscription":{endpoint, keys:{p256dh, auth}}}`.
+  Pushes are now Web Push messages, encrypted end to end, whose decrypted body
+  is a JSON object with the former FCM `data` keys; the client posts the
+  notification itself. FCM HTTP v1 delivery, its `notification` block and
+  `FERNGEIST_GATEWAY_FCM_CREDENTIALS_FILE` are removed: a legacy
+  `platform: "android"` token is still accepted but no longer delivered to. No
+  `protocolVersion` bump — push is best-effort, and a client that has not
+  moved to Web Push keeps working without pushes. `progress` pushes now fire
+  only while a prompt runs, a cancelled turn no longer pushes `turn_complete`,
+  and an empty-success turn pushes one `agent_error` instead of two.
+  (2026-10-07, [7b01417](https://github.com/arafatamim/ferngeist-acp-gateway/commit/7b01417))
+- `[semantic]` The update-available push uses a new `category`,
+  `gateway_update`, instead of `progress`, so it is no longer collapsed or
+  expired like live progress. No `protocolVersion` bump: an unknown category
+  falls back to the client's default channel. (2026-10-07, [071a23a](https://github.com/arafatamim/ferngeist-acp-gateway/commit/071a23a))
+- `v0.11.3` — reconnect and long-transcript stability:
+  a reattached client's `session/load` replay now carries the user's own turns,
+  a prompt issued on an earlier connection ends with the new
+  `_ferngeist/turn_ended` notification rather than an unmatchable reply, and a
+  client whose outbound backlog overflows (128 MiB) is disconnected instead of
+  being sent a stream with holes in it. A long replay is also no longer killed
+  by the WebSocket keepalive. Protocol version remains `v1`: every change is
+  additive or preserves existing client behavior.
 - `[additive]` `_ferngeist/turn_ended` — a new gateway→client notification on
   the ACP WebSocket, sent when a `session/prompt` issued on an **earlier**
   connection finishes while a new connection is attached:
@@ -118,7 +178,7 @@ not be coupled. Full release notes live in GitHub Releases.
   it used to receive carried the old connection's id, which it could not match
   to a request anyway — while a client that handles the notification can clear
   that turn's streaming state. Underscore-prefixed per ACP's extension rule.
-  (2026-10-05)
+  (2026-10-05, [35031e1](https://github.com/arafatamim/ferngeist-acp-gateway/commit/35031e1))
 - `[additive]` `session/load` replay on reconnect — the replay now carries
   `user_message_chunk` updates for the user's prompts, not only the agent's
   replies, so a reattached client no longer folds every reply since the gateway
@@ -126,7 +186,7 @@ not be coupled. Full release notes live in GitHub Releases.
   per-session buffer is bounded (8 MiB) and trims from the oldest end to a turn
   boundary, so a replay never opens partway through a reply. Clients that
   render `user_message_chunk` see the missing user turns restored; clients that
-  ignore it are unaffected. (2026-10-05)
+  ignore it are unaffected. (2026-10-05, [35031e1](https://github.com/arafatamim/ferngeist-acp-gateway/commit/35031e1))
 - Backlog overflow disconnects instead of corrupting the stream — the per-client
   outbound queue was a 64-frame channel that silently discarded the overflow,
   so a `session/load` burst (one frame per streamed chunk — thousands of frames
@@ -140,119 +200,75 @@ not be coupled. Full release notes live in GitHub Releases.
   still completing. No `protocolVersion` bump and no client change required —
   the JSON shapes are unchanged, and a client that reconnects and re-issues
   `session/load`, the disconnect-tolerant path it already implements, recovers.
-  (2026-10-05)
-- `[additive]` ACP `elicitation/create` (unstable) — forwarded to the client
-  like any agent request and pushed as `permission_request` ("Input
-  Required"). A request-scoped elicitation's `params.requestId` is rewritten to
-  the id the client used, since the agent only sees the gateway's translated
-  id; unanswered session-scoped ones are re-sent after `session/load`. A
-  disconnected session whose agent awaits an unanswered request now survives
-  up to 24 h instead of `MaxDisconnected`. (2026-10-07)
-- `[additive]` Web Push delivery — `GET /v1/devices/push-config` returns the
-  gateway's `vapidPublicKey`, and `POST /v1/devices/push-token` accepts
-  `{"platform":"webpush","subscription":{endpoint, keys:{p256dh, auth}}}`.
-  Pushes are now Web Push messages, encrypted end to end, whose decrypted body
-  is a JSON object with the former FCM `data` keys; the client posts the
-  notification itself. FCM HTTP v1 delivery, its `notification` block and
-  `FERNGEIST_GATEWAY_FCM_CREDENTIALS_FILE` are removed: a legacy
-  `platform: "android"` token is still accepted but no longer delivered to. No
-  `protocolVersion` bump — push is best-effort, and a client that has not
-  moved to Web Push keeps working without pushes. `progress` pushes now fire
-  only while a prompt runs, a cancelled turn no longer pushes `turn_complete`,
-  and an empty-success turn pushes one `agent_error` instead of two.
-  (2026-10-07)
-- `[semantic]` The update-available push uses a new `category`,
-  `gateway_update`, instead of `progress`, so it is no longer collapsed or
-  expired like live progress. No `protocolVersion` bump: an unknown category
-  falls back to the client's default channel. (2026-10-07)
-- `[breaking]` **Connecting starts the agent; `protocolVersion` → `v2`.**
-  `POST /v1/agents/{agentId}/start` and `POST /v1/runtimes/{runtimeId}/connect`
-  are **removed**. Starting an agent and creating its gateway session are now one
-  call: `POST /v1/agents/{agentId}/connect` launches a fresh agent process and
-  returns the connect descriptor (`runtimeId`, `protocol`, `scheme`, `host`,
-  `websocketUrl`, `websocketPath`, `sessionId`, `attachToken`) — the same shape
-  the old connect response returned. Every call launches a new process, so the
-  `{"new": true}` body (which only distinguished reuse from a fresh launch) is
-  gone. Session and runtime are now 1:1: the session owns its agent process, and
-  auto-restart, the stdio pipe lease and the per-runtime exit callback are
-  removed. Reconnect is unchanged: `POST /v1/sessions/{id}/resume` then
-  `GET /v1/acp/{runtimeId}?sessionId=&attachToken=`. (2026-10-11)
-- `[semantic]` `POST /v1/agents/{agentId}/stop` — still stops every runtime for
-  the agent, now by closing each gateway session that owns one. Behaves the same
-  from a client's point of view; returns `503` when the session service is
-  unavailable. (2026-10-11)
-- `[semantic]` `POST /v1/runtimes/{runtimeId}/restart` — launches a fresh agent
-  and session first and only then closes the session owning the runtime, so a
-  failed launch leaves the old session running. Its response now carries
-  `sessionId` and `attachToken` (additive fields) alongside the new `runtimeId`.
-  Only the device that owns the runtime's session may restart it; another
-  device gets `403`. The `env` override body and its
-  `gateway.runtime.restart_env` scope are unchanged. (2026-10-11)
-- `[additive]` `POST /v1/agents/{agentId}/connect` and
-  `POST /v1/runtimes/{runtimeId}/restart` return `502` with the agent's exit
-  error when the agent exits during startup, instead of a generic `500`.
-  (2026-10-11)
-- `[semantic]` Agent objects from `GET /v1/agents` no longer carry
-  `launch.restart`: the gateway never restarts an agent, so the policy had no
-  effect. (2026-10-11)
-- `[semantic]` `GET /v1/status` `runtimeCounts` and the diagnostics runtime
-  summary — the `stopping` and `circuitOpen` counters are removed (stopping is
-  no longer a distinct runtime state, and the restart circuit breaker is gone).
-  `GET /v1/runtimes` runtime objects likewise drop `restartAttempts`,
-  `failureStreak` and `circuitOpen`. (2026-10-11)
-- `[semantic]` Not client-visible: the database drops the unused
-  `gateway_sessions.leaseholder` column on first start. Gateway `v0.13.0` and
-  earlier cannot use the migrated database, so downgrading the gateway is not
-  supported. (2026-10-11)
-- `[additive]` `session/prompt` results gain `_meta.ferngeist.durationMs`: how
-  long the turn ran, in milliseconds, from the prompt reaching the gateway to
-  the agent's reply, measured on the gateway's monotonic clock. A client whose
-  connection stalled (a dozing phone) hears the reply late, so it should time
-  the turn with this instead of its own clock. Any `_meta` the agent sent is
-  kept. Only on the result sent to the connection that issued the prompt;
-  error replies and `_ferngeist/turn_ended` do not carry it. (2026-10-13)
-- `[semantic]` Managed-worktree git endpoints (`GET /v1/runtimes/{id}/git/status`
-  and `/git/diff`) — the base they compare against is now `git merge-base` of
-  the branch the worktree was cut from and the worktree's `HEAD`, instead of
-  the fixed `baseCommit` recorded at creation. After the worktree's branch is
-  rebased onto a newer base, the diff shows only the agent's changes rather
-  than the upstream commits the rebase picked up. Worktrees created before
-  this change, and ones whose base branch was deleted, keep comparing against
-  `baseCommit`. (2026-10-13)
-
-## History
-
-- `v0.12.0` (latest tagged release) — push notifications move from FCM HTTP v1
-  to Web Push, encrypted end to end and signed with a VAPID key the gateway
-  generates on first boot (`GET /v1/devices/push-config` hands the public key
-  out); `FERNGEIST_GATEWAY_FCM_CREDENTIALS_FILE` is gone. ACP
-  `elicitation/create` (unstable) is forwarded to clients and pushed as
-  `permission_request`, and a session whose agent awaits an unanswered request
-  survives up to 24 h. Session and stream reliability: no dropped frames on a
-  `session/load` burst, replays that carry the user's own turns, no false crash
-  pushes or duplicate notifications, and clean cross-platform install, update,
-  and package-upgrade behavior. Protocol version remains `v1`: every change is
-  additive or preserves existing client behavior.
-- `v0.11.3` — reconnect and long-transcript stability:
-  a reattached client's `session/load` replay now carries the user's own turns,
-  a prompt issued on an earlier connection ends with the new
-  `_ferngeist/turn_ended` notification rather than an unmatchable reply, and a
-  client whose outbound backlog overflows (128 MiB) is disconnected instead of
-  being sent a stream with holes in it. A long replay is also no longer killed
-  by the WebSocket keepalive. Protocol version remains `v1`: every change is
-  additive or preserves existing client behavior.
+  (2026-10-05, [b7737f7](https://github.com/arafatamim/ferngeist-acp-gateway/commit/b7737f7))
 - `v0.11.2` — the per-agent `registry` block on
   `GET /v1/agents` forwards the ACP registry's `icon` URL, so clients can render
   each registry agent's real logo. The field is omitted when the registry entry
   has none; embedded and custom agents are unchanged. Protocol version remains
   `v1`.
+- `[additive]` `GET /v1/agents` — the per-agent `registry` block gains an
+  `icon` field carrying the agent's logo URL as published by the ACP registry.
+  Omitted when the entry has none. Present only for `source: "registry"`;
+  embedded and custom agents have no icon and should fall back to a neutral
+  glyph. The URL is forwarded verbatim (always SVG), not re-derived, so older
+  clients keep working unchanged. (2026-09-29, [3d6bdd0](https://github.com/arafatamim/ferngeist-acp-gateway/commit/3d6bdd0))
+- `v0.11.0` — paired clients can register their own ACP agents. Protocol
+  version remains `v1`.
+- `[additive]` `POST /v1/agents/custom`, `PUT /v1/agents/custom/{id}`,
+  `DELETE /v1/agents/custom/{id}` — paired clients holding `control` scope can
+  register, edit and remove their own ACP agents (display name + command +
+  args). The `id` is derived server-side as `custom-<slug>` and is immutable;
+  `command` is a bare `PATH` name or an absolute path. Starting a custom agent
+  whose command is not resolvable on the host returns `409`
+  (`agent is not detected on this host`), and `DELETE` returns `409` while the
+  agent has a live runtime. Existing endpoints and response shapes are
+  unchanged. (2026-09-16, [f365d95](https://github.com/arafatamim/ferngeist-acp-gateway/commit/f365d95))
+- `[additive]` `GET /v1/agents` — each per-agent object gains a `source` field
+  (`embedded` | `registry` | `custom`), and client-registered custom agents
+  appear in the list alongside catalog agents. Older clients ignore the field
+  and see the same catalog they saw before. (2026-09-16, [f365d95](https://github.com/arafatamim/ferngeist-acp-gateway/commit/f365d95))
 - `v0.10.0` — multiple concurrent gateway sessions per
   agent (one agent process each, one resilient session each), with the legacy
   single-runtime fields on `GET /v1/agents` kept as a newest-runtime shorthand.
   Protocol version remains `v1`.
+- `[additive]` `GET /v1/agents` — each per-agent object gains a `runtimes`
+  array listing every runtime tracked for the agent (newest first). The legacy
+  `running`/`runtimeId`/`runtimeStatus` fields keep their shape and reflect the
+  **newest** runtime; clients that never create multiple runtimes see identical
+  values as before. (2026-08-21, [f60232d](https://github.com/arafatamim/ferngeist-acp-gateway/commit/f60232d))
+- `[additive]` `POST /v1/agents/{agentId}/stop` — now stops **all** runtimes
+  tracked for the agent and revokes each runtime's gateway token (previously:
+  the single tracked runtime). Returns `404` when the agent has no runtimes.
+  For a device holding one runtime per agent the observable behavior is
+  unchanged. Response still carries a single `runtime` object — the agent's
+  **newest** runtime (the same one `GET /v1/agents` highlights). (2026-08-21, [f60232d](https://github.com/arafatamim/ferngeist-acp-gateway/commit/f60232d))
 - `v0.8.0` — self-hosted signed apt/rpm/pacman repos,
   Homebrew/Linuxbrew formula, universal installer for macOS/Linux/Windows, and
-  the Windows PowerShell installer. Protocol version remains `v1`.
+  the Windows PowerShell installer, plus read-only workspace browsing
+  endpoints. The gateway protocol stabilizes at `v1` (promoted from `v1beta1`).
+  Protocol version remains `v1` thereafter until `v1.0.0`.
+- `[semantic]` `POST /v1/auth/refresh` — an **expired** bearer token is now
+  accepted within the configured grace window
+  (`FERNGEIST_GATEWAY_CREDENTIAL_GRACE_SECONDS`, default 90 days) as long as a
+  valid proof-of-possession is attached; previously any expired token was
+  rejected with 401. A credential past the grace window returns a distinct
+  error (`gateway credential expired beyond grace period`) and must re-pair.
+  Response shape is unchanged. (2026-08-07, [2faec63](https://github.com/arafatamim/ferngeist-acp-gateway/commit/2faec63))
+- `[additive]` — workspace browsing endpoints:
+  `GET /v1/runtimes/{id}/files`, `GET /v1/runtimes/{id}/git/status`,
+  `GET /v1/runtimes/{id}/git/diff`. (2026-08-06, [adeae02](https://github.com/arafatamim/ferngeist-acp-gateway/commit/adeae02))
+- `[semantic]` `GET /v1/runtimes/{id}/files` — `size` is now the full on-disk
+  file size (was: the truncated payload length). `truncated: true` still
+  signals the payload is capped at 1 MiB. (2026-08-06, [adeae02](https://github.com/arafatamim/ferngeist-acp-gateway/commit/adeae02))
+- `[semantic]` `GET /v1/runtimes/{id}/git/status` — `added`/`removed` are now
+  the full HEAD → working-tree delta via `git diff HEAD --numstat` (was: the
+  unstaged-only delta), so partially staged files count staged + unstaged edits
+  together, matching what `/git/diff` compares. (2026-08-06, [adeae02](https://github.com/arafatamim/ferngeist-acp-gateway/commit/adeae02))
+- `[breaking]` `GET /v1/runtimes/{id}/git/diff` — the raw unified-patch shape
+  (`{path?, diff}`) was replaced by ACP `ToolCallContentDiff` objects
+  (`path`/`oldText`/`newText`/`type:"diff"`); single object with `?path=`,
+  array otherwise. The client must render from `oldText`/`newText` instead of
+  parsing a patch. (2026-08-06, [adeae02](https://github.com/arafatamim/ferngeist-acp-gateway/commit/adeae02))
 - `v0.7.3` — resilient sessions and push
   notifications. Gateway protocol version was `v1alpha1`; the workspace
   surfaces did not exist yet.
