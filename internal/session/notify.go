@@ -1,6 +1,7 @@
 package session
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/push"
@@ -91,7 +92,7 @@ func (p *StdioPump) notifyFrame(f *frame) {
 		p.endProgress(acpID)
 		// The user cancelled this turn themselves; telling them it ended is noise.
 		if probe.Result.StopReason != acp.StopReasonCancelled {
-			p.onPushNotification(PushEvent{SessionID: p.sessionID, AcpSessionID: acpID, Category: push.CategoryTurnComplete, Title: "Turn Complete", Body: p.AgentName("Your agent") + " has finished processing."})
+			p.onPushNotification(PushEvent{SessionID: p.sessionID, AcpSessionID: acpID, Category: push.CategoryTurnComplete, Title: "Turn Complete", Body: p.turnCompleteBody(f.origin)})
 		}
 	case probe.Method == "session/request_permission":
 		p.onPushNotification(PushEvent{SessionID: p.sessionID, AcpSessionID: acpID, Category: push.CategoryPermissionRequest, Title: "Permission Required", Body: p.AgentName("Your agent") + " needs approval to run a tool."})
@@ -113,6 +114,36 @@ func (p *StdioPump) notifyFrame(f *frame) {
 			p.maybeNotifyProgress(ev)
 		}
 	}
+}
+
+// turnCompleteBody is the "Turn Complete" push text: the turn's length, e.g.
+// "Claude finished in 4m", once it ran at least 10s. Shorter turns keep the
+// plain body — "finished in 3s" is noise. origin carries the prompt's arrival
+// time (zero for anything but a session/prompt reply).
+func (p *StdioPump) turnCompleteBody(origin pendingRequest) string {
+	if !origin.startedAt.IsZero() {
+		if d := time.Since(origin.startedAt); d >= 10*time.Second {
+			return p.AgentName("Your agent") + " finished in " + formatPushDuration(d) + "."
+		}
+	}
+	return p.AgentName("Your agent") + " has finished processing."
+}
+
+// formatPushDuration renders d the way the app's chat footer does: 12s, 4m,
+// 1h 5m.
+func formatPushDuration(d time.Duration) string {
+	s := int64(d.Seconds())
+	if s < 60 {
+		return fmt.Sprintf("%ds", s)
+	}
+	m := s / 60
+	if m < 60 {
+		return fmt.Sprintf("%dm", m)
+	}
+	if r := m % 60; r > 0 {
+		return fmt.Sprintf("%dh %dm", m/60, r)
+	}
+	return fmt.Sprintf("%dh", m/60)
 }
 
 // notifySwallowedFailure pushes the one notification for a turn the agent
