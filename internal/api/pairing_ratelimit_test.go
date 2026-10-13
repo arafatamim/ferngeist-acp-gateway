@@ -10,11 +10,11 @@ import (
 
 func testRateLimiterConfig() config.Config {
 	return config.Config{
-		PairingBurstPerIP:      2,
-		PairingBurstGlobal:     10000,
-		PairingStartRefill:     time.Second,
-		PairingCompleteRefill:  time.Second,
-		ListenAddr:             "127.0.0.1:0",
+		PairingBurstPerIP:     2,
+		PairingBurstGlobal:    10000,
+		PairingStartRefill:    time.Second,
+		PairingCompleteRefill: time.Second,
+		ListenAddr:            "127.0.0.1:0",
 	}
 }
 

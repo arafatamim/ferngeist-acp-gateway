@@ -305,12 +305,12 @@ func TestSessionStore_SaveAndGetSession(t *testing.T) {
 
 	now := time.Now().UTC()
 	rec := SessionRecord{
-		SessionID:   "sess_abc123",
-		RuntimeID:   "rt_xyz789",
-		DeviceID:    "dev_001",
-		AgentID:     "agent_mock",
-		Status:      "active",
-		CreatedAt:   now,
+		SessionID: "sess_abc123",
+		RuntimeID: "rt_xyz789",
+		DeviceID:  "dev_001",
+		AgentID:   "agent_mock",
+		Status:    "active",
+		CreatedAt: now,
 	}
 
 	if err := store.SaveSession(ctx, rec); err != nil {
@@ -338,12 +338,12 @@ func TestSessionStore_UpdateSessionStatus(t *testing.T) {
 
 	now := time.Now().UTC()
 	rec := SessionRecord{
-		SessionID:   "sess_abc123",
-		RuntimeID:   "rt_xyz789",
-		DeviceID:    "dev_001",
-		AgentID:     "agent_mock",
-		Status:      "active",
-		CreatedAt:   now,
+		SessionID: "sess_abc123",
+		RuntimeID: "rt_xyz789",
+		DeviceID:  "dev_001",
+		AgentID:   "agent_mock",
+		Status:    "active",
+		CreatedAt: now,
 	}
 
 	if err := store.SaveSession(ctx, rec); err != nil {
@@ -378,12 +378,12 @@ func TestSessionStore_ListSessionsByDevice(t *testing.T) {
 
 	now := time.Now().UTC()
 	rec := SessionRecord{
-		SessionID:   "sess_abc123",
-		RuntimeID:   "rt_xyz789",
-		DeviceID:    "dev_001",
-		AgentID:     "agent_mock",
-		Status:      "active",
-		CreatedAt:   now,
+		SessionID: "sess_abc123",
+		RuntimeID: "rt_xyz789",
+		DeviceID:  "dev_001",
+		AgentID:   "agent_mock",
+		Status:    "active",
+		CreatedAt: now,
 	}
 
 	if err := store.SaveSession(ctx, rec); err != nil {
@@ -411,12 +411,12 @@ func TestSessionStore_InboundFrameRoundtrip(t *testing.T) {
 
 	now := time.Now().UTC()
 	rec := SessionRecord{
-		SessionID:   "sess_abc123",
-		RuntimeID:   "rt_xyz789",
-		DeviceID:    "dev_001",
-		AgentID:     "agent_mock",
-		Status:      "active",
-		CreatedAt:   now,
+		SessionID: "sess_abc123",
+		RuntimeID: "rt_xyz789",
+		DeviceID:  "dev_001",
+		AgentID:   "agent_mock",
+		Status:    "active",
+		CreatedAt: now,
 	}
 
 	if err := store.SaveSession(ctx, rec); err != nil {
@@ -449,12 +449,12 @@ func TestSessionStore_CascadeDeleteRemovesDiagnostics(t *testing.T) {
 
 	now := time.Now().UTC()
 	rec := SessionRecord{
-		SessionID:   "sess_abc123",
-		RuntimeID:   "rt_xyz789",
-		DeviceID:    "dev_001",
-		AgentID:     "agent_mock",
-		Status:      "active",
-		CreatedAt:   now,
+		SessionID: "sess_abc123",
+		RuntimeID: "rt_xyz789",
+		DeviceID:  "dev_001",
+		AgentID:   "agent_mock",
+		Status:    "active",
+		CreatedAt: now,
 	}
 
 	if err := store.SaveSession(ctx, rec); err != nil {
@@ -495,12 +495,12 @@ func TestAppendInboundDiagnostic(t *testing.T) {
 
 	now := time.Now().UTC()
 	rec := SessionRecord{
-		SessionID:   "sess_inbound",
-		RuntimeID:   "rt_inbound",
-		DeviceID:    "dev_inbound",
-		AgentID:     "agent_inbound",
-		Status:      "active",
-		CreatedAt:   now,
+		SessionID: "sess_inbound",
+		RuntimeID: "rt_inbound",
+		DeviceID:  "dev_inbound",
+		AgentID:   "agent_inbound",
+		Status:    "active",
+		CreatedAt: now,
 	}
 	if err := store.SaveSession(ctx, rec); err != nil {
 		t.Fatalf("SaveSession: %v", err)
