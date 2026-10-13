@@ -55,7 +55,7 @@ not be coupled. Full release notes live in GitHub Releases.
 - `[additive]` `_ferngeist/resumed` gains an optional `"truncated": true`
   param: the per-session replay buffer (8 MiB) evicted its oldest frames, so a
   gateway-restored session starts mid-conversation with earlier history
-  missing. Omitted when the history is intact. (2026-10-13)
+  missing. Omitted when the history is intact. (2026-10-13, [9a84927](https://github.com/arafatamim/ferngeist-acp-gateway/commit/9a84927))
 - `[additive]` `_ferngeist/turn_result` — a new gateway→client notification on
   the ACP WebSocket, sent when a `session/prompt` finished while no client was
   attached: `{"jsonrpc":"2.0","method":"_ferngeist/turn_result","params":{"sessionId":…,"stopReason":…,"usage":…,"durationMs":…}}`.
@@ -67,7 +67,7 @@ not be coupled. Full release notes live in GitHub Releases.
   meter stale and the turn untimed. Clients that ignore unknown methods are
   unaffected. `session/resume` now restores like `session/load`: it records
   its session for redelivery, so unanswered agent requests are re-sent after a
-  resume too. (2026-10-13)
+  resume too. (2026-10-13, [85a96b7](https://github.com/arafatamim/ferngeist-acp-gateway/commit/85a96b7))
 - `[additive]` `session/prompt` results gain `_meta.ferngeist.durationMs`: how
   long the turn ran, in milliseconds, from the prompt reaching the gateway to
   the agent's reply, measured on the gateway's monotonic clock. A client whose
