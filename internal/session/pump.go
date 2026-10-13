@@ -134,6 +134,13 @@ type StdioPump struct {
 	// across a disconnect. See LoadRecovery. Nil when disabled.
 	loadRecovery *LoadRecovery
 
+	// turnResults keeps a prompt's outcome when it finishes while no client
+	// is attached (its reply is then dropped): stop reason, usage and
+	// duration per ACP session, flushed ahead of the next session/load or
+	// session/resume reply. Guarded by turnMu; latest wins.
+	turnMu      sync.Mutex
+	turnResults map[string]turnResult
+
 	clientMu sync.Mutex
 	client   *websocket.Conn // current connected WebSocket, or nil
 	connGen  int64           // bumped on every Attach; fences stale Bind/Detach from evicted conns

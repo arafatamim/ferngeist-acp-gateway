@@ -166,12 +166,38 @@ func (p *StdioPump) forward(f *frame) {
 	// Under clientMu: a reply routed for one generation must not reach the next.
 	out := p.reqIDs.reply(p.connGen, f.probe, f.out)
 	bound := p.client != nil && p.writerQ != nil
+	// A prompt that finishes while nobody is attached would lose its reply
+	// entirely (reply above already consumed the pending entry), taking the
+	// stop reason, usage and duration with it. Keep the outcome for the next
+	// attach instead; a new prompt for the session clears it. Only the
+	// current generation's prompt qualifies: an older one already ended its
+	// turn on whatever connection asked for it.
+	if !bound && f.isReply && f.origin.method == "session/prompt" && f.origin.gen == p.connGen &&
+		f.probe.Result != nil {
+		p.storeTurnResult(f.origin.promptSession, turnResult{
+			stopReason: string(f.probe.Result.StopReason),
+			usage:      f.probe.Result.Usage,
+			durationMs: time.Since(f.origin.startedAt).Milliseconds(),
+		})
+	}
 	// The agent's unanswered requests are not in load history, so the reply that
 	// restores their session carries them. Only for the connection that asked,
 	// and only once the load succeeded (a recovered "already loaded" counts).
-	if f.isReply && f.origin.method == "session/load" && f.origin.gen == p.connGen &&
-		bound && (f.resumed || f.probe.Error == nil) {
+	// A session/resume restores the same way a session/load does.
+	if f.isReply && (f.origin.method == "session/load" || f.origin.method == "session/resume") &&
+		f.origin.gen == p.connGen && bound && (f.resumed || f.probe.Error == nil) {
+		replyIdx := len(out) - 1
 		out = p.reqIDs.redeliver(p.connGen, f.origin.loadSession, out)
+		// A turn the client missed ends here, before the reply its SDK waits
+		// for: the app stamps the reloaded turn with it instead of leaving
+		// the context meter stale and the turn untimed.
+		if replyIdx >= 0 {
+			if res, ok := p.takeTurnResult(f.origin.loadSession); ok {
+				out = append(out, "")
+				copy(out[replyIdx+1:], out[replyIdx:])
+				out[replyIdx] = turnResultFrame(f.origin.loadSession, res)
+			}
+		}
 	}
 	var deliveredGen int64
 	if bound {
@@ -236,6 +262,11 @@ func (p *StdioPump) prepareOutbound(f *clientFrame) []byte {
 	p.clientMu.Unlock()
 	payload := p.reqIDs.outbound(gen, f)
 	p.acp.observeInbound(f)
+	if f.Method == "session/prompt" {
+		// A new turn supersedes any kept result for the session: the next
+		// attach must hear about this turn, never the stale one.
+		p.clearTurnResult(f.Params.SessionID)
+	}
 	if p.loadRecovery != nil {
 		p.loadRecovery.OnOutbound(f)
 	}

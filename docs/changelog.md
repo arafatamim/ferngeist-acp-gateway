@@ -52,6 +52,18 @@ not be coupled. Full release notes live in GitHub Releases.
 
 ## History
 
+- `[additive]` `_ferngeist/turn_result` — a new gateway→client notification on
+  the ACP WebSocket, sent when a `session/prompt` finished while no client was
+  attached: `{"jsonrpc":"2.0","method":"_ferngeist/turn_result","params":{"sessionId":…,"stopReason":…,"usage":…,"durationMs":…}}`.
+  The detached reply is dropped with nothing left to route, so the pump keeps
+  the turn's outcome per ACP session (latest wins; a new prompt clears it) and
+  replays it ahead of the next connection's `session/load` or `session/resume`
+  reply — before the SDK resolves that call — so the app learns the stop
+  reason, the token usage and the turn length instead of leaving the context
+  meter stale and the turn untimed. Clients that ignore unknown methods are
+  unaffected. `session/resume` now restores like `session/load`: it records
+  its session for redelivery, so unanswered agent requests are re-sent after a
+  resume too. (2026-10-13)
 - `[additive]` `session/prompt` results gain `_meta.ferngeist.durationMs`: how
   long the turn ran, in milliseconds, from the prompt reaching the gateway to
   the agent's reply, measured on the gateway's monotonic clock. A client whose

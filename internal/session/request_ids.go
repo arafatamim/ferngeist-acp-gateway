@@ -93,7 +93,7 @@ func (r *requestIDs) outbound(gen int64, f *clientFrame) []byte {
 	case "session/prompt":
 		origin.promptSession = f.Params.SessionID
 		origin.startedAt = time.Now()
-	case "session/load":
+	case "session/load", "session/resume":
 		origin.loadSession = f.Params.SessionID
 	}
 
