@@ -244,6 +244,11 @@ nfpms:
         dst: /usr/share/doc/ferngeist-gateway/README.md
     scripts:
       postinstall: ./packaging/postinstall.sh
+    # pacman runs post_upgrade (not post_install) on upgrades; without it the
+    # daemon keeps running the old binary copied by the first `daemon install`.
+    archlinux:
+      scripts:
+        postupgrade: ./packaging/postinstall.sh
 
 release:
   github:
