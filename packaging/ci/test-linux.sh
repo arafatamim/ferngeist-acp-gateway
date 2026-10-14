@@ -1,0 +1,51 @@
+#!/bin/sh
+# CI check for the Linux package channels. Runs packaging/install.sh --yes as
+# root inside a bare ubuntu/fedora/archlinux container, so it exercises the
+# repo, its signatures and the package itself. The per-user service is not
+# covered here (no systemd in containers; root skips it); the ubuntu-systemd
+# job in test-install.yml covers that.
+#
+# Usage: test-linux.sh [dir-with-packages-to-upgrade-to]
+# FERNGEIST_REPO_BASE (optional) points install.sh at another repo copy.
+set -eu
+
+SRC="$(cd "$(dirname "$0")/../.." && pwd)"
+UPGRADE_DIR="${1:-}"
+BIN=/usr/bin/ferngeist-gateway
+
+die() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+have() { command -v "$1" >/dev/null 2>&1; }
+version() { "$BIN" --version | awk '$1 == "VERSION" {print $2}'; }
+
+# Bare images lack what install.sh relies on.
+if have apt-get; then
+    apt-get update -qq
+    apt-get install -y -qq curl gnupg ca-certificates >/dev/null
+elif have pacman; then
+    # The archlinux image ships without a local master key, which
+    # `pacman-key --lsign-key` needs.
+    pacman-key --init >/dev/null 2>&1
+fi
+have curl || { have dnf && dnf install -y -q curl; }
+
+sh "$SRC/packaging/install.sh" --yes
+[ -x "$BIN" ] || die "package channel did not install $BIN"
+BEFORE="$(version)"
+[ -n "$BEFORE" ] || die "$BIN --version printed no VERSION"
+echo "installed $BEFORE"
+
+[ -n "$UPGRADE_DIR" ] || exit 0
+
+if have apt-get; then
+    apt-get install -y "$UPGRADE_DIR"/*amd64*.deb
+elif have dnf; then
+    dnf install -y "$UPGRADE_DIR"/*amd64*.rpm
+else
+    pacman -U --noconfirm "$UPGRADE_DIR"/*amd64*.pkg.tar.zst
+    # Without post_upgrade the daemon keeps its old binary copy after -Syu.
+    grep -q 'post_upgrade' /var/lib/pacman/local/ferngeist-gateway-*/install ||
+        die "arch package has no post_upgrade scriptlet"
+fi
+AFTER="$(version)"
+[ "$AFTER" != "$BEFORE" ] || die "upgrade left the version at $BEFORE"
+echo "upgraded $BEFORE -> $AFTER"
