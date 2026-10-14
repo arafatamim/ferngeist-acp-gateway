@@ -19,6 +19,17 @@ on:
 permissions:
   contents: write
 
+# The repo jobs force-push gh-pages, so two overlapping runs would silently
+# drop each other's packages; queue them instead.
+concurrency:
+  group: publish-gateway-release
+  cancel-in-progress: false
+
+env:
+  # Package versions kept per arch in the apt/rpm/pacman repos. GitHub Pages
+  # rejects sites over 1 GB; older versions stay on the Releases page.
+  KEEP_VERSIONS: 3
+
 jobs:
   release:
     runs-on: ubuntu-latest
@@ -236,6 +247,10 @@ jobs:
             mkdir -p "deb/pool/main/f/ferngeist-gateway"
             cp "$deb" "deb/pool/main/f/ferngeist-gateway/"
           done
+          # sort -V: 0.10.0 is newer than 0.9.3 (a plain sort gets it wrong).
+          for arch in amd64 arm64; do
+            ls deb/pool/main/f/ferngeist-gateway/*_"$arch".deb 2>/dev/null | sort -V | head -n -"$KEEP_VERSIONS" | xargs -r rm -f --
+          done
 
       # The universal installer lives at the Pages root so the one-liner
       # curl -fsSL https://arafatamim.github.io/ferngeist-acp-gateway/install.sh | sh
@@ -314,8 +329,9 @@ jobs:
             echo "No changes to apt repo"
             exit 0
           fi
-          git commit -m "apt: publish release packages"
-          git push origin HEAD:gh-pages
+          # Publish as one parentless commit: history would otherwise keep
+          # every pruned package forever and grow the repo without bound.
+          git push --force origin "$(git commit-tree "$(git write-tree)" -m "apt: publish release packages")":refs/heads/gh-pages
 
   # Builds a signed dnf/yum repository on the SAME gh-pages branch (Pages
   # serves it; rpm/ lives next to deb/). Serialized after publish-deb-repo so
@@ -378,7 +394,8 @@ jobs:
             for rpm in ../rpms/*.rpm; do
               echo "signing $rpm"
               # _gpg_name is the portable rpmsign key selector (fingerprint).
-              rpmsign --addsign --define "_gpg_name $SIGNER" "$rpm" >/dev/null 2>&1 || echo "WARN: rpmsign failed for $rpm"
+              # Fail the job: an unsigned rpm is rejected by gpgcheck=1 clients.
+              rpmsign --addsign --define "_gpg_name $SIGNER" "$rpm"
             done
           else
             echo "No key — skipping package signatures."
@@ -392,6 +409,9 @@ jobs:
             esac
             mkdir -p "rpm/$arch"
             cp "$rpm" "rpm/$arch/"
+          done
+          for arch in x86_64 aarch64; do
+            ls "rpm/$arch"/*.rpm 2>/dev/null | sort -V | head -n -"$KEEP_VERSIONS" | xargs -r rm -f --
           done
 
       # Generate repodata/ (createrepo_c) + detached repomd.xml signature.
@@ -428,8 +448,9 @@ jobs:
             echo "No changes to rpm repo"
             exit 0
           fi
-          git commit -m "rpm: publish release packages"
-          git push origin HEAD:gh-pages
+          # Publish as one parentless commit: history would otherwise keep
+          # every pruned package forever and grow the repo without bound.
+          git push --force origin "$(git commit-tree "$(git write-tree)" -m "rpm: publish release packages")":refs/heads/gh-pages
 
   # Builds a signed pacman repository on the SAME gh-pages branch (arch/
   # next to deb/ and rpm/). repo-add ships with pacman, which only exists on
@@ -505,6 +526,13 @@ jobs:
             mkdir -p "arch/$arch"
             cp "$pkg" "arch/$arch/"
           done
+          # The db only ever lists the newest version, so pruned files are
+          # never referenced. Drop each package's .sig with it.
+          for arch in x86_64 aarch64; do
+            ls "arch/$arch"/*.pkg.tar.zst 2>/dev/null | sort -V | head -n -"$KEEP_VERSIONS" | while read -r pkg; do
+              rm -f "$pkg" "$pkg.sig"
+            done
+          done
           if gpg --list-secret-keys 2>/dev/null | grep -q sec; then
             SIGNER="$(gpg --list-secret-keys --with-colons 2>/dev/null | awk -F: '$1=="sec" {print $5; exit}')"
             for arch in x86_64 aarch64; do
@@ -520,11 +548,16 @@ jobs:
                 # GitHub Pages does not reliably follow symlinks, so replace a
                 # symlink with the real file. Same for .files. || true: the
                 # [ -L ] test is false on a fresh repo and must not trip -e.
-                (cd "arch/$arch" && repo-add ferngeist-gateway.db.tar.gz *.pkg.tar.zst)
+                # -p: the glob is lexical (0.10.0 < 0.9.3), so without it an
+                # older package added later would downgrade the db entry.
+                (cd "arch/$arch" && repo-add -p ferngeist-gateway.db.tar.gz *.pkg.tar.zst)
                 { [ -L "arch/$arch/ferngeist-gateway.db" ] && cp "arch/$arch/ferngeist-gateway.db.tar.gz" "arch/$arch/ferngeist-gateway.db"; } || true
                 { [ -L "arch/$arch/ferngeist-gateway.files" ] && cp "arch/$arch/ferngeist-gateway.files.tar.gz" "arch/$arch/ferngeist-gateway.files"; } || true
                 # Sign the db (pacman verifies <repo>.db.tar.gz.sig).
                 gpg --batch --yes --pinentry-mode loopback --passphrase '' -absb -o "arch/$arch/ferngeist-gateway.db.tar.gz.sig" "arch/$arch/ferngeist-gateway.db.tar.gz"
+                # pacman fetches <repo>.db.sig; only a legacy committed symlink
+                # provides it today, so a fresh gh-pages would break SigLevel.
+                ln -sf ferngeist-gateway.db.tar.gz.sig "arch/$arch/ferngeist-gateway.db.sig"
               fi
             done
             # Public key for pacman-key --add (same as deb/rpm).
@@ -544,5 +577,6 @@ jobs:
             echo "No changes to arch repo"
             exit 0
           fi
-          git commit -m "arch: publish release packages"
-          git push origin HEAD:gh-pages
+          # Publish as one parentless commit: history would otherwise keep
+          # every pruned package forever and grow the repo without bound.
+          git push --force origin "$(git commit-tree "$(git write-tree)" -m "arch: publish release packages")":refs/heads/gh-pages
