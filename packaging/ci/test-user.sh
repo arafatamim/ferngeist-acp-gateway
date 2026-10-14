@@ -35,20 +35,22 @@ echo "== re-running the installer keeps it running"
 sh "$INSTALL" --yes
 running "VERSION +$OLD" 'LAN ENABLED +true'
 
-echo "== upgrading the package restarts the daemon on the new version"
-upgrade
-NEW="$(pkgver)"
-[ "$NEW" != "$OLD" ] || { echo "FAIL: upgrade left $GW at $OLD" >&2; exit 1; }
-running "VERSION +$NEW" 'LAN ENABLED +true'
-
 echo "== daemon uninstall stops it; re-running the installer brings it back"
 "$GW" daemon uninstall
 sh "$CI/wait-gone.sh" "$SVC" "daemon uninstall"
 sh "$INSTALL" --yes
-running "VERSION +$NEW" 'LAN ENABLED +true'
+running "VERSION +$OLD" 'LAN ENABLED +true'
 
 echo "== --localhost re-registers localhost only"
 sh "$INSTALL" --yes --localhost
+running "VERSION +$OLD" 'LAN ENABLED +false'
+
+# Last package change before removal: re-running install.sh against the repo
+# would put the repo version back (pacman -S downgrades).
+echo "== upgrading the package restarts the daemon on the new version, keeping settings"
+upgrade
+NEW="$(pkgver)"
+[ "$NEW" != "$OLD" ] || { echo "FAIL: upgrade left $GW at $OLD" >&2; exit 1; }
 running "VERSION +$NEW" 'LAN ENABLED +false'
 
 echo "== removing the package stops the daemon"
