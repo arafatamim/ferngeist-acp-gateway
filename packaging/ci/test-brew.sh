@@ -14,7 +14,7 @@ case "$(uname -s)" in
     *) SVC="$HOME/.local/share/ferngeist-gateway/bin/ferngeist-gateway" ;;
 esac
 export HOMEBREW_NO_AUTO_UPDATE=1
-brewver() { brew list --versions ferngeist-gateway | awk '{print $NF}'; }
+brewver() { "$GW" --version | awk '$1 == "VERSION" {print $2}'; }
 
 echo "== install from the live tap: daemon starts with LAN on"
 sh "$INSTALL" --yes --channel brew
@@ -33,10 +33,8 @@ git -C "$TAP" -c user.name=ci -c user.email=ci@localhost commit -qam "test formu
 brew upgrade ferngeist-gateway
 NEW="$(brewver)"
 [ "$NEW" != "$OLD" ] || { echo "FAIL: brew upgrade left $OLD" >&2; exit 1; }
-if [ "$(uname -s)" = Darwin ]; then
-    # Per the formula caveat: brew's macOS sandbox blocks post_install.
-    "$GW" daemon install --keep-settings --lan
-fi
+# Per the formula caveat: brew sandboxes post_install, so this is manual.
+"$GW" daemon install --keep-settings --lan
 sh "$CI/wait-daemon.sh" "$SVC" "VERSION +$NEW" 'LAN ENABLED +true'
 
 echo "== documented uninstall: daemon uninstall, then brew uninstall"

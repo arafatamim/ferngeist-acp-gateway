@@ -23,7 +23,13 @@ EOF
 docker run -d --name sd --privileged --cgroupns=host \
     -v /sys/fs/cgroup:/sys/fs/cgroup:rw --tmpfs /run --tmpfs /tmp \
     -v "$PWD:/src:ro" "sd-$DISTRO"
-docker exec sd sh -c 'systemctl is-system-running --wait || true'
+for _ in $(seq 60); do
+    case "$(docker exec sd systemctl is-system-running 2>/dev/null)" in
+        running|degraded) break ;;
+    esac
+    sleep 1
+done
+docker exec sd systemctl is-system-running || { docker logs sd; docker exec sd systemctl --failed || true; }
 docker exec sd loginctl enable-linger tester
 UID_T="$(docker exec sd id -u tester)"
 for _ in $(seq 30); do
