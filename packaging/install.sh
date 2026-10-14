@@ -26,8 +26,7 @@ set -eu
 # FERNGEIST_REPO_BASE lets CI point the package channels at a local copy of
 # the gh-pages repos before they are published.
 REPO_BASE="${FERNGEIST_REPO_BASE:-https://arafatamim.github.io/ferngeist-acp-gateway}"
-# Overridable so CI can tap the formula from the checkout under test.
-GIT_REPO="${FERNGEIST_GIT_REPO:-https://github.com/arafatamim/ferngeist-acp-gateway}"
+GIT_REPO="https://github.com/arafatamim/ferngeist-acp-gateway"
 RELEASE_BASE="$GIT_REPO/releases"
 # GitHub API is used only to resolve the latest release tag + asset names;
 # the actual downloads are direct release assets (no auth needed).
@@ -259,14 +258,10 @@ install_via_brew() {
     if ! confirm "Tap the Ferngeist Gateway formula and install via brew? (no sudo needed)"; then
         DECLINED=1; return 0
     fi
-    # The two-arg form is required: brew tap <user>/<repo> would clone
-    # homebrew-ferngeist-acp-gateway (nonexistent); the explicit URL taps
-    # this repo, whose default branch (main) holds Formula/ferngeist-gateway.rb.
-    step "Tapping arafatamim/ferngeist-acp-gateway"
-    brew tap arafatamim/ferngeist-acp-gateway "$GIT_REPO"
-    step "Installing ferngeist-gateway (daemon install runs automatically)"
-    # Fully qualified: newer brew refuses a bare name from an untrusted tap.
-    brew install arafatamim/ferngeist-acp-gateway/ferngeist-gateway
+    # The qualified name taps arafatamim/homebrew-tap on the way; newer brew
+    # also refuses a bare name from an untrusted tap.
+    step "Installing ferngeist-gateway from the arafatamim/tap tap"
+    brew install arafatamim/tap/ferngeist-gateway
     # macOS sandboxes the formula's post_install, so register the daemon here.
     if [ "$OS" = Darwin ]; then
         step "Installing + starting the daemon"

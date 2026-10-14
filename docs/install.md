@@ -82,11 +82,10 @@ Install via the one-command installer (tries brew):
 curl -fsSL https://arafatamim.github.io/ferngeist-acp-gateway/install.sh | sh
 ```
 
-Or tap + install manually:
+Or install manually:
 
 ```bash
-brew tap arafatamim/ferngeist-acp-gateway https://github.com/arafatamim/ferngeist-acp-gateway
-brew install arafatamim/ferngeist-acp-gateway/ferngeist-gateway
+brew install arafatamim/tap/ferngeist-gateway
 ```
 
 On Linux (Linuxbrew) the formula registers the daemon as a systemd user unit

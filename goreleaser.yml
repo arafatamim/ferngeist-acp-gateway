@@ -167,10 +167,9 @@ changelog:
 # Homebrew formula (macOS + Linuxbrew). Deliberately uses the deprecated
 # `brews` pipe: `homebrew_casks` generates casks, which are macOS-centric and
 # only partially supported on Linuxbrew; a formula is the correct artifact
-# for a CLI binary on both. The formula lives on the default branch (main) —
-# brew tap can only resolve the default branch of a repo, and the two-arg
-# `brew tap arafatamim/ferngeist-acp-gateway <url>` form is required because
-# a one-arg tap maps to the nonexistent homebrew-ferngeist-acp-gateway.
+# for a CLI binary on both. The formula lives in its own tap repo
+# (arafatamim/homebrew-tap): brew tap clones every branch, and this repo's
+# gh-pages holds the apt/rpm/pacman packages (~1 GB).
 brews:
   - name: ferngeist-gateway
     homepage: 'https://github.com/arafatamim/ferngeist-acp-gateway'
@@ -178,19 +177,17 @@ brews:
     license: MIT
     repository:
       owner: arafatamim
-      name: ferngeist-acp-gateway
-      # main is the default branch — the only branch brew tap can resolve.
-      # The formula push itself is done by the release workflow (signed
-      # git push to main, since the repo ruleset requires verified
-      # signatures and goreleaser's REST/git-upload paths can't do that
-      # without an SSH key). goreleaser only generates the formula here.
+      name: homebrew-tap
       branch: main
+      # Pushed over SSH with a write deploy key on the tap repo; GITHUB_TOKEN
+      # cannot write to another repository.
+      git:
+        url: 'git@github.com:arafatamim/homebrew-tap.git'
+        private_key: '{{ .Env.HOMEBREW_TAP_DEPLOY_KEY }}'
     directory: Formula
-    # goreleaser only GENERATES the formula (dist/homebrew/Formula/...).
-    # The push to main is a separate signed git commit by the release
-    # workflow: the "Protect main" ruleset requires verified signatures,
-    # which goreleaser's REST/git-upload formula pushes cannot produce.
-    skip_upload: true
+    commit_author:
+      name: Ferngeist Gateway
+      email: 31634638+arafatamim@users.noreply.github.com
     ids:
       - brew
     post_install: |

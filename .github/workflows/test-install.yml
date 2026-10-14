@@ -125,10 +125,10 @@ jobs:
           sh packaging/ci/wait-daemon.sh "$HOME/.local/bin/ferngeist-gateway"
           "$HOME/.local/bin/ferngeist-gateway" daemon uninstall
 
-      # Taps this checkout so the formula under test is the branch's copy.
+      # Installs the published formula from arafatamim/homebrew-tap.
       - name: Homebrew install
         run: |
-          FERNGEIST_GIT_REPO="$PWD" sh packaging/install.sh --yes --channel brew
+          sh packaging/install.sh --yes --channel brew
           sh packaging/ci/wait-daemon.sh "$(brew --prefix)/bin/ferngeist-gateway"
 
   windows:
