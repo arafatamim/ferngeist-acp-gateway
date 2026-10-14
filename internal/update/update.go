@@ -84,6 +84,10 @@ func (c *Checker) LatestStable(ctx context.Context) (Release, error) {
 		return release, fmt.Errorf("fetch latest release: %w", err)
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
+	// Optional: lifts the 60 requests/hour per-IP limit (CI, shared NAT).
+	if token := os.Getenv("GITHUB_TOKEN"); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 
 	resp, err := c.client().Do(req)
 	if err != nil {

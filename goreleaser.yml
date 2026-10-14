@@ -183,7 +183,7 @@ brews:
       # cannot write to another repository.
       git:
         url: 'git@github.com:arafatamim/homebrew-tap.git'
-        private_key: '{{ .Env.HOMEBREW_TAP_DEPLOY_KEY }}'
+        private_key: '{{ envOrDefault "HOMEBREW_TAP_DEPLOY_KEY" "" }}'
     directory: Formula
     commit_author:
       name: Ferngeist Gateway
@@ -224,6 +224,7 @@ nfpms:
         dst: /usr/share/doc/ferngeist-gateway/README.md
     scripts:
       postinstall: ./packaging/postinstall.sh
+      preremove: ./packaging/preremove.sh
 
   # Arch Linux binary package (ferngeist-gateway-<ver>-1-<arch>.pkg.tar.zst).
   # Built from the pacman-channel binary; postinstall registers the daemon
@@ -246,6 +247,7 @@ nfpms:
         dst: /usr/share/doc/ferngeist-gateway/README.md
     scripts:
       postinstall: ./packaging/postinstall.sh
+      preremove: ./packaging/preremove.sh
     # pacman runs post_upgrade (not post_install) on upgrades; without it the
     # daemon keeps running the old binary copied by the first `daemon install`.
     archlinux:

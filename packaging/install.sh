@@ -28,9 +28,6 @@ set -eu
 REPO_BASE="${FERNGEIST_REPO_BASE:-https://arafatamim.github.io/ferngeist-acp-gateway}"
 GIT_REPO="https://github.com/arafatamim/ferngeist-acp-gateway"
 RELEASE_BASE="$GIT_REPO/releases"
-# GitHub API is used only to resolve the latest release tag + asset names;
-# the actual downloads are direct release assets (no auth needed).
-API_BASE="https://api.github.com/repos/arafatamim/ferngeist-acp-gateway"
 
 YES=0
 FORCE_CHANNEL=""
@@ -262,11 +259,6 @@ install_via_brew() {
     # also refuses a bare name from an untrusted tap.
     step "Installing ferngeist-gateway from the arafatamim/tap tap"
     brew install arafatamim/tap/ferngeist-gateway
-    # macOS sandboxes the formula's post_install, so register the daemon here.
-    if [ "$OS" = Darwin ]; then
-        step "Installing + starting the daemon"
-        "$(brew --prefix)/bin/ferngeist-gateway" daemon install --keep-settings $DAEMON_FLAGS
-    fi
     return 0
 }
 
@@ -281,9 +273,11 @@ install_via_binary() {
 
     # Resolve the latest release: tag + the matching asset + SHA256SUMS.
     step "Resolving the latest release"
-    LATEST_JSON="$(curl -fsSL "$API_BASE/releases/latest")"
-    TAG="$(printf '%s' "$LATEST_JSON" | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p')"
-    [ -n "$TAG" ] || die "could not resolve the latest release tag"
+    # Follow the releases/latest redirect to .../tag/<tag> rather than asking
+    # the API, whose 60 requests/hour per IP shared NATs and CI exhaust.
+    TAG="$(curl -fsSLI -o /dev/null -w '%{url_effective}' "$RELEASE_BASE/latest")"
+    TAG="${TAG##*/}"
+    case "$TAG" in v[0-9]*) ;; *) die "could not resolve the latest release tag" ;; esac
     # Termux runs Android's bionic libc, whose linker64 rejects the static
     # ET_EXEC linux build ("unexpected e_type"); the android build is a PIE
     # that bionic accepts. Fetch the android asset on Termux, linux elsewhere.
@@ -396,13 +390,19 @@ if [ "$DECLINED" = 1 ]; then
     step "Declined; falling back to the user-level binary install"
     CHANNEL=binary
     install_via_binary
-elif [ "$CHANNEL" != binary ] && [ -z "$DAEMON_FLAGS" ]; then
-    # Package postinstalls always register with --lan; honor --localhost.
+elif [ "$CHANNEL" != binary ]; then
+    # Register here too: package scripts only run when the package changes
+    # (a re-run after `daemon uninstall` would leave no daemon), macOS brew
+    # sandboxes post_install, and --localhost must drop --keep-settings.
+    if [ "$CHANNEL" = brew ]; then GW="$(brew --prefix)/bin/ferngeist-gateway"; else GW=/usr/bin/ferngeist-gateway; fi
+    if [ -n "$DAEMON_FLAGS" ]; then FLAGS="--keep-settings $DAEMON_FLAGS"; else FLAGS=""; fi
     if [ "$(id -u)" = 0 ]; then
-        warn "--localhost: run 'ferngeist-gateway daemon install' as your own user to drop LAN access"
+        # Under sudo the package postinstall already registered it with --lan.
+        [ -n "${SUDO_USER:-}" ] && [ -n "$DAEMON_FLAGS" ] ||
+            warn "running as root: as your own user, run '$GW daemon install $FLAGS'"
     else
-        step "Re-registering the daemon for localhost only"
-        ferngeist-gateway daemon install || warn "could not re-register; run 'ferngeist-gateway daemon install'"
+        step "Registering the daemon for this user"
+        "$GW" daemon install $FLAGS || warn "could not register the daemon; run '$GW daemon install $FLAGS'"
     fi
 fi
 
