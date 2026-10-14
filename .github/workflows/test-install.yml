@@ -125,10 +125,10 @@ jobs:
           sh packaging/ci/wait-daemon.sh "$HOME/.local/bin/ferngeist-gateway"
           "$HOME/.local/bin/ferngeist-gateway" daemon uninstall
 
-      # Also answers whether brew's post_install can register the LaunchAgent.
+      # Taps this checkout so the formula under test is the branch's copy.
       - name: Homebrew install
         run: |
-          sh packaging/install.sh --yes --channel brew
+          FERNGEIST_GIT_REPO="$PWD" sh packaging/install.sh --yes --channel brew
           sh packaging/ci/wait-daemon.sh "$(brew --prefix)/bin/ferngeist-gateway"
 
   windows:

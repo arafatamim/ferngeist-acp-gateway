@@ -26,7 +26,8 @@ set -eu
 # FERNGEIST_REPO_BASE lets CI point the package channels at a local copy of
 # the gh-pages repos before they are published.
 REPO_BASE="${FERNGEIST_REPO_BASE:-https://arafatamim.github.io/ferngeist-acp-gateway}"
-GIT_REPO="https://github.com/arafatamim/ferngeist-acp-gateway"
+# Overridable so CI can tap the formula from the checkout under test.
+GIT_REPO="${FERNGEIST_GIT_REPO:-https://github.com/arafatamim/ferngeist-acp-gateway}"
 RELEASE_BASE="$GIT_REPO/releases"
 # GitHub API is used only to resolve the latest release tag + asset names;
 # the actual downloads are direct release assets (no auth needed).
@@ -266,6 +267,11 @@ install_via_brew() {
     step "Installing ferngeist-gateway (daemon install runs automatically)"
     # Fully qualified: newer brew refuses a bare name from an untrusted tap.
     brew install arafatamim/ferngeist-acp-gateway/ferngeist-gateway
+    # macOS sandboxes the formula's post_install, so register the daemon here.
+    if [ "$OS" = Darwin ]; then
+        step "Installing + starting the daemon"
+        "$(brew --prefix)/bin/ferngeist-gateway" daemon install --keep-settings $DAEMON_FLAGS
+    fi
     return 0
 }
 
