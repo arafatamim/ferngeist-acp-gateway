@@ -411,6 +411,86 @@ opened or loaded on this runtime returns `404`.
       symlink escape)
     - `404` — runtime has no session, or working directory unknown (see above)
     - `422` — `git` is missing from PATH, or the directory is not a git repository
+  - **Commit mode:** `?commit=<sha>&path=<rel>[&oldPath=<rel>]` diffs one file
+    of a commit against its first parent instead of the working tree. `oldText`
+    is `git show <sha>^1:<oldPath or path>` (absent for added files and root
+    commits); `newText` is `git show <sha>:<path>` (empty for deleted files).
+    Pass `oldPath` from `/git/commits/{sha}` for renames, or the old side is
+    missing. The files do not need to exist on disk; both paths are still
+    traversal-checked. Same 1 MiB truncation. Errors: `400` for `commit`
+    without `path`, an invalid or unknown sha, an escaping path, or a
+    submodule path; `422` when the path is in neither side of the commit.
+
+- `GET /v1/runtimes/{runtimeId}/git/log?head=<sha>&skip=<n>&limit=<n>`
+  - Returns one page of commit history reachable from `head`, newest first in
+    topological order. The whole repository is walked, not just the project
+    directory, so the parent links form a complete graph.
+  - Requires `read` scope.
+  - `head` is optional; without it the gateway uses `HEAD` and returns its full
+    sha as `head`. Send that sha back with every later page so commits made in
+    between do not shift the offset. `skip` defaults to `0`; `limit` defaults to
+    `50` and is clamped to `1..200`.
+  - Response:
+    ```json
+    {
+      "head": "0901beff…",
+      "hasMore": true,
+      "remoteUrl": "git@github.com:owner/repo.git",
+      "baseCommit": "feabf553…",
+      "commits": [
+        {
+          "sha": "0901beff…",
+          "parents": ["feabf553…"],
+          "subject": "fix: resize for the keyboard",
+          "body": "",
+          "authorName": "A. Author",
+          "authorEmail": "a@example.com",
+          "authorTime": 1792000000,
+          "commitTime": 1792000500,
+          "pushed": true,
+          "refs": [
+            { "name": "main", "kind": "branch", "isHead": true },
+            { "name": "origin/main", "kind": "remote", "isHead": false },
+            { "name": "v0.9.0", "kind": "tag", "isHead": false }
+          ]
+        }
+      ]
+    }
+    ```
+  - `refs[].kind` is `branch`, `remote`, `tag`, or `head` (detached `HEAD`).
+    `isHead` marks the checked-out branch. `origin/HEAD`-style aliases are
+    dropped. Times are Unix seconds; `commitTime` changes on amend/rebase,
+    `authorTime` does not.
+  - `body` is capped at 4 KiB per commit and a page at 2 MiB; a page cut by the
+    cap returns fewer commits with `hasMore: true`.
+  - `remoteUrl` is `origin`'s URL with any credentials removed, or `""` when
+    there is no `origin`.
+  - `pushed` is `true` when some `origin/*` branch contains the commit. With no
+    `origin` refs, or too many local-only commits to list, every commit is
+    `false`.
+  - `baseCommit` is present only inside a [managed worktree](#worktrees): the
+    commit the worktree branched from.
+  - An empty repository returns `200` with `head: ""` and no commits.
+  - Error responses:
+    - `400` — `head` is not 7–64 lowercase hex, or names no commit (for
+      example a pinned head removed by a rebase and gc; reload page 1);
+      `skip`/`limit` not integers
+    - `404` — runtime has no session, or working directory unknown (see above)
+    - `422` — `git` is missing from PATH, or the directory is not a git repository
+
+- `GET /v1/runtimes/{runtimeId}/git/commits/{sha}`
+  - Returns the files a commit changed under the project directory, compared
+    with its first parent (so a merge lists what it brought in; a root commit
+    lists everything).
+  - Requires `read` scope.
+  - Response: `{ "sha": "<full sha>", "changed": [ChangedFile] }`, using the
+    `/git/status` file shape. Renames and copies add `oldPath`; submodules have
+    `isDir: true`. A commit that touched nothing under the directory returns
+    `changed: []`.
+  - Error responses:
+    - `400` — invalid or unknown sha
+    - `404` — runtime has no session, or working directory unknown (see above)
+    - `422` — `git` is missing from PATH, or the directory is not a git repository
 
 ### Worktrees
 

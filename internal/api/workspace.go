@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/pairing"
@@ -214,6 +215,10 @@ func (s *Server) handleWorkspaceGitDiff(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
+	if commit := strings.TrimSpace(r.URL.Query().Get("commit")); commit != "" {
+		s.writeCommitFileDiff(w, r, cwd, commit)
+		return
+	}
 	if rel := strings.TrimSpace(r.URL.Query().Get("path")); rel != "" {
 		abs, err := workspace.ResolveWithinRoot(cwd, rel)
 		if err != nil {
@@ -266,4 +271,97 @@ func (s *Server) handleWorkspaceGitDiff(w http.ResponseWriter, r *http.Request) 
 		entries = append(entries, entry)
 	}
 	writeJSON(w, http.StatusOK, entries)
+}
+
+// writeCommitFileDiff answers /git/diff?commit=<sha>&path=<rel>[&oldPath=<rel>]:
+// one file of a commit against its first parent. The files are read from git
+// objects, so they need not exist on disk; the paths are still traversal-checked.
+func (s *Server) writeCommitFileDiff(w http.ResponseWriter, r *http.Request, cwd, commit string) {
+	q := r.URL.Query()
+	rel := strings.TrimSpace(q.Get("path"))
+	if rel == "" {
+		writeError(w, http.StatusBadRequest, "commit requires path")
+		return
+	}
+	oldRel := strings.TrimSpace(q.Get("oldPath"))
+	for _, p := range []string{rel, oldRel} {
+		if p == "" {
+			continue
+		}
+		if _, err := workspace.ResolveWithinRoot(cwd, p); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	sha, err := workspace.ResolveCommit(r.Context(), cwd, commit)
+	if err != nil {
+		writeWorkspaceError(w, err)
+		return
+	}
+	entry, err := workspace.CommitDiffEntry(r.Context(), cwd, sha, rel, oldRel)
+	if err != nil {
+		writeWorkspaceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, entry)
+}
+
+// handleWorkspaceGitLog returns one page of commit history, newest first.
+// GET /v1/runtimes/{runtimeId}/git/log?head=<sha>&skip=<n>&limit=<n>
+func (s *Server) handleWorkspaceGitLog(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireGatewayScope(w, r, pairing.ScopeRead); !ok {
+		return
+	}
+	cwd, ok := s.resolveWorkspaceCwd(w, r, r.PathValue("runtimeId"))
+	if !ok {
+		return
+	}
+	q := r.URL.Query()
+	skip, limit := 0, 50
+	var err error
+	if v := q.Get("skip"); v != "" {
+		if skip, err = strconv.Atoi(v); err != nil || skip < 0 {
+			writeError(w, http.StatusBadRequest, "invalid skip")
+			return
+		}
+	}
+	if v := q.Get("limit"); v != "" {
+		if limit, err = strconv.Atoi(v); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid limit")
+			return
+		}
+		limit = min(max(limit, 1), 200)
+	}
+	page, err := workspace.Log(r.Context(), cwd, strings.TrimSpace(q.Get("head")), skip, limit)
+	if err != nil {
+		writeWorkspaceError(w, err)
+		return
+	}
+	if base := s.workspaceSvc.BaseRef(r.Context(), cwd); base != "HEAD" {
+		page.BaseCommit = base
+	}
+	writeJSON(w, http.StatusOK, page)
+}
+
+// handleWorkspaceGitCommit returns the files a commit changed under cwd,
+// compared with its first parent. GET /v1/runtimes/{runtimeId}/git/commits/{sha}
+func (s *Server) handleWorkspaceGitCommit(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireGatewayScope(w, r, pairing.ScopeRead); !ok {
+		return
+	}
+	cwd, ok := s.resolveWorkspaceCwd(w, r, r.PathValue("runtimeId"))
+	if !ok {
+		return
+	}
+	sha, err := workspace.ResolveCommit(r.Context(), cwd, r.PathValue("sha"))
+	if err != nil {
+		writeWorkspaceError(w, err)
+		return
+	}
+	changed, err := workspace.CommitChanges(r.Context(), cwd, sha)
+	if err != nil {
+		writeWorkspaceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"sha": sha, "changed": changed})
 }

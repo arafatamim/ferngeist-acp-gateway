@@ -305,4 +305,38 @@ func TestWorkspaceEndpoints_EndToEnd(t *testing.T) {
 			t.Fatalf("whole-tree diff entry Type = %q, want diff", d.Type)
 		}
 	}
+
+	// 6. History: log, commit files, and a file diff from a commit.
+	rec = do(t, "/v1/runtimes/"+h.runtimeID+"/git/log?limit=1")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("git log code = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var lp workspace.LogPage
+	if err := json.Unmarshal(rec.Body.Bytes(), &lp); err != nil {
+		t.Fatal(err)
+	}
+	if len(lp.Commits) != 1 || !lp.HasMore || lp.Head != lp.Commits[0].SHA || lp.Commits[0].Subject != "add partial" {
+		t.Fatalf("git log page = %+v", lp)
+	}
+	rec = do(t, "/v1/runtimes/"+h.runtimeID+"/git/commits/"+lp.Head)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"path":"partial.txt"`) {
+		t.Fatalf("git commit code = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	rec = do(t, "/v1/runtimes/"+h.runtimeID+"/git/diff?path=partial.txt&commit="+lp.Head)
+	var cd acp.ToolCallContentDiff
+	if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &cd) != nil || cd.NewText != "a\nb\nc\n" || cd.OldText != nil {
+		t.Fatalf("commit diff code = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	for _, path := range []string{
+		"/git/log?head=nothex",
+		"/git/log?limit=x",
+		"/git/commits/zzzzzzz",
+		"/git/commits/" + strings.Repeat("0", 40),
+		"/git/diff?commit=" + lp.Head,
+		"/git/diff?commit=" + lp.Head + "&path=../outside.txt",
+	} {
+		if rec := do(t, "/v1/runtimes/"+h.runtimeID+path); rec.Code != http.StatusBadRequest {
+			t.Fatalf("%s code = %d, want 400, body=%s", path, rec.Code, rec.Body.String())
+		}
+	}
 }

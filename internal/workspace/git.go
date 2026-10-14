@@ -86,8 +86,9 @@ type ChangedFile struct {
 	Status  string `json:"status"` // single letter: M, A, D, R, U, etc.
 	Added   int    `json:"added"`
 	Removed int    `json:"removed"`
-	Binary  bool   `json:"binary"` // true when git reported "-" for the counts
-	IsDir   bool   `json:"isDir"`  // true for submodules and collapsed untracked dirs
+	Binary  bool   `json:"binary"`            // true when git reported "-" for the counts
+	IsDir   bool   `json:"isDir"`             // true for submodules and collapsed untracked dirs
+	OldPath string `json:"oldPath,omitempty"` // rename/copy source; set by CommitChanges only
 }
 
 // ParseGitStatus parses `git status --porcelain=v2` output into a list of

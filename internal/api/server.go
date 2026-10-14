@@ -271,6 +271,8 @@ func NewServer(deps Deps) *Server {
 	mux.HandleFunc("GET /v1/runtimes/{runtimeId}/files", server.handleWorkspaceFile)
 	mux.HandleFunc("GET /v1/runtimes/{runtimeId}/git/status", server.handleWorkspaceGitStatus)
 	mux.HandleFunc("GET /v1/runtimes/{runtimeId}/git/diff", server.handleWorkspaceGitDiff)
+	mux.HandleFunc("GET /v1/runtimes/{runtimeId}/git/log", server.handleWorkspaceGitLog)
+	mux.HandleFunc("GET /v1/runtimes/{runtimeId}/git/commits/{sha}", server.handleWorkspaceGitCommit)
 	mux.HandleFunc("POST /v1/worktrees", server.handleWorktreeCreate)
 	mux.HandleFunc("GET /v1/worktrees", server.handleWorktreeList)
 	mux.HandleFunc("DELETE /v1/worktrees/{worktreeId}", server.handleWorktreeDelete)

@@ -204,6 +204,13 @@ not be coupled. Full release notes live in GitHub Releases.
   `gateway_sessions.leaseholder` column on first start. Gateway `v0.13.0` and
   earlier cannot use the migrated database, so downgrading the gateway is not
   supported. (2026-10-11)
+- `[additive]` Commit history endpoints: `GET /v1/runtimes/{id}/git/log`
+  (paged commit list pinned by `head`, with refs, `pushed`, `remoteUrl` and,
+  in a managed worktree, `baseCommit`) and `GET /v1/runtimes/{id}/git/commits/{sha}`
+  (files changed vs the first parent). `GET /v1/runtimes/{id}/git/diff` accepts
+  `commit` and `oldPath` to diff one file of a commit; without `commit` it is
+  unchanged. Changed-file objects gain optional `oldPath`, set only by
+  `/git/commits/{sha}`. (2026-10-14)
 
 ## History
 
