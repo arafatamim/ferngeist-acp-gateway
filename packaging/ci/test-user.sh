@@ -1,19 +1,17 @@
 #!/bin/sh
 # The per-user Linux package flow on a real systemd host, run as a non-root
 # user with passwordless sudo and a running user manager: install, re-run,
-# upgrade, uninstall + reinstall, --localhost, package removal.
+# uninstall + reinstall, --localhost, upgrade, an unattended-style binary
+# swap, package removal.
 # Usage: test-user.sh dir-with-packages-built-from-this-checkout
 set -eu
 CI="$(cd "$(dirname "$0")" && pwd)"
 INSTALL="$CI/../install.sh"
 PKGS="$(cd "$1" && pwd)"
 GW=/usr/bin/ferngeist-gateway
-# `daemon install` copies the binary here; it outlives the package, so it can
-# still report whether the service is running after removal.
-SVC="$HOME/.local/share/ferngeist-gateway/bin/ferngeist-gateway"
 
 pkgver() { "$GW" --version | awk '$1 == "VERSION" {print $2}'; }
-running() { sh "$CI/wait-daemon.sh" "$SVC" "$@"; }
+running() { sh "$CI/wait-daemon.sh" "$GW" "$@"; }
 
 if command -v apt-get >/dev/null 2>&1; then
     upgrade() { sudo apt-get install -y "$PKGS"/*amd64*.deb; }
@@ -37,7 +35,7 @@ running "VERSION +$OLD" 'LAN ENABLED +true'
 
 echo "== daemon uninstall stops it; re-running the installer brings it back"
 "$GW" daemon uninstall
-sh "$CI/wait-gone.sh" "$SVC" "daemon uninstall"
+sh "$CI/wait-gone.sh" "$GW" "daemon uninstall"
 sh "$INSTALL" --yes
 running "VERSION +$OLD" 'LAN ENABLED +true'
 
@@ -52,9 +50,21 @@ upgrade
 NEW="$(pkgver)"
 [ "$NEW" != "$OLD" ] || { echo "FAIL: upgrade left $GW at $OLD" >&2; exit 1; }
 running "VERSION +$NEW" 'LAN ENABLED +false'
+# The service now runs /usr/bin directly instead of a copy.
+grep -q "^ExecStart=\"$GW\"" "$HOME/.config/systemd/user/ferngeist-gateway.service"
+[ ! -e "$HOME/.local/share/ferngeist-gateway/bin/ferngeist-gateway" ]
+
+echo "== a root-only upgrade (unattended-upgrades) restarts the daemon by itself"
+sh "$CI/swap-binary.sh" "$GW" sudo
+running "VERSION +$NEW" 'LAN ENABLED +false'
 
 echo "== removing the package stops the daemon"
 remove
 [ ! -e "$GW" ] || { echo "FAIL: $GW still present after removal" >&2; exit 1; }
-sh "$CI/wait-gone.sh" "$SVC" "package removal"
+for _ in $(seq 15); do
+    systemctl --user is-active --quiet ferngeist-gateway.service || break
+    sleep 2
+done
+! systemctl --user is-active --quiet ferngeist-gateway.service ||
+    { echo "FAIL: daemon still running after package removal" >&2; exit 1; }
 echo "PASS"
