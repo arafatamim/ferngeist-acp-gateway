@@ -192,10 +192,13 @@ brews:
       - brew
     # No post_install: brew sandboxes it (macOS: temporary HOME; Linux:
     # Landlock, no session bus), so the service can't be registered there.
-    # install.sh registers it; the caveat covers manual installs/upgrades.
+    # install.sh registers it (the caveat covers manual installs); the daemon
+    # restarts itself when brew upgrade moves the opt link it runs from.
     caveats: |
-      Start the daemon (and restart it on the new version after each upgrade) with:
+      Start the daemon with:
         ferngeist-gateway daemon install --keep-settings --lan
+      It then restarts on the new version after each brew upgrade. If you
+      upgraded from 1.0.0 or earlier, run the command above once more.
 
 # .deb (Ubuntu/Debian) and .rpm (Fedora/RHEL) packages. postinstall runs
 # `daemon install` so a per-user systemd user service is created on first

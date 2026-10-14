@@ -412,6 +412,6 @@ case "$CHANNEL" in
     apt) say "Update: sudo apt update && sudo apt upgrade ferngeist-gateway" ;;
     pacman) say "Update: sudo pacman -Syu" ;;
     rpm) say "Update: sudo dnf upgrade ferngeist-gateway (or yum)" ;;
-    brew) say "Update: brew upgrade ferngeist-gateway && ferngeist-gateway daemon install --keep-settings --lan" ;;
+    brew) say "Update: brew upgrade ferngeist-gateway" ;;
     binary) say "Update: ferngeist-gateway update (package-manager builds refuse self-update)" ;;
 esac

@@ -235,6 +235,50 @@ func installCurrentBinary(targetPath string) error {
 	return nil
 }
 
+// serviceExecutable returns the binary the service should run. A binary a
+// package manager owns (stableExecutable) runs in place, so upgrades replace
+// it and the daemon's binary watch restarts onto it; anything else is copied
+// to copyTarget as before, and a copy left by an older install is removed.
+func serviceExecutable(copyTarget string) (string, error) {
+	src, err := installCopySource()
+	if err != nil {
+		return "", fmt.Errorf("resolve current binary: %w", err)
+	}
+	if stable, ok := stableExecutable(src); ok {
+		if err := os.Remove(copyTarget); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return "", fmt.Errorf("remove old service binary: %w", err)
+		}
+		return stable, nil
+	}
+	if err := installCurrentBinary(copyTarget); err != nil {
+		return "", err
+	}
+	return copyTarget, nil
+}
+
+// stableExecutable maps resolved, the symlink-free path of the running
+// binary, to a path its package manager keeps pointing at the current
+// version: /usr/bin for the deb/rpm/pacman packages, and Homebrew's
+// <prefix>/opt/<name> link for a <prefix>/Cellar/<name>/<version> keg (keg
+// paths change every version and are cleaned up).
+func stableExecutable(resolved string) (string, bool) {
+	if resolved == "/usr/bin/ferngeist-gateway" {
+		return resolved, true
+	}
+	binDir := filepath.Dir(resolved)
+	formulaDir := filepath.Dir(filepath.Dir(binDir))
+	cellar := filepath.Dir(formulaDir)
+	if filepath.Base(resolved) != "ferngeist-gateway" || filepath.Base(binDir) != "bin" ||
+		filepath.Base(formulaDir) != "ferngeist-gateway" || filepath.Base(cellar) != "Cellar" {
+		return "", false
+	}
+	opt := filepath.Join(filepath.Dir(cellar), "opt", "ferngeist-gateway", "bin", "ferngeist-gateway")
+	if !sameFile(opt, resolved) {
+		return "", false
+	}
+	return opt, true
+}
+
 // installOptionsFile is where Install records the options it was given, so
 // `daemon install --keep-settings` (used by package upgrades) can reapply
 // them instead of resetting the service to package defaults.

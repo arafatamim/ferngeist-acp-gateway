@@ -103,9 +103,11 @@ func (m *linuxManager) Install(options InstallOptions) error {
 }
 
 func installLinuxFiles(paths linuxPaths, options InstallOptions) error {
-	if err := installCurrentBinary(paths.binaryPath); err != nil {
+	execPath, err := serviceExecutable(paths.binaryPath)
+	if err != nil {
 		return err
 	}
+	paths.execPath = execPath
 	if err := writeLinuxEnvFile(paths, options); err != nil {
 		return err
 	}
@@ -295,6 +297,7 @@ type linuxPaths struct {
 	managedBinDir string
 	dbPath        string
 	binaryPath    string
+	execPath      string // what the unit runs: binaryPath or a stableExecutable
 	envPath       string
 	overridePath  string
 	unitPath      string
@@ -317,6 +320,7 @@ func resolveLinuxPaths() (linuxPaths, error) {
 		managedBinDir: filepath.Join(rootDir, "managed-bin"),
 		dbPath:        filepath.Join(rootDir, "ferngeist-gateway.db"),
 		binaryPath:    filepath.Join(rootDir, "bin", "ferngeist-gateway"),
+		execPath:      filepath.Join(rootDir, "bin", "ferngeist-gateway"),
 		envPath:       filepath.Join(rootDir, "config", "daemon.env"),
 		overridePath:  filepath.Join(rootDir, "config", "daemon.override.env"),
 		unitPath:      unitPath,
@@ -363,7 +367,7 @@ func writeLinuxUnitFile(paths linuxPaths) error {
 		escapeSystemdValue(paths.rootDir),
 		escapeSystemdValue(paths.envPath),
 		escapeSystemdValue(paths.overridePath),
-		escapeSystemdExecArg(paths.binaryPath),
+		escapeSystemdExecArg(paths.execPath),
 	)
 
 	if err := os.WriteFile(paths.unitPath, []byte(unitBody), 0o644); err != nil {
