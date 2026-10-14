@@ -89,9 +89,11 @@ brew tap arafatamim/ferngeist-acp-gateway https://github.com/arafatamim/ferngeis
 brew install arafatamim/ferngeist-acp-gateway/ferngeist-gateway
 ```
 
-The formula installs the binary and runs the daemon install (`daemon install --keep-settings --lan`)
-as a per-user service — same as the Linux packages. On macOS it is a LaunchAgent;
-on Linux (Linuxbrew) a systemd user unit. Updates: `brew upgrade ferngeist-gateway`.
+On Linux (Linuxbrew) the formula registers the daemon as a systemd user unit
+(`daemon install --keep-settings --lan`), same as the Linux packages, and
+refreshes it on `brew upgrade ferngeist-gateway`. On macOS Homebrew sandboxes
+that step, so the installer registers the LaunchAgent itself; after a manual
+install or a `brew upgrade`, run `ferngeist-gateway daemon install --keep-settings --lan`.
 
 Homebrew installs never trigger Gatekeeper, so no warnings appear. To make the
 gateway reachable only on localhost, re-run `ferngeist-gateway daemon install`.
