@@ -10,7 +10,8 @@
 set -eu
 
 SRC="$(cd "$(dirname "$0")/../.." && pwd)"
-UPGRADE_DIR="${1:-}"
+# Absolute: apt-get treats a relative path without ./ as a package name.
+UPGRADE_DIR="${1:+$(cd "$1" && pwd)}"
 BIN=/usr/bin/ferngeist-gateway
 
 die() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }

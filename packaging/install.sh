@@ -264,7 +264,8 @@ install_via_brew() {
     step "Tapping arafatamim/ferngeist-acp-gateway"
     brew tap arafatamim/ferngeist-acp-gateway "$GIT_REPO"
     step "Installing ferngeist-gateway (daemon install runs automatically)"
-    brew install ferngeist-gateway
+    # Fully qualified: newer brew refuses a bare name from an untrusted tap.
+    brew install arafatamim/ferngeist-acp-gateway/ferngeist-gateway
     return 0
 }
 

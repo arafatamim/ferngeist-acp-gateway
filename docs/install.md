@@ -86,7 +86,7 @@ Or tap + install manually:
 
 ```bash
 brew tap arafatamim/ferngeist-acp-gateway https://github.com/arafatamim/ferngeist-acp-gateway
-brew install ferngeist-gateway
+brew install arafatamim/ferngeist-acp-gateway/ferngeist-gateway
 ```
 
 The formula installs the binary and runs the daemon install (`daemon install --keep-settings --lan`)
