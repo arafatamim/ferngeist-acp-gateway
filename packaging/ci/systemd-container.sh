@@ -15,14 +15,14 @@ esac
 docker build -t "sd-$DISTRO" - <<EOF
 FROM $DISTRO:latest
 RUN $PREP
-# A password: Fedora's PAM account check (sudo, user@.service) rejects a
-# passwordless account even with NOPASSWD.
-RUN useradd -m tester && echo tester:tester | chpasswd && echo 'tester ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/tester
+RUN useradd -m tester && echo 'tester ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/tester
 ENV container=docker
 CMD ["/usr/lib/systemd/systemd"]
 EOF
 
-docker run -d --name sd --privileged --cgroupns=host \
+# apparmor=unconfined: the runner host's unix-chkpwd profile otherwise denies
+# the container's PAM a read of /etc/shadow, so user@.service can't start.
+docker run -d --name sd --privileged --cgroupns=host --security-opt apparmor=unconfined \
     -v /sys/fs/cgroup:/sys/fs/cgroup:rw --tmpfs /run --tmpfs /tmp \
     -v "$PWD:/src:ro" "sd-$DISTRO"
 for _ in $(seq 60); do
