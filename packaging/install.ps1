@@ -8,12 +8,11 @@
 # Usage:
 #   irm https://arafatamim.github.io/ferngeist-acp-gateway/install.ps1 | iex
 #   powershell -ExecutionPolicy Bypass -File .\install.ps1
-#   powershell -ExecutionPolicy Bypass -File .\install.ps1 -Lan -Yes
+#   powershell -ExecutionPolicy Bypass -File .\install.ps1 -Localhost -Yes
 #
 # Flags:
-#   -Lan            expose the gateway on the local network (listen 0.0.0.0)
-#                   default: localhost-only
-#   -Localhost      force localhost-only (overrides -Lan)
+#   -Localhost      listen on 127.0.0.1 only (default: LAN, same as install.sh)
+#   -Lan            accepted for older docs/scripts; LAN is already the default
 #   -Yes            skip the confirmation prompt (non-interactive / CI)
 #   -KeepDownloads  keep the downloaded zip in the install dir (default removes it)
 [CmdletBinding()]
@@ -59,7 +58,8 @@ if (-not $Yes) {
     $ans = Read-Host 'Download and install the Ferngeist Gateway daemon for this user? [y/N]'
     if ($ans -notmatch '^(y|yes)$') {
         Write-Host 'Install cancelled.'
-        exit 0
+        # Not `exit`: under `irm | iex` that closes the user's PowerShell window.
+        return
     }
 }
 
@@ -67,6 +67,8 @@ if (-not $Yes) {
 # Resolve the latest release
 # ---------------------------------------------------------------------------
 Write-Step 'Resolving the latest release'
+# Windows PowerShell 5.1 may default to TLS 1.0/1.1, which GitHub rejects.
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 $release = Invoke-RestMethod -UseBasicParsing "$ApiBase/releases/latest"
 $tag = $release.tag_name
 if ([string]::IsNullOrWhiteSpace($tag)) {
@@ -75,7 +77,9 @@ if ([string]::IsNullOrWhiteSpace($tag)) {
 $ver = $tag -replace '^v', ''
 $arch = switch ($env:PROCESSOR_ARCHITECTURE) {
     'AMD64' { 'amd64' }
-    'ARM64' { 'arm64' }
+    # No windows/arm64 build is published (goreleaser ignores it); Windows 11
+    # on ARM runs the amd64 build under x64 emulation.
+    'ARM64' { 'amd64' }
     default { Throw-Err "unsupported architecture: $env:PROCESSOR_ARCHITECTURE" }
 }
 $asset = "ferngeist-gateway_${ver}_windows_${arch}.zip"
@@ -130,11 +134,11 @@ if (-not $exe) { Throw-Err "ferngeist-gateway.exe not found in $asset" }
 # Install + start the daemon
 # ---------------------------------------------------------------------------
 $daemonArgs = @('daemon', 'install')
-if ($Lan -and -not $Localhost) { $daemonArgs += '--lan' }
-if ($Lan -and -not $Localhost) {
-    Write-Step 'Installing + starting the daemon (per-user scheduled task, LAN enabled)'
-} else {
+if ($Localhost) {
     Write-Step 'Installing + starting the daemon (per-user scheduled task, localhost only)'
+} else {
+    $daemonArgs += '--lan'
+    Write-Step 'Installing + starting the daemon (per-user scheduled task, LAN enabled)'
 }
 # The task is scoped to the current user, so no elevation is needed (and
 # elevating would register it in the admin account's profile when the UAC

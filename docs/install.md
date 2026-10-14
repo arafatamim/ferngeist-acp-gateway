@@ -54,9 +54,10 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
 It fetches the latest release zip, verifies its checksum, installs the daemon as
-a per-user scheduled task (one UAC prompt to create the task), and adds the CLI
-to your user PATH. Pass `-Lan` to expose the gateway on your network (default is
-localhost-only), `-Yes` to skip the install prompt, `-KeepDownloads` to keep the
+a per-user scheduled task (no UAC prompt), and adds the CLI
+to your user PATH. The gateway listens on your local network by default (same as
+the macOS/Linux installer); pass `-Localhost` to keep it on localhost only,
+`-Yes` to skip the install prompt, `-KeepDownloads` to keep the
 downloaded zip. Updates are manual: run `ferngeist-gateway update` when a new
 release is announced.
 
