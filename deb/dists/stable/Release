@@ -1,0 +1,31 @@
+Architectures: amd64 arm64
+Codename: stable
+Components: main
+Date: Wed, 14 Oct 2026 18:57:42 +0000
+Label: Ferngeist
+Origin: Ferngeist
+Suite: stable
+MD5Sum:
+ 0c2d5c1e3a5df352c04257efdb6e11ba              148 Release
+ d50ed84df586cba240d106d1fd2a3127             4108 main/binary-amd64/Packages
+ e8acb340a91fd5a59a4664ac6a500fc0             1432 main/binary-amd64/Packages.gz
+ d50ed84df586cba240d106d1fd2a3127             4108 main/binary-arm64/Packages
+ bd690194018570126b07630cd870fe4f             1432 main/binary-arm64/Packages.gz
+SHA1:
+ da87217047e76d029282f48b56974a60a4d0672d              148 Release
+ 4caf11a0a54ad7e3bb4ebcd8ec3506aac1498df2             4108 main/binary-amd64/Packages
+ ee884a0d1960ae484c6852d2490238ff7390a4c0             1432 main/binary-amd64/Packages.gz
+ 4caf11a0a54ad7e3bb4ebcd8ec3506aac1498df2             4108 main/binary-arm64/Packages
+ f33c8a5b7849d5f8152d8a08cfbe4470680e97dd             1432 main/binary-arm64/Packages.gz
+SHA256:
+ 837f253bb8e872fae291eaae5192ca1a0f10a40fbfad9800324ee31621a78206              148 Release
+ 9251139eeacc0ecd9750d3a266c972d418510aa7844ac65e99076ef2150239ea             4108 main/binary-amd64/Packages
+ 9aa2bf853d4a41026e96e280cf6eee98ae0c83f66f2973a3096057b3ccedbc80             1432 main/binary-amd64/Packages.gz
+ 9251139eeacc0ecd9750d3a266c972d418510aa7844ac65e99076ef2150239ea             4108 main/binary-arm64/Packages
+ 2a30fc6f40e730246be68284e2c7c8d348aab02483c1dc8ba7cc2c6e661a8276             1432 main/binary-arm64/Packages.gz
+SHA512:
+ d8678c0b676c7ef35236558f295a0369300d781e393c0e490a57c4310b43f64ae19fdce14beda51c1f53f2d9f47d964f7037ba9dd4a0b247b4425f31120d6979              148 Release
+ 1e5c8c91d80efecc15e22ccf060de347a95c139c61ba1be007a9f48c0e34a29d317ddaf9c210d6a055eb246309742431d85361b3e17fa4468e8c86ca24846c62             4108 main/binary-amd64/Packages
+ 6e4e3b07585d380498397adbcd5e5de0499339b840fc7c1d30cafd271f835560997c66dee665c5a16808cd1685d5419f822b4c28537bfdca5e6db3910e9257e7             1432 main/binary-amd64/Packages.gz
+ 1e5c8c91d80efecc15e22ccf060de347a95c139c61ba1be007a9f48c0e34a29d317ddaf9c210d6a055eb246309742431d85361b3e17fa4468e8c86ca24846c62             4108 main/binary-arm64/Packages
+ 05d2daa80f798a8e347f3d84c9fc2c72d9dda37a88980578995cb6c57b3ceee097a8a39006e4ae1c46bda251213cd2f03af477304ebf60ec2d6311c33cff2287             1432 main/binary-arm64/Packages.gz
