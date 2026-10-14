@@ -7,7 +7,7 @@ set -eu
 DISTRO="$1"
 PKGS="$2"
 case "$DISTRO" in
-    fedora) PREP='dnf -y install systemd dbus-broker sudo util-linux curl gnupg2 procps-ng findutils' ;;
+    fedora) PREP='dnf -y install systemd dbus sudo util-linux curl gnupg2 procps-ng findutils' ;;
     archlinux) PREP='pacman -Syu --noconfirm sudo && pacman-key --init' ;;
     *) echo "unsupported distro: $DISTRO" >&2; exit 1 ;;
 esac
@@ -15,9 +15,9 @@ esac
 docker build -t "sd-$DISTRO" - <<EOF
 FROM $DISTRO:latest
 RUN $PREP
-# !pam_acct_mgmt: the new account has no password, which Fedora's PAM
-# account check rejects even with NOPASSWD.
-RUN useradd -m tester && printf 'Defaults:tester !pam_acct_mgmt\ntester ALL=(ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/tester
+# A password: Fedora's PAM account check (sudo, user@.service) rejects a
+# passwordless account even with NOPASSWD.
+RUN useradd -m tester && echo tester:tester | chpasswd && echo 'tester ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/tester
 ENV container=docker
 CMD ["/usr/lib/systemd/systemd"]
 EOF
@@ -38,6 +38,12 @@ for _ in $(seq 30); do
     docker exec sd test -S "/run/user/$UID_T/bus" && break
     sleep 1
 done
+docker exec sd test -S "/run/user/$UID_T/bus" || {
+    docker exec sd systemctl status "user@$UID_T" --no-pager || true
+    docker exec sd journalctl -b --no-pager -n 50 || true
+    echo "tester's user bus never came up" >&2
+    exit 1
+}
 docker exec -u tester -w /home/tester -e HOME=/home/tester \
     -e XDG_RUNTIME_DIR="/run/user/$UID_T" \
     -e DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$UID_T/bus" \
