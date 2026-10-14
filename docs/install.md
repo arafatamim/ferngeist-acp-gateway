@@ -217,6 +217,8 @@ All platforms share the same contract:
 
 Notes:
 
+- Removing the apt/dnf/pacman package (`sudo apt remove ferngeist-gateway`,
+  etc.) also runs `daemon uninstall` for the user who ran `sudo`.
 - Uninstall semantics are consistent across platforms: plain `uninstall`
   unregisters the background service and stops the daemon, but leaves every
   installed file in place — a later `daemon install` re-registers the same

@@ -28,7 +28,6 @@ Set-StrictMode -Version Latest
 
 $RepoBase = 'https://arafatamim.github.io/ferngeist-acp-gateway'
 $GitRepo = 'https://github.com/arafatamim/ferngeist-acp-gateway'
-$ApiBase = 'https://api.github.com/repos/arafatamim/ferngeist-acp-gateway'
 $AssetBase = 'https://github.com/arafatamim/ferngeist-acp-gateway/releases/download'
 
 function Write-Step { Write-Host "==> $args" }
@@ -69,9 +68,14 @@ if (-not $Yes) {
 Write-Step 'Resolving the latest release'
 # Windows PowerShell 5.1 may default to TLS 1.0/1.1, which GitHub rejects.
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-$release = Invoke-RestMethod -UseBasicParsing "$ApiBase/releases/latest"
-$tag = $release.tag_name
-if ([string]::IsNullOrWhiteSpace($tag)) {
+# Follow the releases/latest redirect to .../tag/<tag> rather than asking
+# the API, whose 60 requests/hour per IP shared NATs and CI exhaust.
+$req = [Net.WebRequest]::Create("$GitRepo/releases/latest")
+$req.Method = 'HEAD'
+$resp = $req.GetResponse()
+$tag = $resp.ResponseUri.Segments[-1]
+$resp.Close()
+if ($tag -notmatch '^v\d') {
     Throw-Err 'could not resolve the latest release tag'
 }
 $ver = $tag -replace '^v', ''
