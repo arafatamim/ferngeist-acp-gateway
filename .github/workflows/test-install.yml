@@ -1,0 +1,158 @@
+name: Test Installers
+
+# End-to-end install and upgrade checks on real platforms: the installers in
+# this checkout run against the live repos/releases, then upgrade to packages
+# built from this checkout (goreleaser snapshot).
+
+on:
+  pull_request:
+    paths:
+      - packaging/**
+      - goreleaser.yml
+      - .github/workflows/release.yml
+      - .github/workflows/test-install.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.26"
+          cache-dependency-path: go.sum
+
+      - name: Build snapshot packages
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser
+          version: latest
+          args: release --snapshot --clean
+        env:
+          UPDATE_CHANNEL: self
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: packages
+          path: |
+            dist/*.deb
+            dist/*.rpm
+            dist/*.pkg.tar.zst
+          if-no-files-found: error
+
+  # Repo + signatures + package scripts on each distro (as root, no systemd).
+  linux:
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ["ubuntu:24.04", "fedora:latest", "archlinux:latest"]
+    container: ${{ matrix.image }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: packages
+          path: packages
+
+      - name: Install from the live repo, then upgrade to this build
+        run: sh packaging/ci/test-linux.sh packages
+
+  # The real per-user flow: sudo apt install -> postinst registers the
+  # systemd user service for the invoking user, upgrades refresh it.
+  ubuntu-systemd:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: packages
+          path: packages
+
+      - name: Start a systemd user session for the runner
+        run: |
+          sudo loginctl enable-linger "$USER"
+          echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
+          for _ in $(seq 30); do
+            [ -S "/run/user/$(id -u)/bus" ] && exit 0
+            sleep 1
+          done
+          echo "user bus never came up"
+          exit 1
+
+      - name: Install from the live apt repo (LAN by default)
+        run: |
+          sh packaging/install.sh --yes
+          sh packaging/ci/wait-daemon.sh
+          grep -qx 'FERNGEIST_GATEWAY_ENABLE_LAN=1' ~/.local/share/ferngeist-gateway/config/daemon.env
+
+      - name: Upgrade to this build refreshes the running daemon
+        run: |
+          sudo apt-get install -y ./packages/*amd64*.deb
+          sh packaging/ci/wait-daemon.sh
+          want="$(/usr/bin/ferngeist-gateway --version | awk '$1 == "VERSION" {print $2}')"
+          got="$(~/.local/share/ferngeist-gateway/bin/ferngeist-gateway --version | awk '$1 == "VERSION" {print $2}')"
+          echo "package $want, service copy $got"
+          [ "$want" = "$got" ]
+          # --keep-settings: the upgrade must not reset LAN access.
+          grep -qx 'FERNGEIST_GATEWAY_ENABLE_LAN=1' ~/.local/share/ferngeist-gateway/config/daemon.env
+
+      - name: install.sh --localhost re-registers localhost-only
+        run: |
+          sh packaging/install.sh --yes --localhost
+          sh packaging/ci/wait-daemon.sh
+          grep -qx 'FERNGEIST_GATEWAY_ENABLE_LAN=0' ~/.local/share/ferngeist-gateway/config/daemon.env
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Binary install (user-level LaunchAgent)
+        run: |
+          sh packaging/install.sh --yes --binary
+          sh packaging/ci/wait-daemon.sh "$HOME/.local/bin/ferngeist-gateway"
+          "$HOME/.local/bin/ferngeist-gateway" daemon uninstall
+
+      # Also answers whether brew's post_install can register the LaunchAgent.
+      - name: Homebrew install
+        run: |
+          sh packaging/install.sh --yes --channel brew
+          sh packaging/ci/wait-daemon.sh "$(brew --prefix)/bin/ferngeist-gateway"
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: install.ps1 under PowerShell 7
+        shell: pwsh
+        run: |
+          ./packaging/install.ps1 -Yes
+          $exe = Join-Path $env:LOCALAPPDATA 'FerngeistGateway\service\bin\ferngeist-gateway.exe'
+          foreach ($i in 1..30) { & $exe daemon status *> $null; if ($LASTEXITCODE -eq 0) { break }; Start-Sleep 2 }
+          & $exe daemon status
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          & $exe daemon uninstall
+
+      # A script block mirrors `irm | iex` (no script file) while still
+      # allowing -Yes, which a bare iex cannot pass.
+      - name: install.ps1 under Windows PowerShell 5.1, as irm | iex runs it
+        shell: powershell
+        run: |
+          & ([scriptblock]::Create((Get-Content -Raw packaging/install.ps1))) -Yes -Localhost
+          $exe = Join-Path $env:LOCALAPPDATA 'FerngeistGateway\service\bin\ferngeist-gateway.exe'
+          foreach ($i in 1..30) { & $exe daemon status *> $null; if ($LASTEXITCODE -eq 0) { break }; Start-Sleep 2 }
+          & $exe daemon status
+          if ($LASTEXITCODE -ne 0) { exit 1 }

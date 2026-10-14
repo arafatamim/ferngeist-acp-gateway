@@ -23,7 +23,9 @@ set -eu
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-REPO_BASE="https://arafatamim.github.io/ferngeist-acp-gateway"
+# FERNGEIST_REPO_BASE lets CI point the package channels at a local copy of
+# the gh-pages repos before they are published.
+REPO_BASE="${FERNGEIST_REPO_BASE:-https://arafatamim.github.io/ferngeist-acp-gateway}"
 GIT_REPO="https://github.com/arafatamim/ferngeist-acp-gateway"
 RELEASE_BASE="$GIT_REPO/releases"
 # GitHub API is used only to resolve the latest release tag + asset names;

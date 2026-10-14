@@ -15,6 +15,10 @@ on:
         description: "Release tag (e.g. v1.0.0). Only needed for manual dispatch."
         required: true
         type: string
+      dry_run:
+        description: "Snapshot build published to the gh-pages-dryrun branch only (no release assets, formula or live repos touched)."
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -29,6 +33,9 @@ env:
   # Package versions kept per arch in the apt/rpm/pacman repos. GitHub Pages
   # rejects sites over 1 GB; older versions stay on the Releases page.
   KEEP_VERSIONS: 3
+  # Branch the repo jobs publish to. A dry run seeds gh-pages-dryrun from
+  # the live gh-pages so pruning and the repo dbs run against real state.
+  PAGES_BRANCH: ${{ inputs.dry_run && 'gh-pages-dryrun' || 'gh-pages' }}
 
 jobs:
   release:
@@ -96,7 +103,7 @@ jobs:
           # main is a separate signed git push below, since the main ruleset
           # requires verified signatures), and the winget push is skipped
           # when WINGET_TOKEN is unset.
-          args: release --clean --skip=${{ steps.channels.outputs.skip }}
+          args: release --clean --skip=${{ steps.channels.outputs.skip }} ${{ inputs.dry_run && '--snapshot' || '' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Self-managed installs may run `ferngeist-gateway update`; package
@@ -106,6 +113,7 @@ jobs:
           WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
 
       - name: Upload changelog to release
+        if: ${{ !inputs.dry_run }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.release_tag.outputs.tag }}
@@ -121,6 +129,7 @@ jobs:
       # and this step pushes it. Idempotent: skips when main already has
       # this exact content (brew upgrade picks up the same formula).
       - name: Publish Homebrew formula to main
+        if: ${{ !inputs.dry_run }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           APT_GPG_KEY: ${{ secrets.APT_GPG_KEY }}
@@ -215,11 +224,11 @@ jobs:
       # first release). GitHub Pages needs a branch to serve.
       - name: Fetch apt repo branch
         run: |
-          if git ls-remote --heads origin gh-pages | grep -q gh-pages; then
+          if git ls-remote --exit-code --heads origin gh-pages >/dev/null; then
             git fetch origin gh-pages
-            git worktree add apt-repo gh-pages
+            git worktree add -B "$PAGES_BRANCH" apt-repo FETCH_HEAD
           else
-            git worktree add -b gh-pages apt-repo
+            git worktree add -b "$PAGES_BRANCH" apt-repo
           fi
 
       # Import the signing key (self-generated, stored as a secret). The
@@ -331,7 +340,7 @@ jobs:
           fi
           # Publish as one parentless commit: history would otherwise keep
           # every pruned package forever and grow the repo without bound.
-          git push --force origin "$(git commit-tree "$(git write-tree)" -m "apt: publish release packages")":refs/heads/gh-pages
+          git push --force origin "$(git commit-tree "$(git write-tree)" -m "apt: publish release packages")":"refs/heads/$PAGES_BRANCH"
 
   # Builds a signed dnf/yum repository on the SAME gh-pages branch (Pages
   # serves it; rpm/ lives next to deb/). Serialized after publish-deb-repo so
@@ -366,11 +375,11 @@ jobs:
 
       - name: Fetch repo branch
         run: |
-          if git ls-remote --heads origin gh-pages | grep -q gh-pages; then
-            git fetch origin gh-pages
-            git worktree add rpm-repo gh-pages
+          if git ls-remote --exit-code --heads origin "$PAGES_BRANCH" >/dev/null; then
+            git fetch origin "$PAGES_BRANCH"
+            git worktree add -B "$PAGES_BRANCH" rpm-repo FETCH_HEAD
           else
-            git worktree add -b gh-pages rpm-repo
+            git worktree add -b "$PAGES_BRANCH" rpm-repo
           fi
 
       # Import the signing key (same key as the apt repo).
@@ -450,7 +459,7 @@ jobs:
           fi
           # Publish as one parentless commit: history would otherwise keep
           # every pruned package forever and grow the repo without bound.
-          git push --force origin "$(git commit-tree "$(git write-tree)" -m "rpm: publish release packages")":refs/heads/gh-pages
+          git push --force origin "$(git commit-tree "$(git write-tree)" -m "rpm: publish release packages")":"refs/heads/$PAGES_BRANCH"
 
   # Builds a signed pacman repository on the SAME gh-pages branch (arch/
   # next to deb/ and rpm/). repo-add ships with pacman, which only exists on
@@ -491,11 +500,11 @@ jobs:
 
       - name: Fetch repo branch
         run: |
-          if git ls-remote --heads origin gh-pages | grep -q gh-pages; then
-            git fetch origin gh-pages
-            git worktree add arch-repo gh-pages
+          if git ls-remote --exit-code --heads origin "$PAGES_BRANCH" >/dev/null; then
+            git fetch origin "$PAGES_BRANCH"
+            git worktree add -B "$PAGES_BRANCH" arch-repo FETCH_HEAD
           else
-            git worktree add -b gh-pages arch-repo
+            git worktree add -b "$PAGES_BRANCH" arch-repo
           fi
 
       # Import the signing key (same key as the apt repo).
@@ -579,4 +588,32 @@ jobs:
           fi
           # Publish as one parentless commit: history would otherwise keep
           # every pruned package forever and grow the repo without bound.
-          git push --force origin "$(git commit-tree "$(git write-tree)" -m "arch: publish release packages")":refs/heads/gh-pages
+          git push --force origin "$(git commit-tree "$(git write-tree)" -m "arch: publish release packages")":"refs/heads/$PAGES_BRANCH"
+
+  # Installs from the branch just published, before Pages serves it (and
+  # for a dry run, which Pages never serves): repo metadata, signatures,
+  # pruning and the install.sh package channels on each distro.
+  verify-repos:
+    needs: publish-arch-repo
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ["ubuntu:24.04", "fedora:latest", "archlinux:latest"]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Serve the published repo branch
+        run: |
+          git fetch origin "$PAGES_BRANCH"
+          git worktree add --detach site FETCH_HEAD
+          python3 -m http.server -d site 8000 >/dev/null 2>&1 &
+
+      - name: Install via install.sh from the served repo
+        run: |
+          docker run --rm --network host -v "$PWD:/src" \
+            -e FERNGEIST_REPO_BASE=http://localhost:8000 \
+            "${{ matrix.image }}" sh /src/packaging/ci/test-linux.sh
