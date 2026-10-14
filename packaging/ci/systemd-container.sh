@@ -15,7 +15,9 @@ esac
 docker build -t "sd-$DISTRO" - <<EOF
 FROM $DISTRO:latest
 RUN $PREP
-RUN useradd -m tester && echo 'tester ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/tester
+# !pam_acct_mgmt: the new account has no password, which Fedora's PAM
+# account check rejects even with NOPASSWD.
+RUN useradd -m tester && printf 'Defaults:tester !pam_acct_mgmt\ntester ALL=(ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/tester
 ENV container=docker
 CMD ["/usr/lib/systemd/systemd"]
 EOF

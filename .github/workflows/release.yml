@@ -504,9 +504,11 @@ jobs:
             for arch in x86_64 aarch64; do
               if ls "arch/$arch"/*.pkg.tar.zst >/dev/null 2>&1; then
                 # Sign each package (pacman SigLevel=Required checks these).
+                # Binary, not armored: repo-add embeds it in the db, and
+                # pacman reports "signature format error" for an armored one.
                 for pkg in "arch/$arch"/*.pkg.tar.zst; do
                   echo "signing $pkg"
-                  gpg --batch --yes --pinentry-mode loopback --passphrase '' -absb -o "$pkg.sig" "$pkg"
+                  gpg --batch --yes --pinentry-mode loopback --passphrase '' --detach-sign -o "$pkg.sig" "$pkg"
                 done
                 # Build the repo db. repo-add creates *.db.tar.gz + a *.db
                 # pointer. On a fresh checkout (no prior .db) that pointer is
@@ -520,7 +522,7 @@ jobs:
                 { [ -L "arch/$arch/ferngeist-gateway.db" ] && cp "arch/$arch/ferngeist-gateway.db.tar.gz" "arch/$arch/ferngeist-gateway.db"; } || true
                 { [ -L "arch/$arch/ferngeist-gateway.files" ] && cp "arch/$arch/ferngeist-gateway.files.tar.gz" "arch/$arch/ferngeist-gateway.files"; } || true
                 # Sign the db (pacman verifies <repo>.db.tar.gz.sig).
-                gpg --batch --yes --pinentry-mode loopback --passphrase '' -absb -o "arch/$arch/ferngeist-gateway.db.tar.gz.sig" "arch/$arch/ferngeist-gateway.db.tar.gz"
+                gpg --batch --yes --pinentry-mode loopback --passphrase '' --detach-sign -o "arch/$arch/ferngeist-gateway.db.tar.gz.sig" "arch/$arch/ferngeist-gateway.db.tar.gz"
                 # pacman fetches <repo>.db.sig; only a legacy committed symlink
                 # provides it today, so a fresh gh-pages would break SigLevel.
                 ln -sf ferngeist-gateway.db.tar.gz.sig "arch/$arch/ferngeist-gateway.db.sig"

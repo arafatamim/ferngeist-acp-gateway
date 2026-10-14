@@ -29,7 +29,15 @@ elif have pacman; then
 fi
 have curl || { have dnf && dnf install -y -q curl; }
 
-sh "$SRC/packaging/install.sh" --yes
+LOG="$(mktemp)"
+sh "$SRC/packaging/install.sh" --yes >"$LOG" 2>&1 || { cat "$LOG"; die "install.sh failed"; }
+cat "$LOG"
+# pacman still installs when it can't parse a db-embedded (armored) signature.
+# Checked only for a freshly published repo (verify-repos); the live one is
+# fixed by the next release.
+if [ -n "${FERNGEIST_REPO_BASE:-}" ] && grep -q 'signature format error' "$LOG"; then
+    die "pacman could not parse a repo signature"
+fi
 [ -x "$BIN" ] || die "package channel did not install $BIN"
 BEFORE="$(version)"
 [ -n "$BEFORE" ] || die "$BIN --version printed no VERSION"
