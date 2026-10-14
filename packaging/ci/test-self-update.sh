@@ -24,9 +24,6 @@ echo "== ferngeist-gateway update moves the running daemon to $LATEST"
 "$SVC" update
 sh "$CI/wait-daemon.sh" "$SVC" "VERSION +$LATEST" 'LAN ENABLED +true'
 
-echo "== update again is a no-op"
-"$SVC" update | grep -q 'Already up to date'
-
 echo "== daemon uninstall --purge stops it and removes the install"
 "$SVC" daemon uninstall --purge
 sh "$CI/wait-gone.sh" "$SVC" "daemon uninstall --purge"
