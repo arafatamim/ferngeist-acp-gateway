@@ -358,14 +358,19 @@ func runDaemon(enableLAN bool, listenAddr string, publicBaseURL string, remote b
 
 	ctx, stop := waitForSignal()
 	defer stop()
+	ctx, replaced := watchBinary(ctx, daemonBinaryPath(), 10*time.Second)
 
-	return daemon.Run(ctx, api.BuildInfo{
+	err := daemon.Run(ctx, api.BuildInfo{
 		Version:       buildVersion,
 		Commit:        buildCommit,
 		BuiltAt:       buildTime,
 		GoVersion:     goruntime.Version(),
 		UpdateChannel: updateChannel,
 	})
+	if err == nil && replaced() {
+		return &alreadyReported{code: exitBinaryReplaced}
+	}
+	return err
 }
 
 func applyDaemonRunOverrides(enableLAN bool, listenAddr string, publicBaseURL string, remote bool) {

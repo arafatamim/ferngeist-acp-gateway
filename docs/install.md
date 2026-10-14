@@ -89,10 +89,10 @@ brew install arafatamim/tap/ferngeist-gateway
 ```
 
 The installer registers the daemon as a per-user service (a LaunchAgent on
-macOS, a systemd user unit on Linuxbrew) with LAN enabled. Homebrew sandboxes
-formula install hooks, so after a manual `brew install` or a
-`brew upgrade ferngeist-gateway`, (re)start it on the installed version with
-`ferngeist-gateway daemon install --keep-settings --lan`.
+macOS, a systemd user unit on Linuxbrew) with LAN enabled. After a manual
+`brew install`, start it with `ferngeist-gateway daemon install --keep-settings --lan`.
+`brew upgrade ferngeist-gateway` restarts it on the new version automatically;
+if you upgraded from 1.0.0 or earlier, run that `daemon install` command once.
 
 Homebrew installs never trigger Gatekeeper, so no warnings appear. To make the
 gateway reachable only on localhost, re-run `ferngeist-gateway daemon install`.
@@ -231,13 +231,17 @@ Notes:
 
 ## Updating
 
-- **Homebrew:** `brew upgrade ferngeist-gateway && ferngeist-gateway daemon install --keep-settings --lan`
+- **Homebrew:** `brew upgrade ferngeist-gateway`
 - **apt:** `sudo apt update && sudo apt upgrade ferngeist-gateway`
 - **dnf/yum:** `sudo dnf upgrade ferngeist-gateway` (repo installs only)
 - **pacman:** `sudo pacman -Syu` (repo installs only)
 - **Manual installs:** `ferngeist-gateway update` (verifies against the release
   SHA256SUMS before swapping the binary). Package-manager installs refuse to
   self-update; use the package manager instead.
+
+Package-manager installs run the packaged binary directly, so the daemon
+restarts on the new version within seconds of any upgrade, including
+unattended ones.
 
 The daemon checks GitHub Releases periodically and pushes an update-available
 notification to paired devices. Applying is always manual.
