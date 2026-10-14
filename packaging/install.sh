@@ -392,8 +392,8 @@ if [ "$DECLINED" = 1 ]; then
     install_via_binary
 elif [ "$CHANNEL" != binary ]; then
     # Register here too: package scripts only run when the package changes
-    # (a re-run after `daemon uninstall` would leave no daemon), macOS brew
-    # sandboxes post_install, and --localhost must drop --keep-settings.
+    # (a re-run after `daemon uninstall` would leave no daemon), brew has no
+    # post_install (it is sandboxed), and --localhost must drop --keep-settings.
     if [ "$CHANNEL" = brew ]; then GW="$(brew --prefix)/bin/ferngeist-gateway"; else GW=/usr/bin/ferngeist-gateway; fi
     if [ -n "$DAEMON_FLAGS" ]; then FLAGS="--keep-settings $DAEMON_FLAGS"; else FLAGS=""; fi
     if [ "$(id -u)" = 0 ]; then
@@ -412,6 +412,6 @@ case "$CHANNEL" in
     apt) say "Update: sudo apt update && sudo apt upgrade ferngeist-gateway" ;;
     pacman) say "Update: sudo pacman -Syu" ;;
     rpm) say "Update: sudo dnf upgrade ferngeist-gateway (or yum)" ;;
-    brew) say "Update: brew upgrade ferngeist-gateway" ;;
+    brew) say "Update: brew upgrade ferngeist-gateway && ferngeist-gateway daemon install --keep-settings --lan" ;;
     binary) say "Update: ferngeist-gateway update (package-manager builds refuse self-update)" ;;
 esac
