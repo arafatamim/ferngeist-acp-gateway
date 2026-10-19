@@ -135,6 +135,10 @@ archives:
     files:
       - README.md
       - LICENSE
+      - src: packaging/ferngeist-gateway.1
+        dst: share/man/man1/ferngeist-gateway.1
+      - src: packaging/ferngeist-gateway-env.1
+        dst: share/man/man1/ferngeist-gateway-env.1
 
   # Homebrew/Linuxbrew archive set: same per-OS/arch layout as default, but
   # built from gateway-brew (updateChannel=brew) so brew-installed binaries
@@ -149,6 +153,10 @@ archives:
     files:
       - README.md
       - LICENSE
+      - src: packaging/ferngeist-gateway.1
+        dst: share/man/man1/ferngeist-gateway.1
+      - src: packaging/ferngeist-gateway-env.1
+        dst: share/man/man1/ferngeist-gateway-env.1
 
 checksum:
   name_template: 'SHA256SUMS'
@@ -222,6 +230,10 @@ nfpms:
     contents:
       - src: ./README.md
         dst: /usr/share/doc/ferngeist-gateway/README.md
+      - src: ./packaging/ferngeist-gateway.1
+        dst: /usr/share/man/man1/ferngeist-gateway.1
+      - src: ./packaging/ferngeist-gateway-env.1
+        dst: /usr/share/man/man1/ferngeist-gateway-env.1
     scripts:
       postinstall: ./packaging/postinstall.sh
       preremove: ./packaging/preremove.sh
@@ -245,6 +257,10 @@ nfpms:
     contents:
       - src: ./README.md
         dst: /usr/share/doc/ferngeist-gateway/README.md
+      - src: ./packaging/ferngeist-gateway.1
+        dst: /usr/share/man/man1/ferngeist-gateway.1
+      - src: ./packaging/ferngeist-gateway-env.1
+        dst: /usr/share/man/man1/ferngeist-gateway-env.1
     scripts:
       postinstall: ./packaging/postinstall.sh
       preremove: ./packaging/preremove.sh

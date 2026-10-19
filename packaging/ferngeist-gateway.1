@@ -1,0 +1,351 @@
+.\" Man page for ferngeist-gateway.
+.\" Keep in sync with cmd/ferngeist/main.go.
+.TH FERNGEIST-GATEWAY 1 "2026-10-20" "ferngeist-gateway" "User Commands"
+.SH NAME
+ferngeist\-gateway \- manage the Ferngeist gateway daemon
+.SH SYNOPSIS
+.B ferngeist\-gateway
+.RI [ global\-options ]
+.I command
+.RI [ command\-options ]
+.SH DESCRIPTION
+.B Ferngeist Gateway
+is a self\-hosted backend service for ACP\-compatible coding agents. It runs a
+local daemon that discovers and launches agents, exposes an HTTP and WebSocket
+API to paired clients, and can provision remote access.
+.PP
+This manual describes the command\-line interface. The daemon is normally
+installed as a per\-user background service with
+.B daemon install
+and then controlled with the other
+.B daemon
+subcommands.
+.PP
+Commands that read or change daemon state
+.RB ( pair ,
+.BR devices ,
+.BR agents )
+talk to the running daemon over its local admin API. When the daemon does not
+answer, they exit with status 2 so scripts can tell
+\(lqstart the daemon\(rq
+apart from an ordinary command failure.
+.SH OPTIONS
+.SS Global options
+.TP
+.BR \-\-version ", " \-v
+Print version information and exit. The output lists the version, commit,
+build time, and Go version.
+.TP
+.BR \-\-help ", " \-h
+Print help for the command and exit.
+.SH COMMANDS
+.SS update
+.B ferngeist\-gateway update
+.PP
+Check for and install the latest stable gateway release. The downloaded
+binary is verified against the release's
+.B SHA256SUMS
+before it replaces the running one.
+.PP
+Only self\-managed installs self\-update. Builds installed from Homebrew,
+apt, dnf/yum, pacman, or winget refuse and must be updated with the package
+manager instead.
+.SS daemon
+.B ferngeist\-gateway daemon
+.I command
+.PP
+Run and manage the gateway daemon. With no subcommand, the list of daemon
+subcommands is printed.
+.SS "daemon run"
+.B ferngeist\-gateway daemon run
+.RI [ options ]
+.PP
+Run the gateway daemon in the foreground. The process serves the public API
+and the local admin API until it receives an interrupt signal or its binary
+is replaced during an upgrade.
+.TP
+.B \-\-lan
+Expose the gateway on the local network. This enables LAN discovery and
+access and, unless a listen address is already configured, listens on
+.IR 0.0.0.0:5788 .
+.TP
+.B \-\-remote
+Provision remote access over Tailscale, using the Tailscale CLI when it is
+available and the embedded node otherwise.
+.TP
+.BI \-\-listen\-addr " address"
+Override the public API listen address for this run.
+.TP
+.BI \-\-public\-base\-url " url"
+Advertise a public gateway URL for pairing.
+.SS "daemon install"
+.B ferngeist\-gateway daemon install
+.RI [ options ]
+.PP
+Install and start the daemon as a per\-user service. On Linux this writes a
+systemd user unit, on macOS a LaunchAgent, and on Windows a per\-user scheduled
+task. No administrator privileges are required.
+.TP
+.B \-\-lan
+Listen on
+.I 0.0.0.0
+and enable LAN access. The default is localhost\-only.
+.TP
+.B \-\-remote
+Provision remote access over Tailscale as with
+.BR "daemon run \-\-remote" .
+.TP
+.BI \-\-host " host"
+Host interface for the daemon listen address. Optional; defaults to
+.IR 127.0.0.1 .
+.TP
+.BI \-\-port " port"
+Port for the daemon listen address. Optional; defaults to 5788.
+.TP
+.BI \-\-public\-url " url"
+Public base URL announced to clients. Optional.
+.TP
+.B \-\-keep\-settings
+Reuse the settings of the existing install. The other flags then only apply
+to a first install. Package upgrades use this.
+.SS "daemon uninstall"
+.B ferngeist\-gateway daemon uninstall
+.RI [ options ]
+.PP
+Stop the daemon and remove its background\-service registration. Installed
+files, configuration, and data are left in place unless
+.B \-\-purge
+is given.
+.TP
+.B \-\-purge
+Also remove daemon data, logs, and managed binaries.
+.SS "daemon start"
+.B ferngeist\-gateway daemon start
+.PP
+Start the installed daemon user service.
+.SS "daemon stop"
+.B ferngeist\-gateway daemon stop
+.PP
+Stop the installed daemon user service.
+.SS "daemon restart"
+.B ferngeist\-gateway daemon restart
+.PP
+Restart the installed daemon user service.
+.SS "daemon status"
+.B ferngeist\-gateway daemon status
+.PP
+Show the daemon service state and whether its API is reachable.
+.SS pair
+.B ferngeist\-gateway pair
+.PP
+Start an interactive pairing flow. The command prints the pairing code, its
+expiry, a scannable QR code, the pairing payload, and the target URL, then
+waits for Ferngeist Android to complete the pairing. Press Ctrl\-C to cancel.
+.PP
+A running daemon is required.
+.SS devices
+.B ferngeist\-gateway devices
+.I command
+.PP
+Manage paired devices. A running daemon is required.
+.SS "devices list"
+.B ferngeist\-gateway devices list
+.PP
+List paired devices with their device ID, device name, and credential
+expiry time.
+.SS "devices revoke"
+.B ferngeist\-gateway devices revoke
+.I device\-id
+.PP
+Revoke one paired device and invalidate its credential immediately.
+.SS agents
+.B ferngeist\-gateway agents
+.I command
+.PP
+Manage custom ACP agents. Custom agents are registered with the daemon and
+then list and start like agents from the built\-in catalog. A running daemon
+is required.
+.SS "agents add"
+.B ferngeist\-gateway agents add
+.BI \-\-name " name"
+.BI \-\-command " command"
+.RB [ \-\-args " arg " ]...
+.RB [ \-\-hint " text " ]
+.PP
+Register a custom agent. The display name is required; the agent ID is
+derived from it as
+.IR custom\-<slug> .
+.TP
+.BI \-\-name " name"
+Display name for the agent.
+.TP
+.BI \-\-command " command"
+Bare PATH executable name or absolute path to the agent binary.
+.TP
+.BI \-\-args " arg"
+One argument for the agent command. Repeat the flag for multiple arguments.
+.TP
+.BI \-\-hint " text"
+Optional note shown to clients.
+.SS "agents list"
+.B ferngeist\-gateway agents list
+.PP
+List all agents, including embedded, registry, and custom agents.
+.SS "agents update"
+.B ferngeist\-gateway agents update
+.I agent\-id
+.RB [ \-\-name " name " ]
+.RB [ \-\-command " command " ]
+.RB [ \-\-args " arg " ]...
+.RB [ \-\-clear\-args ]
+.RB [ \-\-hint " text " ]
+.PP
+Edit a custom agent. Only the supplied fields change; the agent ID cannot
+change.
+.TP
+.BI \-\-name " name"
+New display name.
+.TP
+.BI \-\-command " command"
+New bare PATH executable name or absolute path.
+.TP
+.BI \-\-args " arg"
+Replacement argument. Repeat the flag for multiple arguments. Cannot be
+combined with
+.BR \-\-clear\-args .
+.TP
+.B \-\-clear\-args
+Clear the argument list.
+.TP
+.BI \-\-hint " text"
+New hint. An empty string clears it.
+.SS "agents rm"
+.B ferngeist\-gateway agents rm
+.I agent\-id
+.PP
+Remove a custom agent. The ID is the
+.I custom\-<slug>
+identifier shown by
+.BR "agents list" .
+.SH ENVIRONMENT
+The daemon is configured through environment variables. The most commonly
+used are:
+.TP
+.B FERNGEIST_GATEWAY_LISTEN_ADDR
+Public API listen address. Defaults to
+.IR 127.0.0.1:5788 .
+.TP
+.B FERNGEIST_GATEWAY_ADMIN_ADDR
+Local admin API listen address. Defaults to
+.IR 127.0.0.1:5789 .
+.TP
+.B FERNGEIST_GATEWAY_ENABLE_LAN
+Enable LAN discovery and access. Set to
+.I 1
+to enable.
+.TP
+.B FERNGEIST_GATEWAY_PUBLIC_BASE_URL
+Public URL clients use to reach the gateway.
+.TP
+.B FERNGEIST_GATEWAY_STATE_DB
+SQLite state database path. Platform\-dependent.
+.TP
+.B FERNGEIST_GATEWAY_LOG_DIR
+Log directory. Platform\-dependent.
+.TP
+.B FERNGEIST_GATEWAY_LOG_LEVEL
+Log level:
+.IR debug ,
+.IR info ,
+.IR warn ,
+or
+.IR error .
+Defaults to
+.IR info .
+.TP
+.B FERNGEIST_GATEWAY_JS_RUNTIME
+Runtime used to launch npm\-distributed registry agents:
+.IR auto
+(bun when it is on
+.IR PATH ,
+else node),
+.IR bun ,
+.IR node ,
+or
+.IR npm .
+Defaults to
+.IR auto .
+.TP
+.B FERNGEIST_GATEWAY_TAILSCALE_MODE
+Remote access provisioning:
+.IR off ,
+.IR auto ,
+.IR cli ,
+or
+.IR tsnet .
+Defaults to
+.IR off .
+.TP
+.B FERNGEIST_GATEWAY_UPDATE_CHECK_ENABLED
+Check GitHub Releases for a newer stable version. Set to
+.I 0
+or
+.I false
+to disable.
+.PP
+The complete list, with defaults and platform notes, is documented in
+.BR ferngeist\-gateway\-env (1).
+The project repository also carries
+.I docs/configuration.md
+with additional context.
+.SH FILES
+.TP
+.I $FERNGEIST_GATEWAY_STATE_DB
+Paired devices, settings, and runtime state. The default path is
+platform\-dependent.
+.TP
+.I $FERNGEIST_GATEWAY_LOG_DIR
+Daemon and agent logs. The default path is platform\-dependent.
+.TP
+.I $FERNGEIST_GATEWAY_MANAGED_BIN_DIR
+Installed agent binaries and npm agent installs. The default path is
+platform\-dependent.
+.TP
+.I /usr/share/doc/ferngeist\-gateway/README.md
+Package documentation.
+.SH "EXIT STATUS"
+.TP
+.B 0
+Success.
+.TP
+.B 1
+The command failed. The reason is printed to standard error.
+.TP
+.B 2
+The daemon did not answer. Start it with
+.B ferngeist\-gateway daemon start
+or
+.BR "daemon install" .
+.TP
+.B 75
+The daemon stopped because its binary was replaced during an upgrade. This is
+the
+.B EX_TEMPFAIL
+status; restart the daemon.
+.SH NOTES
+The gateway runs as the same operating\-system user as the daemon. Pairing a
+device therefore grants that device the same access to the project directories
+the agents can read and modify.
+.SH BUGS
+Report bugs at
+.IR https://github.com/arafatamim/ferngeist\-acp\-gateway/issues .
+.SH "SEE ALSO"
+.BR ferngeist\-gateway\-env (1),
+and the project documentation in the source repository:
+.IR docs/api.md ,
+.IR docs/configuration.md ,
+.IR docs/install.md ,
+and
+.IR docs/usage.md .
+.PP
+.IR https://github.com/arafatamim/ferngeist\-acp\-gateway .

@@ -1,0 +1,264 @@
+.\" Man page for the Ferngeist gateway environment variables.
+.\" Keep in sync with internal/config/config.go and docs/configuration.md.
+.TH FERNGEIST-GATEWAY-ENV 1 "2026-10-20" "ferngeist-gateway" "User Commands"
+.SH NAME
+ferngeist\-gateway\-env \- environment variables for the Ferngeist gateway
+.SH SYNOPSIS
+Environment variables read by
+.BR ferngeist\-gateway (1).
+.SH DESCRIPTION
+.B Ferngeist Gateway
+is configured through environment variables and persisted state. This page
+documents every variable the daemon reads.
+.PP
+Explicit environment variables take precedence over persisted settings. The
+persisted settings are the gateway name, public base URL, LAN flag, and
+registry URL; they fill in a value only when the corresponding variable is not
+set.
+.SS Value parsing
+.TP
+.B Booleans
+Unless noted otherwise, a boolean is enabled by
+.IR 1 ,
+.IR true ,
+or
+.I yes
+(case\-insensitive) and disabled by any other value.
+.TP
+.B Integers
+A positive integer. An unset, unparsable, zero, or negative value falls back
+to the default.
+.TP
+.B Durations
+A positive integer number of seconds. An unset, unparsable, zero, or negative
+value falls back to the default, except for
+.BR FERNGEIST_GATEWAY_CREDENTIAL_GRACE_SECONDS ,
+where
+.I 0
+is meaningful and disables the grace window.
+.TP
+.B Paths
+Relative paths resolve from the daemon's working directory. For a service
+install, that is the install's data directory.
+.SH "NETWORK AND IDENTITY"
+.TP
+.B FERNGEIST_GATEWAY_LISTEN_ADDR
+Public API listen address.
+Default:
+.IR 127.0.0.1:5788 .
+.TP
+.B FERNGEIST_GATEWAY_ADMIN_ADDR
+Local admin API listen address. The admin API should stay bound to localhost.
+Default:
+.IR 127.0.0.1:5789 .
+.TP
+.B FERNGEIST_GATEWAY_ENABLE_LAN
+Enable LAN discovery and access. Enabled only when set to
+.IR 1 .
+Default: disabled.
+.TP
+.B FERNGEIST_GATEWAY_NAME
+Gateway name advertised to clients. Default: the hostname, or
+.I ferngeist\-gateway
+when the hostname cannot be read.
+.TP
+.B FERNGEIST_GATEWAY_PUBLIC_BASE_URL
+Public URL clients use to reach the gateway. Setting it puts the gateway in
+public mode, which turns on the strict security defaults below. Default:
+unset.
+.SH "STORAGE AND LOGGING"
+.TP
+.B FERNGEIST_GATEWAY_STATE_DB
+SQLite state database path. Default:
+.I ferngeist\-gateway.db
+in the daemon's working directory.
+.TP
+.B FERNGEIST_GATEWAY_LOG_DIR
+Log directory. Default:
+.I logs
+in the daemon's working directory.
+.TP
+.B FERNGEIST_GATEWAY_LOG_LEVEL
+Log level:
+.IR debug ,
+.IR info ,
+.IR warn ,
+or
+.IR error .
+Default:
+.IR info .
+.TP
+.B FERNGEIST_GATEWAY_LOG_MAX_BYTES
+Maximum size of a log file before rotation, in bytes. Default: 1048576
+(1 MiB).
+.TP
+.B FERNGEIST_GATEWAY_LOG_MAX_BACKUPS
+Number of rotated log files to keep. Default: 3.
+.TP
+.B FERNGEIST_GATEWAY_FRAME_LOG
+Append every client\-to\-agent and agent\-to\-client ACP JSON\-RPC frame to
+.IR <log dir>/<agent>\-agent.log
+as newline\-delimited JSON, rotated with
+.B FERNGEIST_GATEWAY_LOG_MAX_BYTES
+and
+.BR FERNGEIST_GATEWAY_LOG_MAX_BACKUPS .
+This is a debugging aid: frames can contain project code, tool output, and
+secrets. Default: disabled.
+.SH AGENTS
+.TP
+.B FERNGEIST_GATEWAY_REGISTRY_URL
+ACP registry URL. Default: the ACP registry at
+.IR https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json .
+.TP
+.B FERNGEIST_GATEWAY_MANAGED_BIN_DIR
+Directory for installed agent binaries and npm agent installs. Default is
+platform\-dependent:
+.RS
+.IP \(bu 2
+Linux:
+.IR ~/.local/share/ferngeist\-gateway/bin
+.IP \(bu 2
+macOS:
+.IR "~/Library/Application Support/Ferngeist Gateway/bin"
+.IP \(bu 2
+Windows:
+.IR "%LocalAppData%\(rsFerngeistGateway\(rsbin"
+.RE
+.TP
+.B FERNGEIST_GATEWAY_JS_RUNTIME
+Runtime used to launch npm\-distributed registry agents:
+.IR auto
+(bun when it is on
+.IR PATH ,
+else node),
+.IR bun ,
+.IR node ,
+or
+.IR npm
+(launch through
+.IR "npm exec" ).
+Default:
+.IR auto .
+.SH "REMOTE ACCESS"
+.TP
+.B FERNGEIST_GATEWAY_TAILSCALE_MODE
+Automatic remote\-access provisioning:
+.IR off ,
+.IR auto
+(the Tailscale CLI when available, otherwise the embedded node),
+.IR cli ,
+or
+.IR tsnet .
+Any mode other than
+.I off
+is treated as intended public exposure, so the strict security defaults apply
+from the first boot. Default:
+.IR off .
+.TP
+.B FERNGEIST_GATEWAY_TAILSCALE_AUTH_KEY
+Pre\-authentication key for the embedded Tailscale node. Setting it skips the
+interactive login. Default: unset.
+.TP
+.B FERNGEIST_GATEWAY_TAILSCALE_HOSTNAME
+Tailnet device name for the embedded node. Default:
+.IR ferngeist\-gateway .
+.TP
+.B FERNGEIST_GATEWAY_TAILSCALE_PRIVATE
+Use
+.I serve
+or
+.I ListenTLS
+so the gateway is reachable only from the tailnet, instead of public Funnel.
+Default: disabled.
+.SH "PAIRING AND CREDENTIALS"
+.TP
+.B FERNGEIST_GATEWAY_REQUIRE_PROOF_OF_POSSESSION
+Require proof\-of\-possession for authenticated requests. Default: enabled in
+public mode (a public base URL or any Tailscale mode other than
+.IR off ),
+disabled otherwise. An explicit value always wins.
+.TP
+.B FERNGEIST_GATEWAY_ALLOW_LEGACY_BEARER_CREDENTIALS
+Allow bearer\-only credentials. Default: disabled in public mode, enabled
+otherwise. An explicit value always wins.
+.TP
+.B FERNGEIST_GATEWAY_CREDENTIAL_TTL_SECONDS
+Lifetime of a paired device token. Default: 604800 (7 days).
+.TP
+.B FERNGEIST_GATEWAY_CREDENTIAL_GRACE_SECONDS
+How long an expired credential stays recoverable through the client's
+credential refresh call. Set to
+.I 0
+to disable the grace window and hard\-delete on expiry. Default: 7776000
+(90 days).
+.TP
+.B FERNGEIST_GATEWAY_PAIRING_ARM_TTL_SECONDS
+How long a locally approved pairing stays valid. Default: 120 (2 minutes).
+.TP
+.B FERNGEIST_GATEWAY_PAIRING_MAX_ATTEMPTS
+Maximum failed pairing attempts before lockout. Default: 5.
+.TP
+.B FERNGEIST_GATEWAY_PAIRING_LOCKOUT_SECONDS
+Lockout duration after too many failed attempts. Default: 120 (2 minutes).
+.TP
+.B FERNGEIST_GATEWAY_PAIRING_START_REFILL_SECONDS
+Rate\-limit refill interval for pairing start. Default: 5.
+.TP
+.B FERNGEIST_GATEWAY_PAIRING_COMPLETE_REFILL_SECONDS
+Rate\-limit refill interval for pairing complete. Default: 2.
+.TP
+.B FERNGEIST_GATEWAY_PAIRING_BURST_PER_IP
+Per\-IP burst limit for pairing requests. Default: 5.
+.TP
+.B FERNGEIST_GATEWAY_PAIRING_BURST_GLOBAL
+Global burst limit for pairing requests. Default: 30.
+.SH SESSIONS
+.TP
+.B FERNGEIST_GATEWAY_SESSION_MAX_DISCONNECTED_SECONDS
+How long a disconnected session is kept before the reaper closes it.
+Default: 900 (15 minutes).
+.TP
+.B FERNGEIST_GATEWAY_MAX_SESSIONS_PER_DEVICE
+Maximum concurrent sessions a single device may hold. Default: 5.
+.TP
+.B FERNGEIST_GATEWAY_PROGRESS_INTERVAL_SECONDS
+Minimum time between live progress pushes while an agent is mid\-turn.
+Default: 15.
+.SH DIAGNOSTICS
+.TP
+.B FERNGEIST_GATEWAY_ALLOW_REMOTE_DIAGNOSTICS_EXPORT
+Allow the remote diagnostics export endpoint. Default: disabled.
+.TP
+.B FERNGEIST_GATEWAY_ALLOW_REMOTE_RUNTIME_RESTART_ENV
+Allow restarting a runtime with a client\-supplied environment. Default:
+disabled.
+.SH UPDATES
+.TP
+.B FERNGEIST_GATEWAY_UPDATE_CHECK_ENABLED
+Check GitHub Releases for a newer stable version at startup and on an
+interval, and push an update\-available notification to paired devices. Only
+.I 0
+or
+.I false
+disables it. Default: enabled. Package\-manager builds are expected to disable
+it in their service environment.
+.TP
+.B FERNGEIST_GATEWAY_UPDATE_CHECK_INTERVAL_SECONDS
+Seconds between update checks. Default: 86400 (24 hours).
+.SH NOTES
+Environment variables are read at daemon startup. Changing one requires
+restarting the daemon, for example with
+.BR "ferngeist\-gateway daemon restart" .
+.PP
+For a Linux service install, put custom variables in
+.I config/daemon.override.env
+next to
+.IR config/daemon.env :
+the unit loads the override file last, and it is never rewritten by
+.BR "daemon install" .
+.SH "SEE ALSO"
+.BR ferngeist\-gateway (1),
+.IR docs/configuration.md ,
+.IR docs/security.md .
+.PP
+.IR https://github.com/arafatamim/ferngeist\-acp\-gateway .
