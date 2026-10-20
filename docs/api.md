@@ -716,10 +716,13 @@ clean. Worktrees outlive the chats that use them: they are removed only on an ex
 - `GET /v1/worktrees`
   - Requires `read` scope.
   - Lists managed worktrees (the create response shape) plus `ahead` (commits
-    on the branch since its merge-base with
-    the base ref, falling back to `baseCommit`) and `dirty` (uncommitted changes).
-    Worktrees whose directory was deleted outside the gateway are dropped from
-    the list.
+    on the branch since its merge-base with the base ref, falling back to
+    `baseCommit`), `behind` (commits the base ref has gained since the fork,
+    so a stale worktree is easy to spot; omitted when the worktree has no base
+    ref or it no longer resolves) and `dirty` (uncommitted changes).
+  - Worktrees whose directory was deleted outside the gateway are left out of
+    the list. The gateway forgets them (and prunes git's bookkeeping) the next
+    time a worktree is created or the server starts, not on this read.
 
 - `DELETE /v1/worktrees/{worktreeId}?force=true`
   - Requires `control` scope.

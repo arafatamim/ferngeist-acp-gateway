@@ -21,10 +21,12 @@ type worktreeResponse struct {
 	Branch     string    `json:"branch"`
 	BaseCommit string    `json:"baseCommit"`
 	CreatedAt  time.Time `json:"createdAt"`
-	// Ahead is the number of commits on the branch since BaseCommit; Dirty
-	// reports uncommitted changes. Both are filled only by the list endpoint.
-	Ahead *int  `json:"ahead,omitempty"`
-	Dirty *bool `json:"dirty,omitempty"`
+	// Ahead is the number of commits on the branch since its merge-base with the
+	// base ref; Behind is how many commits the base has gained since; Dirty
+	// reports uncommitted changes. Filled only by the list and finish endpoints.
+	Ahead  *int  `json:"ahead,omitempty"`
+	Behind *int  `json:"behind,omitempty"`
+	Dirty  *bool `json:"dirty,omitempty"`
 }
 
 type worktreeCreateRequest struct {
@@ -40,6 +42,7 @@ func toWorktreeResponse(r storage.WorktreeRecord) worktreeResponse {
 func toWorktreeStatusResponse(status workspace.WorktreeStatus) worktreeResponse {
 	resp := toWorktreeResponse(status.WorktreeRecord)
 	resp.Ahead = status.Ahead
+	resp.Behind = status.Behind
 	resp.Dirty = status.Dirty
 	return resp
 }
@@ -67,9 +70,9 @@ func (s *Server) handleWorktreeCreate(w http.ResponseWriter, r *http.Request) {
 }
 
 // GET /v1/worktrees
-// Lists managed worktrees with their ahead/dirty state. Records whose
-// directory was deleted out from under the gateway are dropped (and git's
-// bookkeeping pruned) instead of being listed.
+// Lists managed worktrees with their ahead/behind/dirty state. Worktrees whose
+// directory was deleted out from under the gateway are left out; they are
+// forgotten when a worktree is next created or the server restarts.
 func (s *Server) handleWorktreeList(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireGatewayScope(w, r, pairing.ScopeRead); !ok {
 		return

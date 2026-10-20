@@ -58,11 +58,13 @@ type CreateRequest struct {
 	Branch string
 }
 
-// WorktreeStatus is a managed worktree plus its ahead/dirty state for listing.
+// WorktreeStatus is a managed worktree plus its ahead/behind/dirty state for
+// listing.
 type WorktreeStatus struct {
 	storage.WorktreeRecord
-	Ahead *int
-	Dirty *bool
+	Ahead  *int
+	Behind *int
+	Dirty  *bool
 }
 
 // worktreeDirName turns a branch name into a single safe folder name
@@ -121,6 +123,7 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (storage.Worktr
 	if !filepath.IsAbs(repo) {
 		return storage.WorktreeRecord{}, errStatus(400, "repo must be an absolute path")
 	}
+	s.Prune(ctx)
 	top, err := RunGit(ctx, repo, "rev-parse", "--show-toplevel")
 	if err != nil {
 		return storage.WorktreeRecord{}, errStatus(422, err.Error())
@@ -182,35 +185,86 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (storage.Worktr
 	return rec, nil
 }
 
-// List returns managed worktrees with their ahead/dirty state. Records whose
-// directory was deleted out from under the gateway are dropped (and git's
-// bookkeeping pruned) instead of being listed.
+// listConcurrency bounds how many worktrees List inspects at once, so a long
+// list does not spawn a git process per worktree all at the same time.
+const listConcurrency = 8
+
+// List returns managed worktrees with their ahead/behind/dirty state, checked
+// concurrently. Records whose directory was deleted out from under the gateway
+// are left out; Prune forgets them.
 func (s *Service) List(ctx context.Context) ([]WorktreeStatus, error) {
 	records, err := s.store().ListWorktrees(ctx)
 	if err != nil {
 		s.logger.Error("list worktrees", "error", err)
 		return nil, errStatus(500, "failed to list worktrees")
 	}
-	out := make([]WorktreeStatus, 0, len(records))
+	present := records[:0:0]
 	for _, rec := range records {
-		if _, err := os.Stat(rec.Path); errors.Is(err, os.ErrNotExist) {
-			_, _ = RunGit(ctx, rec.Repo, "worktree", "prune")
-			_ = s.store().DeleteWorktree(ctx, rec.ID)
-			continue
+		if !folderMissing(rec.Path) {
+			present = append(present, rec)
 		}
-		status := s.statusOf(ctx, rec)
-		out = append(out, status)
 	}
+	out := make([]WorktreeStatus, len(present))
+	slots := make(chan struct{}, listConcurrency)
+	var wg sync.WaitGroup
+	for i, rec := range present {
+		wg.Add(1)
+		slots <- struct{}{}
+		go func() {
+			defer wg.Done()
+			defer func() { <-slots }()
+			out[i] = s.statusOf(ctx, rec)
+		}()
+	}
+	wg.Wait()
 	return out, nil
 }
 
-// statusOf fills a record's ahead and dirty state; either stays nil when git
-// cannot answer.
+// folderMissing reports that path was deleted (as opposed to merely unreadable).
+func folderMissing(path string) bool {
+	_, err := os.Stat(path)
+	return errors.Is(err, os.ErrNotExist)
+}
+
+// Prune forgets managed worktrees whose directory was deleted outside the
+// gateway and prunes git's bookkeeping for them. It runs when a worktree is
+// created and when the server starts, never on a read.
+func (s *Service) Prune(ctx context.Context) {
+	store := s.store()
+	if store == nil {
+		return
+	}
+	records, err := store.ListWorktrees(ctx)
+	if err != nil {
+		s.logger.Error("prune worktrees", "error", err)
+		return
+	}
+	for _, rec := range records {
+		if !folderMissing(rec.Path) {
+			continue
+		}
+		_, _ = RunGit(ctx, rec.Repo, "worktree", "prune")
+		if err := store.DeleteWorktree(ctx, rec.ID); err != nil && !errors.Is(err, storage.ErrNotFound) {
+			s.logger.Error("prune worktree record", "id", rec.ID, "error", err)
+		}
+	}
+}
+
+// statusOf fills a record's ahead, behind and dirty state; each stays nil when
+// git cannot answer. Behind is how far the base has moved since the fork, and
+// stays nil without a base ref.
 func (s *Service) statusOf(ctx context.Context, rec storage.WorktreeRecord) WorktreeStatus {
 	status := WorktreeStatus{WorktreeRecord: rec}
 	if n, err := RunGit(ctx, rec.Path, "rev-list", "--count", s.baseOf(ctx, rec)+"..HEAD"); err == nil {
 		if ahead, err := strconv.Atoi(strings.TrimSpace(n)); err == nil {
 			status.Ahead = &ahead
+		}
+	}
+	if rec.BaseRef != "" {
+		if n, err := RunGit(ctx, rec.Path, "rev-list", "--count", "--end-of-options", "HEAD.."+rec.BaseRef); err == nil {
+			if behind, err := strconv.Atoi(strings.TrimSpace(n)); err == nil {
+				status.Behind = &behind
+			}
 		}
 	}
 	if st, err := RunGit(ctx, rec.Path, "status", "--porcelain"); err == nil {

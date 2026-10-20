@@ -361,6 +361,7 @@ func normalizeSecurityConfig(cfg config.Config) config.Config {
 
 // ListenAndServe starts both the public and admin HTTP servers.
 func (s *Server) ListenAndServe() error {
+	s.workspaceSvc.Prune(context.Background())
 	errCh := make(chan error, 2)
 	go func() {
 		s.logger.Info("api server listening", slog.String("addr", s.httpServer.Addr))

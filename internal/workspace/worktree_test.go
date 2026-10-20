@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -637,5 +638,139 @@ func TestPushOpensAPullRequestWithGh(t *testing.T) {
 	}
 	if args, _ := os.ReadFile(argsFile); strings.TrimSpace(string(args)) != "pr create --head feat/x --base main --title Add x --body why" {
 		t.Fatalf("gh args = %q", args)
+	}
+}
+
+func TestListReportsHowFarTheBaseMoved(t *testing.T) {
+	repo, _ := initMainRepo(t)
+	svc, _ := newWorktreeTestService(t)
+	ctx := context.Background()
+	rec, err := svc.Create(ctx, CreateRequest{Repo: repo, Base: "main", Branch: "feat/x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitFile(t, rec.Path, "agent.txt", "work\n", "agent work")
+	commitFile(t, repo, "up1.txt", "1\n", "upstream one")
+	commitFile(t, repo, "up2.txt", "2\n", "upstream two")
+
+	counts := func() (ahead, behind int) {
+		t.Helper()
+		statuses, err := svc.List(ctx)
+		if err != nil || len(statuses) != 1 || statuses[0].Ahead == nil || statuses[0].Behind == nil {
+			t.Fatalf("List = %+v, %v", statuses, err)
+		}
+		return *statuses[0].Ahead, *statuses[0].Behind
+	}
+	if ahead, behind := counts(); ahead != 1 || behind != 2 {
+		t.Fatalf("before rebase ahead/behind = %d/%d, want 1/2", ahead, behind)
+	}
+	if _, err := svc.Rebase(ctx, rec.ID); err != nil {
+		t.Fatal(err)
+	}
+	if ahead, behind := counts(); ahead != 1 || behind != 0 {
+		t.Fatalf("after rebase ahead/behind = %d/%d, want 1/0", ahead, behind)
+	}
+}
+
+func TestListLeavesBehindWithoutABaseRef(t *testing.T) {
+	repo, c1 := initMainRepo(t)
+	svc, stores := newWorktreeTestService(t)
+	ctx := context.Background()
+	path := filepath.Join(repo, ".worktrees", "legacy")
+	if _, err := RunGit(ctx, repo, "worktree", "add", "-b", "legacy", path, c1); err != nil {
+		t.Fatal(err)
+	}
+	if err := stores().SaveWorktree(ctx, storage.WorktreeRecord{ID: "legacy", Repo: repo, Path: path, Branch: "legacy", BaseCommit: c1, CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	statuses, err := svc.List(ctx)
+	if err != nil || len(statuses) != 1 {
+		t.Fatalf("List = %+v, %v", statuses, err)
+	}
+	if statuses[0].Behind != nil || statuses[0].Ahead == nil {
+		t.Fatalf("ahead/behind = %v/%v, want ahead only", statuses[0].Ahead, statuses[0].Behind)
+	}
+}
+
+func TestListChecksEveryWorktreeInOrder(t *testing.T) {
+	repo, _ := initMainRepo(t)
+	svc, _ := newWorktreeTestService(t)
+	ctx := context.Background()
+	const n = 3 * listConcurrency
+	for i := range n {
+		rec, err := svc.Create(ctx, CreateRequest{Repo: repo, Base: "main", Branch: "feat/" + strconv.Itoa(i)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		// i commits on branch i, so a status filled into the wrong slot shows.
+		for j := range i % 3 {
+			commitFile(t, rec.Path, "f"+strconv.Itoa(j)+".txt", "x\n", "c")
+		}
+	}
+	statuses, err := svc.List(ctx)
+	if err != nil || len(statuses) != n {
+		t.Fatalf("List returned %d, %v; want %d", len(statuses), err, n)
+	}
+	for i, st := range statuses {
+		if want := "feat/" + strconv.Itoa(i); st.Branch != want {
+			t.Fatalf("slot %d branch = %s, want %s", i, st.Branch, want)
+		}
+		if st.Ahead == nil || *st.Ahead != i%3 || st.Dirty == nil || *st.Dirty {
+			t.Fatalf("%s status = %+v", st.Branch, st)
+		}
+	}
+}
+
+func TestListDoesNotForgetAVanishedWorktreeButPruneDoes(t *testing.T) {
+	repo, _ := initMainRepo(t)
+	svc, stores := newWorktreeTestService(t)
+	ctx := context.Background()
+	gone, err := svc.Create(ctx, CreateRequest{Repo: repo, Base: "main", Branch: "feat/gone"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	kept, err := svc.Create(ctx, CreateRequest{Repo: repo, Base: "main", Branch: "feat/kept"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(gone.Path); err != nil {
+		t.Fatal(err)
+	}
+
+	statuses, err := svc.List(ctx)
+	if err != nil || len(statuses) != 1 || statuses[0].ID != kept.ID {
+		t.Fatalf("List = %+v, %v; want only the surviving worktree", statuses, err)
+	}
+	if records, _ := stores().ListWorktrees(ctx); len(records) != 2 {
+		t.Fatalf("a read forgot a worktree: %d records left", len(records))
+	}
+
+	svc.Prune(ctx)
+	records, _ := stores().ListWorktrees(ctx)
+	if len(records) != 1 || records[0].ID != kept.ID {
+		t.Fatalf("records after Prune = %+v", records)
+	}
+	if out, _ := RunGit(ctx, repo, "worktree", "list", "--porcelain"); strings.Contains(out, "feat-gone") {
+		t.Fatalf("git still lists the vanished worktree:\n%s", out)
+	}
+}
+
+func TestCreatePrunesAVanishedWorktreeOfTheSameBranch(t *testing.T) {
+	repo, _ := initMainRepo(t)
+	svc, stores := newWorktreeTestService(t)
+	ctx := context.Background()
+	old, err := svc.Create(ctx, CreateRequest{Repo: repo, Base: "main", Branch: "feat/x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(old.Path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Create(ctx, CreateRequest{Repo: repo, Base: "main", Branch: "feat/y"}); err != nil {
+		t.Fatal(err)
+	}
+	records, _ := stores().ListWorktrees(ctx)
+	if len(records) != 1 || records[0].Branch != "feat/y" {
+		t.Fatalf("records = %+v, want the vanished one forgotten", records)
 	}
 }
