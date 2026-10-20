@@ -731,6 +731,9 @@ clean. Worktrees outlive the chats that use them: they are removed only on an ex
   - Error responses:
     - `404` — unknown worktree
     - `409` — the worktree has uncommitted changes (retry with `force=true`)
+    - `409` — a running chat uses the worktree as its working directory
+      (`worktree is in use by chat <acpSessionId>`); `force=true` does not
+      override it, close the chat first
 
 ### Gateway sessions
 

@@ -34,15 +34,17 @@ func errStatus(status int, message string) error {
 
 // Service owns the managed-worktree git and filesystem operations. store and
 // now are accessors because the API server rebinds them after construction in
-// tests.
+// tests. chatUsing reports a running chat whose working directory satisfies the
+// predicate; it may be nil.
 type Service struct {
-	store  func() *storage.SQLiteStore
-	logger *slog.Logger
-	now    func() time.Time
+	store     func() *storage.SQLiteStore
+	logger    *slog.Logger
+	now       func() time.Time
+	chatUsing func(match func(cwd string) bool) (string, bool)
 }
 
-func New(store func() *storage.SQLiteStore, logger *slog.Logger, now func() time.Time) *Service {
-	return &Service{store: store, logger: logger, now: now}
+func New(store func() *storage.SQLiteStore, logger *slog.Logger, now func() time.Time, chatUsing func(match func(cwd string) bool) (string, bool)) *Service {
+	return &Service{store: store, logger: logger, now: now, chatUsing: chatUsing}
 }
 
 // CreateRequest is the client-supplied shape of a worktree create.
@@ -207,7 +209,8 @@ func (s *Service) List(ctx context.Context) ([]WorktreeStatus, error) {
 	return out, nil
 }
 
-// Delete removes a worktree's directory. Without force, git refuses when it has
+// Delete removes a worktree's directory. It refuses (409) while a running chat
+// uses the worktree as its working directory, and without force when it has
 // uncommitted changes (409). The branch is deleted only when git considers it
 // merged (git branch -d); otherwise it is kept so committed work survives. The
 // returned bool reports whether the branch was deleted.
@@ -215,6 +218,11 @@ func (s *Service) Delete(ctx context.Context, id string, force bool) (bool, erro
 	rec, ok := s.find(ctx, func(rec storage.WorktreeRecord) bool { return rec.ID == id })
 	if !ok {
 		return false, errStatus(404, "unknown worktree")
+	}
+	if s.chatUsing != nil {
+		if chat, busy := s.chatUsing(func(cwd string) bool { return SubpathOf(cwd, rec.Path) }); busy {
+			return false, errStatus(409, "worktree is in use by chat "+chat)
+		}
 	}
 	if _, err := os.Stat(rec.Path); err == nil {
 		// The dirty check is ours rather than git's: git deregisters a worktree even

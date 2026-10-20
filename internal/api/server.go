@@ -252,6 +252,12 @@ func NewServer(deps Deps) *Server {
 		func() *storage.SQLiteStore { return server.store },
 		server.logger,
 		func() time.Time { return server.now() },
+		func(match func(cwd string) bool) (string, bool) {
+			if server.sessionSvc == nil {
+				return "", false
+			}
+			return server.sessionSvc.ChatUsing(match)
+		},
 	)
 
 	mux := http.NewServeMux()

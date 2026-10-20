@@ -127,8 +127,17 @@ func TestWorktrees_EndToEnd(t *testing.T) {
 		t.Fatalf("list = %s", rec.Body.String())
 	}
 
-	// The worktree is in use as the session cwd; git still removes it. The
-	// branch has an unmerged commit, so it is kept.
+	// A live chat uses the worktree as its cwd, so it cannot be deleted, even
+	// with force.
+	if rec := do(t, http.MethodDelete, "/v1/worktrees/"+wt.ID+"?force=true", ""); rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "in use by chat") {
+		t.Fatalf("delete while in use = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if rec := do(t, http.MethodDelete, "/v1/sessions/"+conn.SessionID, ""); rec.Code != http.StatusNoContent {
+		t.Fatalf("close session = %d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	// Once the chat is closed the worktree goes. The branch has an unmerged
+	// commit, so it is kept.
 	rec = do(t, http.MethodDelete, "/v1/worktrees/"+wt.ID, "")
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"branchDeleted":false`) {
 		t.Fatalf("delete = %d, body=%s", rec.Code, rec.Body.String())

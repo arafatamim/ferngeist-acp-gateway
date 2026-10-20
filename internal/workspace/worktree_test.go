@@ -52,7 +52,7 @@ func newWorktreeTestService(t *testing.T) (*Service, func() *storage.SQLiteStore
 		t.Fatalf("storage.Open: %v", err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	svc := New(func() *storage.SQLiteStore { return store }, slog.Default(), time.Now)
+	svc := New(func() *storage.SQLiteStore { return store }, slog.Default(), time.Now, nil)
 	return svc, func() *storage.SQLiteStore { return store }
 }
 
