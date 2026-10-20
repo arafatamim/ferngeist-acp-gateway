@@ -2750,3 +2750,32 @@ func TestAuthRefreshExchangesRotatedTokenWithinOverlap(t *testing.T) {
 		t.Fatalf("recovered token status code = %d, want %d", liveRecorder.Code, http.StatusOK)
 	}
 }
+
+func TestAdminListenerRejectsBrowserRequests(t *testing.T) {
+	server := newTestServer()
+	handler := server.adminServer.Handler
+	cases := []struct {
+		name, host, origin string
+		want               int
+	}{
+		{"loopback ip", "127.0.0.1:5789", "", http.StatusOK},
+		{"localhost", "localhost:5789", "", http.StatusOK},
+		{"ipv6", "[::1]:5789", "", http.StatusOK},
+		{"rebound hostname", "attacker.example:5789", "", http.StatusForbidden},
+		{"cross-site origin", "127.0.0.1:5789", "https://attacker.example", http.StatusForbidden},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, "/admin/v1/devices", nil)
+			request.Host = tc.host
+			if tc.origin != "" {
+				request.Header.Set("Origin", tc.origin)
+			}
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, request)
+			if recorder.Code != tc.want {
+				t.Fatalf("status = %d, want %d", recorder.Code, tc.want)
+			}
+		})
+	}
+}

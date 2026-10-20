@@ -6,7 +6,10 @@ Ferngeist Gateway is designed to keep the public surface small and to make remot
 
 - The gateway runs on a machine you control.
 - Public clients must pair before they can use protected endpoints.
-- The admin API is local-only and is intended for the machine operator.
+- The admin API is local-only and is intended for the machine operator. It
+  refuses requests with an `Origin` header or a `Host` that is not an IP
+  literal or `localhost` (`403`), so web pages cannot reach it through
+  cross-site requests or DNS rebinding.
 
 ## Public API security
 

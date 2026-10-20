@@ -46,8 +46,9 @@ import (
 // protocol bridging via WebSocket, and diagnostic export. All requests are
 // logged with structured metadata for troubleshooting.
 type Server struct {
-	httpServer  *http.Server // public API server
-	adminServer *http.Server // localhost admin server
+	httpServer  *http.Server   // public API server
+	adminServer *http.Server   // localhost admin server
+	adminMux    *http.ServeMux // admin routes, before the local-request guard
 	logger      *slog.Logger
 	cfg         config.Config
 	build       BuildInfo        // version/commit info baked at compile time
@@ -309,9 +310,10 @@ func NewServer(deps Deps) *Server {
 		WriteTimeout:      20 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
+	server.adminMux = adminMux
 	server.adminServer = &http.Server{
 		Addr:              adminAddr,
-		Handler:           server.withRequestLogging(adminMux),
+		Handler:           server.withRequestLogging(requireLocalAdminRequest(adminMux)),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      20 * time.Second,
@@ -386,9 +388,38 @@ func (s *Server) Handler() http.Handler {
 	return s.httpServer.Handler
 }
 
-// AdminHandler returns the local admin API handler.
+// AdminHandler returns the admin API mux without the listener's request
+// logging and local-request guard (requireLocalAdminRequest); tests that need
+// the guard go through adminServer.Handler.
 func (s *Server) AdminHandler() http.Handler {
-	return s.adminServer.Handler
+	return s.adminMux
+}
+
+// requireLocalAdminRequest protects the unauthenticated admin API from web
+// pages. A browser can reach 127.0.0.1 from any site, either by DNS rebinding
+// (the request then carries the attacker's hostname in Host) or by a cross-site
+// form/fetch POST (the request then carries an Origin header). The CLI client
+// sends neither a hostname nor an Origin, so both are refused.
+func requireLocalAdminRequest(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Origin") != "" || !isIPOrLocalhost(r.Host) {
+			writeError(w, http.StatusForbidden, "admin API only accepts local, non-browser requests")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// isIPOrLocalhost reports whether a Host header names an IP literal or
+// localhost. DNS rebinding needs a resolvable name, so any other hostname is
+// refused.
+func isIPOrLocalhost(hostport string) bool {
+	host := hostport
+	if h, _, err := net.SplitHostPort(hostport); err == nil {
+		host = h
+	}
+	host = strings.Trim(host, "[]")
+	return strings.EqualFold(host, "localhost") || net.ParseIP(host) != nil
 }
 
 // withRequestLogging records one structured log entry per HTTP request so the
