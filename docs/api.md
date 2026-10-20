@@ -716,7 +716,8 @@ clean. Worktrees outlive the chats that use them: they are removed only on an ex
 - `GET /v1/worktrees`
   - Requires `read` scope.
   - Lists managed worktrees (the create response shape) plus `ahead` (commits
-    on the branch since `baseCommit`) and `dirty` (uncommitted changes).
+    on the branch since its merge-base with
+    the base ref, falling back to `baseCommit`) and `dirty` (uncommitted changes).
     Worktrees whose directory was deleted outside the gateway are dropped from
     the list.
 

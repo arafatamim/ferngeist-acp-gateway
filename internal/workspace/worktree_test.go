@@ -287,3 +287,29 @@ func TestDeleteKeepsWorktreeWhenStatusFails(t *testing.T) {
 		t.Fatalf("uncommitted file was removed: %v", err)
 	}
 }
+
+// TestListCountsAheadFromMergeBase rebases a worktree onto a newer base: the
+// list badge must count only the branch's own commits, as the diff view does.
+func TestListCountsAheadFromMergeBase(t *testing.T) {
+	repo, _ := initMainRepo(t)
+	svc, _ := newWorktreeTestService(t)
+	ctx := context.Background()
+
+	rec, err := svc.Create(ctx, CreateRequest{Repo: repo, Base: "main", Branch: "feat/x"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	commitFile(t, rec.Path, "agent.txt", "work\n", "agent work")
+	commitFile(t, repo, "upstream.txt", "up\n", "upstream")
+	if _, err := RunGit(ctx, rec.Path, "rebase", "main"); err != nil {
+		t.Fatalf("rebase: %v", err)
+	}
+
+	statuses, err := svc.List(ctx)
+	if err != nil || len(statuses) != 1 {
+		t.Fatalf("List = %v, %v", statuses, err)
+	}
+	if got := statuses[0].Ahead; got == nil || *got != 1 {
+		t.Fatalf("Ahead after rebase = %v, want 1", got)
+	}
+}

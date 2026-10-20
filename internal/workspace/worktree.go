@@ -193,7 +193,7 @@ func (s *Service) List(ctx context.Context) ([]WorktreeStatus, error) {
 			continue
 		}
 		status := WorktreeStatus{WorktreeRecord: rec}
-		if n, err := RunGit(ctx, rec.Path, "rev-list", "--count", rec.BaseCommit+"..HEAD"); err == nil {
+		if n, err := RunGit(ctx, rec.Path, "rev-list", "--count", s.baseOf(ctx, rec)+"..HEAD"); err == nil {
 			if ahead, err := strconv.Atoi(strings.TrimSpace(n)); err == nil {
 				status.Ahead = &ahead
 			}
@@ -270,12 +270,18 @@ func baseRefOf(ctx context.Context, top, base string) string {
 // otherwise HEAD.
 func (s *Service) BaseRef(ctx context.Context, cwd string) string {
 	if rec, ok := s.find(ctx, func(rec storage.WorktreeRecord) bool { return SubpathOf(cwd, rec.Path) }); ok {
-		if mb, ok := s.mergeBase(ctx, rec); ok {
-			return mb
-		}
-		return rec.BaseCommit
+		return s.baseOf(ctx, rec)
 	}
 	return "HEAD"
+}
+
+// baseOf is the commit a managed worktree's own work is counted from: the
+// merge-base with its base ref, else the fixed base commit.
+func (s *Service) baseOf(ctx context.Context, rec storage.WorktreeRecord) string {
+	if mb, ok := s.mergeBase(ctx, rec); ok {
+		return mb
+	}
+	return rec.BaseCommit
 }
 
 // LogBase is the commit /git/log reports as the workspace's base, which a
