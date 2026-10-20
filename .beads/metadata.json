@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "ferngeist_acp_gateway",
+  "project_id": "faa128cc-5e55-4bb5-a9ee-6faa84205dbf"
+}

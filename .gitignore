@@ -34,3 +34,9 @@ daemon_cov
 daemon_cov.txt
 *.cov
 *.cov.txt
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+.beads-credential-key
+.beads/proxieddb/
+*.gate.lock*
