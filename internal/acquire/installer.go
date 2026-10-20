@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -53,69 +54,31 @@ func (i *Installer) Ensure(ctx context.Context, agent catalog.Agent) (catalog.Ag
 	}
 
 	targetPath := filepath.Join(i.managedDir, agent.ID, filepath.Base(strings.ReplaceAll(agent.Registry.CurrentBinaryPath, "\\", "/")))
+	// installed is a previous version kept as a fallback when the update fails.
+	installed := ""
+	recorded := false
 	if i.store != nil {
-		record, err := i.store.GetAcquiredBinary(ctx, agent.ID)
-		if err == nil {
-			if record.Path == targetPath || record.Path != "" {
-				if info, statErr := os.Stat(record.Path); statErr == nil && !info.IsDir() {
-					targetPath = record.Path
-					agent.Launch.Command = targetPath
-					agent.Detection = catalog.DetectionConfig{Mode: "local_file", Path: targetPath}
-					agent.Detected = true
-					return agent, false, nil
-				}
+		if record, err := i.store.GetAcquiredBinary(ctx, agent.ID); err == nil && isFile(record.Path) {
+			if record.Version == agent.Registry.Version {
+				return useBinary(agent, record.Path), false, nil
 			}
+			installed, recorded = record.Path, true
 		}
 	}
-	if info, err := os.Stat(targetPath); err == nil && !info.IsDir() {
-		agent.Launch.Command = targetPath
-		agent.Detection = catalog.DetectionConfig{Mode: "local_file", Path: targetPath}
-		agent.Detected = true
-		return agent, false, nil
+	if !recorded && isFile(targetPath) {
+		// No record to compare versions against (no store, or a pre-record install).
+		return useBinary(agent, targetPath), false, nil
 	}
 
-	if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
-		return agent, false, err
+	if err := i.download(ctx, agent, targetPath); err != nil {
+		if installed == "" {
+			return agent, false, err
+		}
+		i.logger.Warn("update registry binary failed; keeping installed version", "agent_id", agent.ID, "version", agent.Registry.Version, "error", err)
+		return useBinary(agent, installed), false, nil
 	}
 
-	tmpFile, err := os.CreateTemp("", "ferngeist-gateway-download-*")
-	if err != nil {
-		return agent, false, err
-	}
-	tmpPath := tmpFile.Name()
-	_ = tmpFile.Close()
-	defer os.Remove(tmpPath)
-
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, agent.Registry.CurrentBinaryArchiveURL, nil)
-	if err != nil {
-		return agent, false, err
-	}
-	response, err := i.httpClient.Do(request)
-	if err != nil {
-		return agent, false, err
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		return agent, false, fmt.Errorf("binary download returned status %d", response.StatusCode)
-	}
-
-	downloadFile, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
-	if err != nil {
-		return agent, false, err
-	}
-	if _, err := io.Copy(downloadFile, response.Body); err != nil {
-		_ = downloadFile.Close()
-		return agent, false, err
-	}
-	if err := downloadFile.Close(); err != nil {
-		return agent, false, err
-	}
-
-	if err := installDownloadedArtifact(tmpPath, targetPath, agent.Registry.CurrentBinaryPath); err != nil {
-		return agent, false, err
-	}
-
-	i.logger.Info("acquired registry binary", "agent_id", agent.ID, "target_path", targetPath)
+	i.logger.Info("acquired registry binary", "agent_id", agent.ID, "version", agent.Registry.Version, "target_path", targetPath)
 	if i.store != nil {
 		if err := i.store.SaveAcquiredBinary(ctx, storage.AcquiredBinaryRecord{
 			AgentID:     agent.ID,
@@ -127,14 +90,71 @@ func (i *Installer) Ensure(ctx context.Context, agent catalog.Agent) (catalog.Ag
 			i.logger.Warn("persist acquired binary failed", "agent_id", agent.ID, "error", err)
 		}
 	}
-	agent.Launch.Command = targetPath
-	agent.Detection = catalog.DetectionConfig{Mode: "local_file", Path: targetPath}
-	agent.Detected = true
-	return agent, true, nil
+	return useBinary(agent, targetPath), true, nil
 }
 
-func installDownloadedArtifact(sourcePath, targetPath, archiveEntry string) error {
-	lower := strings.ToLower(sourcePath)
+func isFile(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
+}
+
+func useBinary(agent catalog.Agent, path string) catalog.Agent {
+	agent.Launch.Command = path
+	agent.Detection = catalog.DetectionConfig{Mode: "local_file", Path: path}
+	agent.Detected = true
+	return agent
+}
+
+// download fetches the agent's registry artifact and installs its binary at
+// targetPath.
+func (i *Installer) download(ctx context.Context, agent catalog.Agent, targetPath string) error {
+	if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
+		return err
+	}
+
+	tmpFile, err := os.CreateTemp("", "ferngeist-gateway-download-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmpFile.Name()
+	_ = tmpFile.Close()
+	defer os.Remove(tmpPath)
+
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, agent.Registry.CurrentBinaryArchiveURL, nil)
+	if err != nil {
+		return err
+	}
+	response, err := i.httpClient.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("binary download returned status %d", response.StatusCode)
+	}
+
+	downloadFile, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(downloadFile, response.Body); err != nil {
+		_ = downloadFile.Close()
+		return err
+	}
+	if err := downloadFile.Close(); err != nil {
+		return err
+	}
+
+	// The temp file has no extension, so the archive format comes from the URL path.
+	archiveName := agent.Registry.CurrentBinaryArchiveURL
+	if parsed, err := url.Parse(archiveName); err == nil {
+		archiveName = parsed.Path
+	}
+	return installDownloadedArtifact(tmpPath, archiveName, targetPath, agent.Registry.CurrentBinaryPath)
+}
+
+func installDownloadedArtifact(sourcePath, archiveName, targetPath, archiveEntry string) error {
+	lower := strings.ToLower(archiveName)
 	switch {
 	case strings.HasSuffix(lower, ".zip"):
 		return extractZipEntry(sourcePath, targetPath, archiveEntry)
@@ -214,15 +234,22 @@ func writeReaderToFile(targetPath string, source io.Reader, mode os.FileMode) er
 	if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
 		return err
 	}
-	file, err := os.OpenFile(targetPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+	// Write beside the target and rename: overwriting in place fails while the
+	// old version is running (ETXTBSY) and leaves a truncated binary on error.
+	tmpPath := targetPath + ".download"
+	file, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
 	if err != nil {
 		return err
 	}
+	defer os.Remove(tmpPath)
 	if _, err := io.Copy(file, source); err != nil {
 		_ = file.Close()
 		return err
 	}
-	return file.Close()
+	if err := file.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, targetPath)
 }
 
 func normalizeArchiveEntry(path string) string {
