@@ -174,3 +174,79 @@ func TestWorktrees_EndToEnd(t *testing.T) {
 		t.Fatalf("leftover dir still exists: %v", err)
 	}
 }
+
+// TestWorktreeRebase_Endpoint rebases a worktree onto a base that moved,
+// checks the response carries the list's ahead/dirty state, pushes it, then merges it.
+func TestWorktreeRebase_Endpoint(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	repo := t.TempDir()
+	runGitCLI(t, repo, "init", "-q", "-b", "main")
+	runGitCLI(t, repo, "config", "user.email", "t@t")
+	runGitCLI(t, repo, "config", "user.name", "t")
+	runGitCLI(t, repo, "config", "commit.gpgSign", "false")
+	commit := func(dir, name string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(name+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		runGitCLI(t, dir, "add", name)
+		runGitCLI(t, dir, "commit", "-qm", name)
+	}
+	commit(repo, "a.txt")
+
+	h := newResilientTestHarness(t)
+	do := func(method, path, body string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+h.token)
+		rec := httptest.NewRecorder()
+		h.server.Handler().ServeHTTP(rec, req)
+		return rec
+	}
+	repoJSON, _ := json.Marshal(repo)
+	var wt worktreeResponse
+	rec := do(http.MethodPost, "/v1/worktrees", `{"repo":`+string(repoJSON)+`,"base":"main","branch":"feat/x"}`)
+	if err := json.Unmarshal(rec.Body.Bytes(), &wt); err != nil || rec.Code != http.StatusOK {
+		t.Fatalf("create = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	commit(wt.Path, "agent.txt")
+	commit(repo, "upstream.txt")
+
+	rec = do(http.MethodPost, "/v1/worktrees/"+wt.ID+"/rebase", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("rebase = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var got worktreeResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Ahead == nil || *got.Ahead != 1 || got.Dirty == nil || *got.Dirty {
+		t.Fatalf("rebase response = %s", rec.Body.String())
+	}
+	if rec := do(http.MethodPost, "/v1/worktrees/nope/rebase", ""); rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown worktree = %d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	bare := t.TempDir()
+	runGitCLI(t, bare, "init", "-q", "--bare")
+	runGitCLI(t, repo, "remote", "add", "origin", bare)
+	rec = do(http.MethodPost, "/v1/worktrees/"+wt.ID+"/push", "")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"pushed":true`) || strings.Contains(rec.Body.String(), "prUrl") {
+		t.Fatalf("push = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	runGitCLI(t, bare, "rev-parse", "--verify", "refs/heads/feat/x")
+
+	// The rebased branch fast-forwards into main; an empty body asks for that.
+	rec = do(http.MethodPost, "/v1/worktrees/"+wt.ID+"/merge", `{"delete":true}`)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"worktreeDeleted":true`) || !strings.Contains(rec.Body.String(), `"branchDeleted":true`) {
+		t.Fatalf("merge = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(repo, "agent.txt")); err != nil {
+		t.Fatalf("merged file missing from the main checkout: %v", err)
+	}
+	if rec := do(http.MethodPost, "/v1/worktrees/"+wt.ID+"/merge", ""); rec.Code != http.StatusNotFound {
+		t.Fatalf("merge of a deleted worktree = %d, body=%s", rec.Code, rec.Body.String())
+	}
+}

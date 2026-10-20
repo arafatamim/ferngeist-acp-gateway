@@ -735,6 +735,53 @@ clean. Worktrees outlive the chats that use them: they are removed only on an ex
       (`worktree is in use by chat <acpSessionId>`); `force=true` does not
       override it, close the chat first
 
+- `POST /v1/worktrees/{worktreeId}/rebase`
+  - Requires `control` scope.
+  - Rebases the worktree's branch onto its base ref (the branch it was cut
+    from). Responds with the worktree as `GET /v1/worktrees` lists it, so
+    `ahead` reflects the new base.
+  - Error responses:
+    - `404` — unknown worktree
+    - `409` — the worktree has uncommitted changes, has no base ref (a
+      detached-HEAD base), or the rebase conflicted. A conflicted rebase is
+      aborted and the branch is left as it was.
+
+- `POST /v1/worktrees/{worktreeId}/merge`
+  - Requires `control` scope.
+  - Body (all optional): `{"squash": false, "message": "", "delete": false}`.
+  - Lands the worktree's branch on its base branch. The merge runs in the main
+    checkout, which must be clean and have the base branch checked out.
+    Without `squash` the base fast-forwards; with it the branch lands as one
+    commit using `message` (default `Merge <branch>`).
+  - `delete: true` also removes the worktree and its branch once merged.
+    Response: `{"commit": "<sha>", "worktreeDeleted": true, "branchDeleted": true}`;
+    if the merge landed but the cleanup failed, `worktreeDeleted` is `false`.
+  - Error responses:
+    - `404` — unknown worktree
+    - `409` — the worktree or the main checkout has uncommitted changes; the
+      base is not a local branch checked out in the main checkout; there is
+      nothing to merge; the base moved so a fast-forward is impossible (rebase
+      first, or squash); a squash conflicted (undone); or `delete` was asked
+      while a running chat uses the worktree
+    - `422` — the squash commit failed (for example a rejecting hook)
+
+- `POST /v1/worktrees/{worktreeId}/push`
+  - Requires `control` scope.
+  - Body (all optional): `{"pr": false, "title": "", "body": ""}`.
+  - Pushes the worktree's branch to `origin` (setting its upstream). It never
+    force-pushes. With `pr: true` it then opens a pull request with the `gh`
+    CLI against the base branch, using `title` and `body`, or filling both
+    from the branch's commits when `title` is empty.
+  - Response: `{"pushed": true, "prUrl": "<url>"}`; `prUrl` is present only
+    when a pull request was opened.
+  - Error responses:
+    - `404` — unknown worktree
+    - `409` — the worktree has uncommitted changes, or `origin` has commits
+      the branch lacks (rebase, then push again)
+    - `422` — `pr` was asked but `gh` is not installed, the push failed, or
+      the push succeeded but opening the pull request did not (the message
+      says which)
+
 ### Gateway sessions
 
 > **Terminology note:** A "gateway session" is a gateway-internal object that owns an agent process and keeps it alive across WebSocket disconnections. It runs the stdio pump (for agent stdout) and dispatches push notifications on notable events. Connecting starts the agent, so a gateway session and its runtime are 1:1: `POST /v1/agents/{agentId}/connect` both launches the process and creates the session. It is not an ACP agent session — ACP agent sessions are negotiated between the client and agent during protocol initialization and are not tracked by this API.

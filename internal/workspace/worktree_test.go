@@ -2,10 +2,12 @@ package workspace
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -311,5 +313,329 @@ func TestListCountsAheadFromMergeBase(t *testing.T) {
 	}
 	if got := statuses[0].Ahead; got == nil || *got != 1 {
 		t.Fatalf("Ahead after rebase = %v, want 1", got)
+	}
+}
+
+func TestRebaseOntoMovedBase(t *testing.T) {
+	repo, _ := initMainRepo(t)
+	svc, _ := newWorktreeTestService(t)
+	ctx := context.Background()
+	rec, err := svc.Create(ctx, CreateRequest{Repo: repo, Base: "main", Branch: "feat/x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitFile(t, rec.Path, "agent.txt", "work\n", "agent work")
+	commitFile(t, repo, "upstream.txt", "up\n", "upstream")
+
+	status, err := svc.Rebase(ctx, rec.ID)
+	if err != nil {
+		t.Fatalf("Rebase: %v", err)
+	}
+	if status.Ahead == nil || *status.Ahead != 1 {
+		t.Fatalf("Ahead = %v, want 1", status.Ahead)
+	}
+	if _, err := os.Stat(filepath.Join(rec.Path, "upstream.txt")); err != nil {
+		t.Fatalf("upstream commit not in the worktree after rebase: %v", err)
+	}
+}
+
+func TestRebaseRefusesDirtyAndAbortsConflicts(t *testing.T) {
+	repo, _ := initMainRepo(t)
+	svc, _ := newWorktreeTestService(t)
+	ctx := context.Background()
+	rec, err := svc.Create(ctx, CreateRequest{Repo: repo, Base: "main", Branch: "feat/x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantStatus := func(err error, want int) {
+		t.Helper()
+		var we Error
+		if !errors.As(err, &we) || we.StatusCode() != want {
+			t.Fatalf("err = %v, want status %d", err, want)
+		}
+	}
+
+	if _, err := svc.Rebase(ctx, "nope"); err == nil {
+		t.Fatal("unknown worktree rebased")
+	} else {
+		wantStatus(err, 404)
+	}
+
+	if err := os.WriteFile(filepath.Join(rec.Path, "wip.txt"), []byte("wip\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err = svc.Rebase(ctx, rec.ID)
+	wantStatus(err, 409)
+	if err := os.Remove(filepath.Join(rec.Path, "wip.txt")); err != nil {
+		t.Fatal(err)
+	}
+
+	commitFile(t, rec.Path, "a.txt", "mine\n", "agent edit")
+	commitFile(t, repo, "a.txt", "theirs\n", "upstream edit")
+	before, _ := RunGit(ctx, rec.Path, "rev-parse", "HEAD")
+	_, err = svc.Rebase(ctx, rec.ID)
+	wantStatus(err, 409)
+	if after, _ := RunGit(ctx, rec.Path, "rev-parse", "HEAD"); after != before {
+		t.Fatalf("HEAD moved by a conflicted rebase: %s -> %s", before, after)
+	}
+	if st, _ := RunGit(ctx, rec.Path, "status", "--porcelain"); strings.TrimSpace(st) != "" {
+		t.Fatalf("worktree left dirty after the abort: %q", st)
+	}
+}
+
+func wantWorkspaceStatus(t *testing.T, err error, want int) {
+	t.Helper()
+	var we Error
+	if !errors.As(err, &we) || we.StatusCode() != want {
+		t.Fatalf("err = %v, want status %d", err, want)
+	}
+}
+
+func TestMergeFastForwardsAndDeletes(t *testing.T) {
+	repo, _ := initMainRepo(t)
+	svc, _ := newWorktreeTestService(t)
+	ctx := context.Background()
+	rec, err := svc.Create(ctx, CreateRequest{Repo: repo, Base: "main", Branch: "feat/x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Merge(ctx, rec.ID, MergeRequest{}); err == nil {
+		t.Fatal("merged a branch with no commits")
+	} else {
+		wantWorkspaceStatus(t, err, 409)
+	}
+	commitFile(t, rec.Path, "agent.txt", "work\n", "agent work")
+
+	res, err := svc.Merge(ctx, rec.ID, MergeRequest{Delete: true})
+	if err != nil {
+		t.Fatalf("Merge: %v", err)
+	}
+	head, _ := RunGit(ctx, repo, "rev-parse", "HEAD")
+	if res.Commit != strings.TrimSpace(head) || !res.WorktreeDeleted || !res.BranchDeleted {
+		t.Fatalf("result = %+v, head %s", res, head)
+	}
+	if _, err := os.Stat(filepath.Join(repo, "agent.txt")); err != nil {
+		t.Fatalf("merged file missing from the main checkout: %v", err)
+	}
+	if _, err := os.Stat(rec.Path); !os.IsNotExist(err) {
+		t.Fatalf("worktree folder survived: %v", err)
+	}
+}
+
+func TestMergeFastForwardRefusesAMovedBase(t *testing.T) {
+	repo, _ := initMainRepo(t)
+	svc, _ := newWorktreeTestService(t)
+	ctx := context.Background()
+	rec, err := svc.Create(ctx, CreateRequest{Repo: repo, Base: "main", Branch: "feat/x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitFile(t, rec.Path, "agent.txt", "work\n", "agent work")
+	commitFile(t, repo, "upstream.txt", "up\n", "upstream")
+	before, _ := RunGit(ctx, repo, "rev-parse", "HEAD")
+
+	_, err = svc.Merge(ctx, rec.ID, MergeRequest{})
+	wantWorkspaceStatus(t, err, 409)
+	if after, _ := RunGit(ctx, repo, "rev-parse", "HEAD"); after != before {
+		t.Fatalf("base moved by a refused merge: %s -> %s", before, after)
+	}
+}
+
+func TestMergeSquashLandsOneCommitAndDropsTheBranch(t *testing.T) {
+	repo, _ := initMainRepo(t)
+	svc, _ := newWorktreeTestService(t)
+	ctx := context.Background()
+	rec, err := svc.Create(ctx, CreateRequest{Repo: repo, Base: "main", Branch: "feat/x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitFile(t, rec.Path, "one.txt", "1\n", "one")
+	commitFile(t, rec.Path, "two.txt", "2\n", "two")
+	commitFile(t, repo, "upstream.txt", "up\n", "upstream")
+
+	res, err := svc.Merge(ctx, rec.ID, MergeRequest{Squash: true, Message: "land x", Delete: true})
+	if err != nil {
+		t.Fatalf("Merge: %v", err)
+	}
+	if !res.WorktreeDeleted || !res.BranchDeleted {
+		t.Fatalf("result = %+v", res)
+	}
+	subjects, _ := RunGit(ctx, repo, "log", "--format=%s", "-3")
+	if !strings.HasPrefix(subjects, "land x\nupstream\n") {
+		t.Fatalf("log = %q, want squash commit on top of upstream", subjects)
+	}
+	if _, err := RunGit(ctx, repo, "show-ref", "--verify", "--quiet", "refs/heads/feat/x"); err == nil {
+		t.Fatal("squashed branch survived")
+	}
+}
+
+func TestMergeSquashConflictIsUndone(t *testing.T) {
+	repo, _ := initMainRepo(t)
+	svc, _ := newWorktreeTestService(t)
+	ctx := context.Background()
+	rec, err := svc.Create(ctx, CreateRequest{Repo: repo, Base: "main", Branch: "feat/x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitFile(t, rec.Path, "a.txt", "mine\n", "agent edit")
+	commitFile(t, repo, "a.txt", "theirs\n", "upstream edit")
+	before, _ := RunGit(ctx, repo, "rev-parse", "HEAD")
+
+	_, err = svc.Merge(ctx, rec.ID, MergeRequest{Squash: true})
+	wantWorkspaceStatus(t, err, 409)
+	if after, _ := RunGit(ctx, repo, "rev-parse", "HEAD"); after != before {
+		t.Fatalf("base moved by a conflicted squash: %s -> %s", before, after)
+	}
+	if st, _ := RunGit(ctx, repo, "status", "--porcelain", "--untracked-files=no"); strings.TrimSpace(st) != "" {
+		t.Fatalf("main checkout left dirty: %q", st)
+	}
+}
+
+func TestMergeRefusesWhenTheMainCheckoutIsOnAnotherBranchOrDirty(t *testing.T) {
+	repo, _ := initMainRepo(t)
+	svc, _ := newWorktreeTestService(t)
+	ctx := context.Background()
+	rec, err := svc.Create(ctx, CreateRequest{Repo: repo, Base: "main", Branch: "feat/x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitFile(t, rec.Path, "agent.txt", "work\n", "agent work")
+
+	if err := os.WriteFile(filepath.Join(repo, "a.txt"), []byte("dirty\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err = svc.Merge(ctx, rec.ID, MergeRequest{})
+	wantWorkspaceStatus(t, err, 409)
+	if _, err := RunGit(ctx, repo, "checkout", "--", "a.txt"); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := RunGit(ctx, repo, "checkout", "-b", "other"); err != nil {
+		t.Fatal(err)
+	}
+	_, err = svc.Merge(ctx, rec.ID, MergeRequest{})
+	wantWorkspaceStatus(t, err, 409)
+}
+
+func TestMergeDeleteRefusesWhileAChatUsesTheWorktree(t *testing.T) {
+	repo, _ := initMainRepo(t)
+	svc, _ := newWorktreeTestService(t)
+	ctx := context.Background()
+	rec, err := svc.Create(ctx, CreateRequest{Repo: repo, Base: "main", Branch: "feat/x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitFile(t, rec.Path, "agent.txt", "work\n", "agent work")
+	svc.chatUsing = func(match func(string) bool) (string, bool) { return "ses_1", match(rec.Path) }
+	before, _ := RunGit(ctx, repo, "rev-parse", "HEAD")
+
+	_, err = svc.Merge(ctx, rec.ID, MergeRequest{Delete: true})
+	wantWorkspaceStatus(t, err, 409)
+	if after, _ := RunGit(ctx, repo, "rev-parse", "HEAD"); after != before {
+		t.Fatal("merge landed although its cleanup was refused")
+	}
+}
+
+// addBareOrigin points repo's origin at a fresh bare repository and returns it.
+func addBareOrigin(t *testing.T, repo string) string {
+	t.Helper()
+	bare := t.TempDir()
+	for _, args := range [][]string{{"-C", bare, "init", "-q", "--bare"}, {"-C", repo, "remote", "add", "origin", bare}} {
+		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	return bare
+}
+
+func TestPushPublishesTheBranchAndNeverOverwritesOrigin(t *testing.T) {
+	repo, _ := initMainRepo(t)
+	bare := addBareOrigin(t, repo)
+	svc, _ := newWorktreeTestService(t)
+	ctx := context.Background()
+	rec, err := svc.Create(ctx, CreateRequest{Repo: repo, Base: "main", Branch: "feat/x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitFile(t, rec.Path, "agent.txt", "work\n", "agent work")
+
+	if _, err := svc.Push(ctx, rec.ID, PushRequest{}); err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+	local, _ := RunGit(ctx, rec.Path, "rev-parse", "HEAD")
+	if remote, _ := RunGit(ctx, bare, "rev-parse", "refs/heads/feat/x"); remote != local {
+		t.Fatalf("origin feat/x = %s, want %s", remote, local)
+	}
+	if up, _ := RunGit(ctx, rec.Path, "rev-parse", "--abbrev-ref", "@{upstream}"); strings.TrimSpace(up) != "origin/feat/x" {
+		t.Fatalf("upstream = %q", up)
+	}
+
+	// Rewriting history makes the next push a non-fast-forward: it must be refused.
+	if _, err := RunGit(ctx, rec.Path, "commit", "--amend", "-qm", "rewritten"); err != nil {
+		t.Fatal(err)
+	}
+	_, err = svc.Push(ctx, rec.ID, PushRequest{})
+	wantWorkspaceStatus(t, err, 409)
+	if remote, _ := RunGit(ctx, bare, "rev-parse", "refs/heads/feat/x"); remote != local {
+		t.Fatalf("origin was overwritten: %s", remote)
+	}
+}
+
+func TestPushRefusesADirtyWorktreeAndAMissingOrigin(t *testing.T) {
+	repo, _ := initMainRepo(t)
+	svc, _ := newWorktreeTestService(t)
+	ctx := context.Background()
+	rec, err := svc.Create(ctx, CreateRequest{Repo: repo, Base: "main", Branch: "feat/x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = svc.Push(ctx, rec.ID, PushRequest{})
+	wantWorkspaceStatus(t, err, 422) // no origin remote
+
+	if err := os.WriteFile(filepath.Join(rec.Path, "wip.txt"), []byte("wip\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err = svc.Push(ctx, rec.ID, PushRequest{})
+	wantWorkspaceStatus(t, err, 409)
+}
+
+func TestPushOpensAPullRequestWithGh(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake gh is a shell script")
+	}
+	repo, _ := initMainRepo(t)
+	addBareOrigin(t, repo)
+	svc, _ := newWorktreeTestService(t)
+	ctx := context.Background()
+	rec, err := svc.Create(ctx, CreateRequest{Repo: repo, Base: "main", Branch: "feat/x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitFile(t, rec.Path, "agent.txt", "work\n", "agent work")
+
+	bin := t.TempDir()
+	argsFile := filepath.Join(bin, "args")
+	script := "#!/bin/sh\necho \"$@\" > " + argsFile + "\necho 'Creating pull request'\necho https://example.test/pr/7\n"
+	if err := os.WriteFile(filepath.Join(bin, "gh"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	res, err := svc.Push(ctx, rec.ID, PushRequest{PR: true})
+	if err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+	if res.PRURL != "https://example.test/pr/7" {
+		t.Fatalf("PRURL = %q", res.PRURL)
+	}
+	if args, _ := os.ReadFile(argsFile); strings.TrimSpace(string(args)) != "pr create --head feat/x --base main --fill" {
+		t.Fatalf("gh args = %q", args)
+	}
+
+	if _, err := svc.Push(ctx, rec.ID, PushRequest{PR: true, Title: "Add x", Body: "why"}); err != nil {
+		t.Fatalf("Push with title: %v", err)
+	}
+	if args, _ := os.ReadFile(argsFile); strings.TrimSpace(string(args)) != "pr create --head feat/x --base main --title Add x --body why" {
+		t.Fatalf("gh args = %q", args)
 	}
 }

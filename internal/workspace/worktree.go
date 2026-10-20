@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/storage"
@@ -41,6 +42,9 @@ type Service struct {
 	logger    *slog.Logger
 	now       func() time.Time
 	chatUsing func(match func(cwd string) bool) (string, bool)
+	// finishMu serializes rebase, merge and push, which change a branch or the
+	// main checkout and must not interleave.
+	finishMu sync.Mutex
 }
 
 func New(store func() *storage.SQLiteStore, logger *slog.Logger, now func() time.Time, chatUsing func(match func(cwd string) bool) (string, bool)) *Service {
@@ -194,19 +198,37 @@ func (s *Service) List(ctx context.Context) ([]WorktreeStatus, error) {
 			_ = s.store().DeleteWorktree(ctx, rec.ID)
 			continue
 		}
-		status := WorktreeStatus{WorktreeRecord: rec}
-		if n, err := RunGit(ctx, rec.Path, "rev-list", "--count", s.baseOf(ctx, rec)+"..HEAD"); err == nil {
-			if ahead, err := strconv.Atoi(strings.TrimSpace(n)); err == nil {
-				status.Ahead = &ahead
-			}
-		}
-		if st, err := RunGit(ctx, rec.Path, "status", "--porcelain"); err == nil {
-			dirty := strings.TrimSpace(st) != ""
-			status.Dirty = &dirty
-		}
+		status := s.statusOf(ctx, rec)
 		out = append(out, status)
 	}
 	return out, nil
+}
+
+// statusOf fills a record's ahead and dirty state; either stays nil when git
+// cannot answer.
+func (s *Service) statusOf(ctx context.Context, rec storage.WorktreeRecord) WorktreeStatus {
+	status := WorktreeStatus{WorktreeRecord: rec}
+	if n, err := RunGit(ctx, rec.Path, "rev-list", "--count", s.baseOf(ctx, rec)+"..HEAD"); err == nil {
+		if ahead, err := strconv.Atoi(strings.TrimSpace(n)); err == nil {
+			status.Ahead = &ahead
+		}
+	}
+	if st, err := RunGit(ctx, rec.Path, "status", "--porcelain"); err == nil {
+		dirty := strings.TrimSpace(st) != ""
+		status.Dirty = &dirty
+	}
+	return status
+}
+
+// inUse refuses (409) while a running chat uses the worktree as its cwd.
+func (s *Service) inUse(rec storage.WorktreeRecord) error {
+	if s.chatUsing == nil {
+		return nil
+	}
+	if chat, busy := s.chatUsing(func(cwd string) bool { return SubpathOf(cwd, rec.Path) }); busy {
+		return errStatus(409, "worktree is in use by chat "+chat)
+	}
+	return nil
 }
 
 // Delete removes a worktree's directory. It refuses (409) while a running chat
@@ -219,10 +241,8 @@ func (s *Service) Delete(ctx context.Context, id string, force bool) (bool, erro
 	if !ok {
 		return false, errStatus(404, "unknown worktree")
 	}
-	if s.chatUsing != nil {
-		if chat, busy := s.chatUsing(func(cwd string) bool { return SubpathOf(cwd, rec.Path) }); busy {
-			return false, errStatus(409, "worktree is in use by chat "+chat)
-		}
+	if err := s.inUse(rec); err != nil {
+		return false, err
 	}
 	if _, err := os.Stat(rec.Path); err == nil {
 		// The dirty check is ours rather than git's: git deregisters a worktree even
