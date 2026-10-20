@@ -330,11 +330,15 @@ func (rs *RuntimeSession) Resume(ctx context.Context, sessionID, deviceID string
 		return "", ErrSessionNotFound
 	}
 
-	if sess.DeviceID != deviceID {
+	sess.mu.Lock()
+	sessDevice, status := sess.DeviceID, sess.Status
+	sess.mu.Unlock()
+
+	if sessDevice != deviceID {
 		return "", ErrDeviceMismatch
 	}
 
-	if sess.Status != StatusActive && sess.Status != StatusDisconnected {
+	if status != StatusActive && status != StatusDisconnected {
 		return "", ErrSessionNotActive
 	}
 
@@ -806,9 +810,16 @@ func (rs *RuntimeSession) reapExpired(maxDisc time.Duration) {
 			}
 			if now.Sub(discTime) > grace {
 				sess.mu.Lock()
-				sess.Status = StatusClosing
+				// An attach (and maybe a new detach) may have landed since the read
+				// above; only reap the disconnect we measured.
+				expired := sess.Status == StatusDisconnected && sess.DisconnectedAt == discAt
+				if expired {
+					sess.Status = StatusClosing
+				}
 				sess.mu.Unlock()
-				toClose[id] = sess
+				if expired {
+					toClose[id] = sess
+				}
 			}
 		}
 	}

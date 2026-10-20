@@ -440,6 +440,39 @@ func TestResumeDeviceMismatch(t *testing.T) {
 	}
 }
 
+// TestResumeRacesAttach runs Resume against attach/detach status writes; it
+// guards the sess.mu discipline under go test -race.
+func TestResumeRacesAttach(t *testing.T) {
+	rs, store, agent, _, ctx := setupTest(t, Config{})
+	defer rs.Shutdown()
+	defer store.Close()
+
+	sess, token, err := rs.Create(ctx, agent, "dev-race", nil)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 50; i++ {
+			_, _ = rs.Resume(ctx, sess.ID, "dev-race")
+		}
+	}()
+	for i := 0; i < 50; i++ {
+		_, gen, err := rs.AttachClient(ctx, sess.ID, token)
+		if err != nil {
+			t.Fatalf("AttachClient: %v", err)
+		}
+		if err := rs.DetachClient(sess.ID, gen); err != nil {
+			t.Fatalf("DetachClient: %v", err)
+		}
+		if token, err = rs.Resume(ctx, sess.ID, "dev-race"); err != nil {
+			t.Fatalf("Resume: %v", err)
+		}
+	}
+	<-done
+}
+
 func TestResumeSessionNotFound(t *testing.T) {
 	rs, store, _, _, ctx := setupTest(t, Config{})
 	defer rs.Shutdown()
