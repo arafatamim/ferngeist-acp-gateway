@@ -469,6 +469,9 @@ func (w *loggingResponseWriter) Write(p []byte) (int, error) {
 	return written, err
 }
 
+// Unwrap lets http.ResponseController reach the underlying connection.
+func (w *loggingResponseWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
 func (w *loggingResponseWriter) Flush() {
 	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
 		flusher.Flush()

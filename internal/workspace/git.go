@@ -271,12 +271,21 @@ func CountFileLines(path string) (lines int, binary bool) {
 // stdout. It returns an error wrapping the git stderr when git exits non-zero or
 // the binary is missing.
 func RunGit(ctx context.Context, dir string, args ...string) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, GitCommandTimeout)
+	return RunGitTimeout(ctx, GitCommandTimeout, dir, args...)
+}
+
+// RunGitTimeout is RunGit with its own timeout, for the few commands that can
+// legitimately outlast GitCommandTimeout (a big checkout).
+func RunGitTimeout(ctx context.Context, timeout time.Duration, dir string, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	// core.quotePath=false keeps paths with spaces/non-ASCII unquoted and
 	// unescaped in porcelain/numstat output, so they parse and open correctly.
 	full := append([]string{"-c", "core.quotePath=false", "-C", dir}, args...)
 	cmd := exec.CommandContext(ctx, "git", full...)
+	// A hook or helper that outlives the killed git would otherwise hold the
+	// output pipe open and keep us waiting past the timeout.
+	cmd.WaitDelay = time.Second
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		msg := strings.TrimSpace(string(out))

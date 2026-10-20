@@ -61,6 +61,9 @@ func (s *Server) handleWorktreeCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
+	// The server's write timeout would drop the response of a create that is
+	// still checking out a big tree.
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(workspace.CreateTimeout + 5*time.Second))
 	rec, err := s.workspaceSvc.Create(r.Context(), workspace.CreateRequest{Repo: req.Repo, Base: req.Base, Branch: req.Branch})
 	if err != nil {
 		writeWorkspaceError(w, err)

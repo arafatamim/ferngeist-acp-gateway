@@ -774,3 +774,51 @@ func TestCreatePrunesAVanishedWorktreeOfTheSameBranch(t *testing.T) {
 		t.Fatalf("records = %+v, want the vanished one forgotten", records)
 	}
 }
+
+// TestCreateCleansUpAfterAKilledWorktreeAdd stalls the checkout in a
+// post-checkout hook past a short CreateTimeout: Create must fail with 422 and
+// leave no folder, registration, branch or record behind.
+func TestCreateCleansUpAfterAKilledWorktreeAdd(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the stalling hook is a shell script")
+	}
+	repo, _ := initMainRepo(t)
+	svc, stores := newWorktreeTestService(t)
+	ctx := context.Background()
+	hook := filepath.Join(repo, ".git", "hooks", "post-checkout")
+	if err := os.MkdirAll(filepath.Dir(hook), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hook, []byte("#!/bin/sh\nsleep 30\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	defer func(old time.Duration) { CreateTimeout = old }(CreateTimeout)
+	CreateTimeout = 500 * time.Millisecond
+
+	start := time.Now()
+	_, err := svc.Create(ctx, CreateRequest{Repo: repo, Base: "main", Branch: "feat/slow"})
+	wantWorkspaceStatus(t, err, 422)
+	if took := time.Since(start); took > 10*time.Second {
+		t.Fatalf("Create took %s; the timeout did not bound it", took)
+	}
+	if _, err := os.Stat(filepath.Join(repo, ".worktrees", "feat-slow")); !os.IsNotExist(err) {
+		t.Fatalf("partial folder survived: %v", err)
+	}
+	if out, _ := RunGit(ctx, repo, "worktree", "list", "--porcelain"); strings.Contains(out, "feat-slow") {
+		t.Fatalf("git still lists the worktree:\n%s", out)
+	}
+	if _, err := RunGit(ctx, repo, "show-ref", "--verify", "--quiet", "refs/heads/feat/slow"); err == nil {
+		t.Fatal("branch survived the failed create")
+	}
+	if records, _ := stores().ListWorktrees(ctx); len(records) != 0 {
+		t.Fatalf("records = %+v", records)
+	}
+
+	// The same branch can be created once the hook is gone.
+	if err := os.Remove(hook); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Create(ctx, CreateRequest{Repo: repo, Base: "main", Branch: "feat/slow"}); err != nil {
+		t.Fatalf("retry after cleanup: %v", err)
+	}
+}

@@ -16,6 +16,11 @@ import (
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/storage"
 )
 
+// CreateTimeout bounds `git worktree add`, which checks out a whole tree and
+// so can outlast GitCommandTimeout on a big repository. The HTTP layer extends
+// its write deadline to cover it.
+var CreateTimeout = 2 * time.Minute
+
 // Error carries the HTTP status the transport must answer with, so the
 // worktree operations can live outside the HTTP package without losing their
 // status semantics.
@@ -170,16 +175,18 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (storage.Worktr
 	if err := excludeWorktreesDir(ctx, top); err != nil {
 		s.logger.Warn("exclude .worktrees", "repo", top, "error", err)
 	}
-	// ponytail: bounded by RunGit's 15s timeout; a huge checkout needs an
-	// async create (202 + poll) if that ever bites.
-	if _, err := RunGit(ctx, top, "worktree", "add", "-b", branch, path, baseCommit); err != nil {
+	// ponytail: synchronous, bounded by CreateTimeout; a checkout that outlasts
+	// it needs an async create (202 + poll).
+	if _, err := RunGitTimeout(ctx, CreateTimeout, top, "worktree", "add", "-b", branch, path, baseCommit); err != nil {
+		// The folder and branch did not exist before this call, so whatever a
+		// failed or killed add left behind is ours to remove.
+		discardWorktree(top, path, branch)
 		return storage.WorktreeRecord{}, errStatus(422, err.Error())
 	}
 	rec := storage.WorktreeRecord{ID: id, Repo: top, Path: path, Branch: branch, BaseCommit: baseCommit, BaseRef: baseRefOf(ctx, top, base), CreatedAt: s.now()}
 	if err := s.store().SaveWorktree(ctx, rec); err != nil {
 		s.logger.Error("save worktree", "path", path, "error", err)
-		_, _ = RunGit(context.Background(), top, "worktree", "remove", "--force", path)
-		_, _ = RunGit(context.Background(), top, "branch", "-D", branch)
+		discardWorktree(top, path, branch)
 		return storage.WorktreeRecord{}, errStatus(500, "failed to save worktree")
 	}
 	return rec, nil
@@ -188,6 +195,16 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (storage.Worktr
 // listConcurrency bounds how many worktrees List inspects at once, so a long
 // list does not spawn a git process per worktree all at the same time.
 const listConcurrency = 8
+
+// discardWorktree removes a worktree this process just created, folder, git
+// registration and branch, after the create failed part-way.
+func discardWorktree(top, path, branch string) {
+	ctx := context.Background()
+	_, _ = RunGit(ctx, top, "worktree", "remove", "--force", path)
+	_ = removeAllRetrying(path)
+	_, _ = RunGit(ctx, top, "worktree", "prune")
+	_, _ = RunGit(ctx, top, "branch", "-D", branch)
+}
 
 // List returns managed worktrees with their ahead/behind/dirty state, checked
 // concurrently. Records whose directory was deleted out from under the gateway

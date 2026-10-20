@@ -711,7 +711,8 @@ clean. Worktrees outlive the chats that use them: they are removed only on an ex
     - `400` — `repo` is not an absolute path, or `branch` is not a valid branch name
     - `409` — `branch` already exists, or its `.worktrees/` folder already exists
     - `422` — `repo` is not a git repository, `base` does not resolve to a
-      commit, or `git worktree add` failed
+      commit, or `git worktree add` failed or ran past its 2 minute limit. A
+      failed add leaves no folder, registration or branch behind.
 
 - `GET /v1/worktrees`
   - Requires `read` scope.
