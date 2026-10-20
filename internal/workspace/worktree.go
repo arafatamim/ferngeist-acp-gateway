@@ -224,7 +224,12 @@ func (s *Service) Delete(ctx context.Context, id string, force bool) (bool, erro
 		// A leftover folder without its .git file has nothing git can check.
 		if !force {
 			if _, err := os.Stat(filepath.Join(rec.Path, ".git")); err == nil {
-				if st, err := RunGit(ctx, rec.Path, "status", "--porcelain"); err == nil && strings.TrimSpace(st) != "" {
+				st, err := RunGit(ctx, rec.Path, "status", "--porcelain")
+				if err != nil {
+					// An unknown state must not fall through to the forced remove below.
+					return false, errStatus(409, "could not check worktree for uncommitted changes; delete with force to discard them")
+				}
+				if strings.TrimSpace(st) != "" {
 					return false, errStatus(409, "worktree has uncommitted changes")
 				}
 			}

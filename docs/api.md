@@ -723,7 +723,7 @@ clean. Worktrees outlive the chats that use them: they are removed only on an ex
 - `DELETE /v1/worktrees/{worktreeId}?force=true`
   - Requires `control` scope.
   - Removes the worktree directory. Without `force=true` git refuses when the
-    worktree has uncommitted changes (`409`).
+    worktree has uncommitted changes, or when they cannot be checked (`409`).
   - The branch is deleted only when git considers it merged (`git branch -d`);
     otherwise it is kept so committed work survives. Response:
     `{"deleted": "<id>", "branchDeleted": false}`.

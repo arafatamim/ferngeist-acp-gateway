@@ -262,3 +262,28 @@ func TestLogBasePrefersAManagedWorktreesBase(t *testing.T) {
 		t.Fatalf("LogBase in a managed worktree = %q, want %q", got, c1)
 	}
 }
+
+// TestDeleteKeepsWorktreeWhenStatusFails breaks the worktree's .git link so
+// git status errors: a non-force delete must refuse rather than wipe the folder.
+func TestDeleteKeepsWorktreeWhenStatusFails(t *testing.T) {
+	repo, _ := initMainRepo(t)
+	svc, _ := newWorktreeTestService(t)
+	ctx := context.Background()
+	rec, err := svc.Create(ctx, CreateRequest{Repo: repo, Branch: "feat/broken"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(rec.Path, "unsaved.txt"), []byte("work\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rec.Path, ".git"), []byte("gitdir: /nonexistent\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := svc.Delete(ctx, rec.ID, false); statusOf(err) != 409 {
+		t.Fatalf("Delete() error = %v, want 409", err)
+	}
+	if _, err := os.Stat(filepath.Join(rec.Path, "unsaved.txt")); err != nil {
+		t.Fatalf("uncommitted file was removed: %v", err)
+	}
+}
