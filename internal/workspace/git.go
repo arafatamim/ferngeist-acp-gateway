@@ -277,26 +277,55 @@ func RunGit(ctx context.Context, dir string, args ...string) (string, error) {
 // RunGitTimeout is RunGit with its own timeout, for the few commands that can
 // legitimately outlast GitCommandTimeout (a big checkout).
 func RunGitTimeout(ctx context.Context, timeout time.Duration, dir string, args ...string) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	// core.quotePath=false keeps paths with spaces/non-ASCII unquoted and
-	// unescaped in porcelain/numstat output, so they parse and open correctly.
-	full := append([]string{"-c", "core.quotePath=false", "-C", dir}, args...)
-	cmd := exec.CommandContext(ctx, "git", full...)
-	// A daemon has no terminal: a credential prompt would only wait out the timeout.
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
-	// A hook or helper that outlives the killed git would otherwise hold the
-	// output pipe open and keep us waiting past the timeout.
-	cmd.WaitDelay = time.Second
-	out, err := cmd.CombinedOutput()
+	out, _, err := runBounded(ctx, timeout, nil, true, func(ctx context.Context) *exec.Cmd {
+		// core.quotePath=false keeps paths with spaces/non-ASCII unquoted and
+		// unescaped in porcelain/numstat output, so they parse and open correctly.
+		full := append([]string{"-c", "core.quotePath=false", "-C", dir}, args...)
+		return exec.CommandContext(ctx, "git", full...)
+	})
 	if err != nil {
-		msg := strings.TrimSpace(string(out))
+		msg := strings.TrimSpace(out)
 		if msg == "" {
 			msg = err.Error()
 		}
 		return "", fmt.Errorf("git %s: %s", strings.Join(args, " "), msg)
 	}
-	return string(out), nil
+	return out, nil
+}
+
+// runBounded is the one exec implementation behind RunGitTimeout (git) and
+// runTool (external tools). It bounds the command with timeout, denies
+// credential prompts in its env (always GIT_TERMINAL_PROMPT=0, plus the
+// caller's extraEnv additions) and sets the WaitDelay that keeps a helper
+// which outlives the killed command from holding the output pipe open and
+// extending the wait past the timeout. mkCmd builds the command after the
+// timeout context exists, so a timeout kills the command while it runs. With
+// combined, stdout and stderr share one buffer, and on failure they are
+// returned as the stdout value for the caller's message; without, stderr is
+// captured on its own and returned for it.
+func runBounded(ctx context.Context, timeout time.Duration, extraEnv []string, combined bool, mkCmd func(ctx context.Context) *exec.Cmd) (out, stderr string, err error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	cmd := mkCmd(ctx)
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	if len(extraEnv) > 0 {
+		cmd.Env = append(cmd.Env, extraEnv...)
+	}
+	cmd.WaitDelay = time.Second
+	var stdout, stderrBuf bytes.Buffer
+	cmd.Stdout = &stdout
+	if combined {
+		cmd.Stderr = &stdout
+	} else {
+		cmd.Stderr = &stderrBuf
+	}
+	if err = cmd.Run(); err != nil {
+		if combined {
+			return strings.TrimSpace(stdout.String()), "", err
+		}
+		return "", strings.TrimSpace(stderrBuf.String()), err
+	}
+	return stdout.String(), "", nil
 }
 
 // RunGitLimited runs a git command and returns at most max+1 bytes of stdout
@@ -335,6 +364,14 @@ func RunGitLimited(ctx context.Context, dir string, max int, args ...string) (st
 		return "", fmt.Errorf("git %s: %s", strings.Join(args, " "), readErr)
 	}
 	return string(out), nil
+}
+
+// branchExists reports whether refs/heads/<branch> resolves, i.e. the repo
+// has a local branch by that name. Callers rely on this exact show-ref idiom
+// and on the bool being success/failure of it.
+func branchExists(ctx context.Context, repo, branch string) bool {
+	_, err := RunGit(ctx, repo, "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
+	return err == nil
 }
 
 // Status runs `git status --porcelain=v2` scoped to cwd. The `-- .` pathspec

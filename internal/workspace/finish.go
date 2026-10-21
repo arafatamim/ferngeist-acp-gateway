@@ -1,13 +1,11 @@
 package workspace
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
-	"time"
 
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/storage"
 )
@@ -87,7 +85,7 @@ func (s *Service) Merge(ctx context.Context, id string, req MergeRequest) (Merge
 	if rec.BaseRef == "" {
 		return MergeResult{}, errStatus(409, "worktree has no base branch to merge into")
 	}
-	if _, err := RunGit(ctx, rec.Repo, "show-ref", "--verify", "--quiet", "refs/heads/"+rec.BaseRef); err != nil {
+	if !branchExists(ctx, rec.Repo, rec.BaseRef) {
 		return MergeResult{}, errStatus(409, "base "+rec.BaseRef+" is not a local branch")
 	}
 	if head, err := RunGit(ctx, rec.Repo, "symbolic-ref", "--quiet", "--short", "HEAD"); err != nil || strings.TrimSpace(head) != rec.BaseRef {
@@ -218,7 +216,7 @@ func prBase(ctx context.Context, rec storage.WorktreeRecord) string {
 	if rec.BaseRef == "" {
 		return ""
 	}
-	if _, err := RunGit(ctx, rec.Repo, "show-ref", "--verify", "--quiet", "refs/heads/"+rec.BaseRef); err == nil {
+	if branchExists(ctx, rec.Repo, rec.BaseRef) {
 		return rec.BaseRef
 	}
 	if _, _, isPR := parsePRRef(rec.BaseRef); isPR {
@@ -233,24 +231,19 @@ func prBase(ctx context.Context, rec storage.WorktreeRecord) string {
 // runTool runs an external command in dir with RunGit's timeout and no
 // credential prompts, returning stdout; failures carry its stderr.
 func runTool(ctx context.Context, dir, name string, args ...string) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, GitCommandTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GH_PROMPT_DISABLED=1")
-	// As in RunGitTimeout: a push hook that outlives a killed git holds the pipe.
-	cmd.WaitDelay = time.Second
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
+	out, stderr, err := runBounded(ctx, GitCommandTimeout, []string{"GH_PROMPT_DISABLED=1"}, false, func(ctx context.Context) *exec.Cmd {
+		cmd := exec.CommandContext(ctx, name, args...)
+		cmd.Dir = dir
+		return cmd
+	})
 	if err != nil {
-		msg := strings.TrimSpace(stderr.String())
+		msg := strings.TrimSpace(stderr)
 		if msg == "" {
 			msg = err.Error()
 		}
 		return "", fmt.Errorf("%s %s: %s", name, args[0], msg)
 	}
-	return string(out), nil
+	return out, nil
 }
 
 func lastLine(s string) string {
