@@ -363,7 +363,7 @@ func TestWorktree_UnmanagedAndAdopt(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("unmanaged code = %d, body = %s", rec.Code, rec.Body.String())
 	}
-	var unmanaged []workspace.UnmanagedWorktree
+	var unmanaged []unmanagedWorktreeResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &unmanaged); err != nil {
 		t.Fatal(err)
 	}
@@ -406,7 +406,7 @@ func TestWorktree_UnmanagedAndAdopt(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("unmanaged code = %d", rec.Code)
 	}
-	var unmanagedAfter []workspace.UnmanagedWorktree
+	var unmanagedAfter []unmanagedWorktreeResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &unmanagedAfter); err != nil {
 		t.Fatal(err)
 	}

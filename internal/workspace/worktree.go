@@ -747,12 +747,13 @@ func RepoRefs(ctx context.Context, repo string) (RefsPayload, error) {
 }
 
 // UnmanagedWorktree describes a git worktree that exists in git but is not
-// tracked by the gateway store.
+// tracked by the gateway store. Its JSON shape lives in the api layer as
+// unmanagedWorktreeResponse.
 type UnmanagedWorktree struct {
-	Path     string `json:"path"`
-	Branch   string `json:"branch,omitempty"`
-	Head     string `json:"head,omitempty"`
-	Detached bool   `json:"detached,omitempty"`
+	Path     string
+	Branch   string
+	Head     string
+	Detached bool
 }
 
 type porcelainWorktree struct {

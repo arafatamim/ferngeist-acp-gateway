@@ -38,6 +38,16 @@ type worktreeResponse struct {
 	Chats []string `json:"chats,omitempty"`
 }
 
+// unmanagedWorktreeResponse is one git worktree that exists in the repo but is
+// not managed by the gateway. Path is what the client passes to adopt it.
+// Branch, head and detached are omitted when zero.
+type unmanagedWorktreeResponse struct {
+	Path     string `json:"path"`
+	Branch   string `json:"branch,omitempty"`
+	Head     string `json:"head,omitempty"`
+	Detached bool   `json:"detached,omitempty"`
+}
+
 type worktreeCreateRequest struct {
 	Repo   string `json:"repo"`
 	Base   string `json:"base"`
@@ -150,7 +160,11 @@ func (s *Server) handleWorktreeUnmanaged(w http.ResponseWriter, r *http.Request)
 		writeWorkspaceError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, list)
+	out := make([]unmanagedWorktreeResponse, 0, len(list))
+	for _, wt := range list {
+		out = append(out, unmanagedWorktreeResponse{Path: wt.Path, Branch: wt.Branch, Head: wt.Head, Detached: wt.Detached})
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // GET /v1/worktrees/refs?repo=<absolute path>
