@@ -900,3 +900,291 @@ func TestCreateCleansUpAfterAKilledWorktreeAdd(t *testing.T) {
 		t.Fatalf("retry after cleanup: %v", err)
 	}
 }
+
+func TestUnmanagedWorktreesList(t *testing.T) {
+	repo, _ := initMainRepo(t)
+	svc, _ := newWorktreeTestService(t)
+	ctx := context.Background()
+
+	// Error cases
+	if _, err := svc.Unmanaged(ctx, "relative/path"); err == nil {
+		t.Fatal("expected error for relative path")
+	} else {
+		wantWorkspaceStatus(t, err, 400)
+	}
+	if _, err := svc.Unmanaged(ctx, t.TempDir()); err == nil {
+		t.Fatal("expected error for non-git repo")
+	} else {
+		wantWorkspaceStatus(t, err, 422)
+	}
+
+	// Create an external worktree outside .worktrees
+	extPath := filepath.Join(t.TempDir(), "external-wt")
+	if _, err := RunGit(ctx, repo, "worktree", "add", "-b", "ext-feature", extPath, "main"); err != nil {
+		t.Fatalf("git worktree add: %v", err)
+	}
+
+	// Create a gateway-managed worktree
+	managed, err := svc.Create(ctx, CreateRequest{Repo: repo, Base: "main", Branch: "feat/managed"})
+	if err != nil {
+		t.Fatalf("svc.Create: %v", err)
+	}
+
+	unmanaged, err := svc.Unmanaged(ctx, repo)
+	if err != nil {
+		t.Fatalf("svc.Unmanaged: %v", err)
+	}
+
+	if len(unmanaged) != 1 {
+		t.Fatalf("Unmanaged returned %d worktrees, want 1: %+v", len(unmanaged), unmanaged)
+	}
+	if unmanaged[0].Path != extPath {
+		t.Fatalf("Unmanaged path = %q, want %q", unmanaged[0].Path, extPath)
+	}
+	if unmanaged[0].Branch != "ext-feature" {
+		t.Fatalf("Unmanaged branch = %q, want ext-feature", unmanaged[0].Branch)
+	}
+	if unmanaged[0].Head == "" {
+		t.Fatal("Unmanaged head is empty")
+	}
+
+	// Ensure main repo and managed worktree are not in the list
+	for _, wt := range unmanaged {
+		if wt.Path == repo {
+			t.Fatalf("main repo %q found in unmanaged list", repo)
+		}
+		if wt.Path == managed.Path {
+			t.Fatalf("managed worktree %q found in unmanaged list", managed.Path)
+		}
+	}
+}
+
+func TestAdoptWorktree(t *testing.T) {
+	repo, c1 := initMainRepo(t)
+	svc, _ := newWorktreeTestService(t)
+	ctx := context.Background()
+
+	// External worktree created outside gateway
+	extPath := filepath.Join(t.TempDir(), "external-wt")
+	if _, err := RunGit(ctx, repo, "worktree", "add", "-b", "feat/adopted", extPath, "main"); err != nil {
+		t.Fatalf("git worktree add: %v", err)
+	}
+
+	// Add 1 commit to external worktree (ahead = 1)
+	if err := os.WriteFile(filepath.Join(extPath, "ext.txt"), []byte("ext content\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RunGit(ctx, extPath, "add", "ext.txt"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RunGit(ctx, extPath, "commit", "-m", "worktree commit"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Add 1 commit to main (behind = 1)
+	if err := os.WriteFile(filepath.Join(repo, "main2.txt"), []byte("main content\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RunGit(ctx, repo, "add", "main2.txt"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RunGit(ctx, repo, "commit", "-m", "main commit"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Add unstaged edit in external worktree (dirty = true)
+	if err := os.WriteFile(filepath.Join(extPath, "ext.txt"), []byte("dirty content\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Adopt without repo explicitly given (inferred from path)
+	status, err := svc.Adopt(ctx, AdoptRequest{Path: extPath})
+	if err != nil {
+		t.Fatalf("svc.Adopt: %v", err)
+	}
+
+	if status.ID == "" {
+		t.Fatal("Adopt returned empty ID")
+	}
+	if status.Repo != repo {
+		t.Fatalf("status.Repo = %q, want %q", status.Repo, repo)
+	}
+	if status.Path != extPath {
+		t.Fatalf("status.Path = %q, want %q", status.Path, extPath)
+	}
+	if status.Branch != "feat/adopted" {
+		t.Fatalf("status.Branch = %q, want feat/adopted", status.Branch)
+	}
+	if status.BaseRef != "main" {
+		t.Fatalf("status.BaseRef = %q, want main", status.BaseRef)
+	}
+	if status.BaseCommit != c1 {
+		t.Fatalf("status.BaseCommit = %q, want %q", status.BaseCommit, c1)
+	}
+	if status.Ahead == nil || *status.Ahead != 1 {
+		t.Fatalf("status.Ahead = %v, want 1", status.Ahead)
+	}
+	if status.Behind == nil || *status.Behind != 1 {
+		t.Fatalf("status.Behind = %v, want 1", status.Behind)
+	}
+	if status.Dirty == nil || !*status.Dirty {
+		t.Fatalf("status.Dirty = %v, want true", status.Dirty)
+	}
+
+	// Check BaseRef for base-aware diffs
+	if baseRef := svc.BaseRef(ctx, extPath); baseRef != c1 {
+		t.Fatalf("svc.BaseRef = %q, want %q", baseRef, c1)
+	}
+
+	// It must appear in List
+	list, err := svc.List(ctx)
+	if err != nil {
+		t.Fatalf("svc.List: %v", err)
+	}
+	if len(list) != 1 || list[0].ID != status.ID {
+		t.Fatalf("svc.List = %+v, want adopted worktree %s", list, status.ID)
+	}
+
+	// It must be accessible via Get
+	got, err := svc.Get(ctx, status.ID)
+	if err != nil {
+		t.Fatalf("svc.Get: %v", err)
+	}
+	if got.ID != status.ID {
+		t.Fatalf("svc.Get = %+v, want %s", got, status.ID)
+	}
+
+	// Adopting again should 409
+	_, err = svc.Adopt(ctx, AdoptRequest{Path: extPath})
+	wantWorkspaceStatus(t, err, 409)
+}
+
+func TestAdoptWorktree_ErrorsAndDetached(t *testing.T) {
+	repo, _ := initMainRepo(t)
+	svc, _ := newWorktreeTestService(t)
+	ctx := context.Background()
+
+	// Relative path
+	_, err := svc.Adopt(ctx, AdoptRequest{Path: "relative/path"})
+	wantWorkspaceStatus(t, err, 400)
+
+	// Non-existent path
+	_, err = svc.Adopt(ctx, AdoptRequest{Path: filepath.Join(t.TempDir(), "non-existent")})
+	wantWorkspaceStatus(t, err, 404)
+
+	// Main checkout
+	_, err = svc.Adopt(ctx, AdoptRequest{Path: repo})
+	wantWorkspaceStatus(t, err, 400)
+
+	// Path not a worktree of repo
+	notWT := t.TempDir()
+	_, err = svc.Adopt(ctx, AdoptRequest{Repo: repo, Path: notWT})
+	wantWorkspaceStatus(t, err, 422)
+
+	// Detached HEAD worktree
+	extPath := filepath.Join(t.TempDir(), "detached-wt")
+	if _, err := RunGit(ctx, repo, "worktree", "add", "--detach", extPath, "main"); err != nil {
+		t.Fatalf("git worktree add --detach: %v", err)
+	}
+
+	// Detached without branch fails with 400
+	_, err = svc.Adopt(ctx, AdoptRequest{Path: extPath})
+	wantWorkspaceStatus(t, err, 400)
+
+	// Detached with branch succeeds and checks out the branch
+	status, err := svc.Adopt(ctx, AdoptRequest{Path: extPath, Branch: "feat/from-detached"})
+	if err != nil {
+		t.Fatalf("Adopt with branch: %v", err)
+	}
+	if status.Branch != "feat/from-detached" {
+		t.Fatalf("status.Branch = %q, want feat/from-detached", status.Branch)
+	}
+}
+
+func TestCreateFromRemoteBranchAndPR(t *testing.T) {
+	repo, c1 := initMainRepo(t)
+	addBareOrigin(t, repo)
+	svc, _ := newWorktreeTestService(t)
+	ctx := context.Background()
+
+	// Push a remote branch to bare origin
+	if out, err := exec.Command("git", "-C", repo, "push", "-q", "origin", "main:refs/heads/feat-remote").CombinedOutput(); err != nil {
+		t.Fatalf("push feat-remote: %v: %s", err, out)
+	}
+
+	// Push a PR ref to bare origin
+	if out, err := exec.Command("git", "-C", repo, "push", "-q", "origin", "main:refs/pull/123/head").CombinedOutput(); err != nil {
+		t.Fatalf("push pr/123: %v: %s", err, out)
+	}
+
+	// 1. Invalid base ref syntax returns 400
+	_, err := svc.Create(ctx, CreateRequest{Repo: repo, Base: "--flag"})
+	wantWorkspaceStatus(t, err, 400)
+
+	_, err = svc.Create(ctx, CreateRequest{Repo: repo, Base: "bad..ref"})
+	wantWorkspaceStatus(t, err, 400)
+
+	_, err = svc.Create(ctx, CreateRequest{Repo: repo, Base: "bad~ref"})
+	wantWorkspaceStatus(t, err, 400)
+
+	// 2. Unknown remote branch and unknown PR return 422
+	_, err = svc.Create(ctx, CreateRequest{Repo: repo, Base: "origin/non-existent"})
+	wantWorkspaceStatus(t, err, 422)
+
+	_, err = svc.Create(ctx, CreateRequest{Repo: repo, Base: "pr/999"})
+	wantWorkspaceStatus(t, err, 422)
+
+	// 3. Create from remote branch (origin/feat-remote)
+	recRemote, err := svc.Create(ctx, CreateRequest{Repo: repo, Base: "origin/feat-remote", Branch: "review/feat-remote"})
+	if err != nil {
+		t.Fatalf("create from origin/feat-remote: %v", err)
+	}
+	if recRemote.BaseCommit != c1 {
+		t.Fatalf("BaseCommit = %q, want %q", recRemote.BaseCommit, c1)
+	}
+	if recRemote.BaseRef != "origin/feat-remote" {
+		t.Fatalf("BaseRef = %q, want origin/feat-remote", recRemote.BaseRef)
+	}
+	if recRemote.Branch != "review/feat-remote" {
+		t.Fatalf("Branch = %q, want review/feat-remote", recRemote.Branch)
+	}
+
+	// Verify status of the remote worktree
+	stRemote, err := svc.Get(ctx, recRemote.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if stRemote.Ahead == nil || *stRemote.Ahead != 0 {
+		t.Fatalf("Ahead = %v, want 0", stRemote.Ahead)
+	}
+	if stRemote.Behind == nil || *stRemote.Behind != 0 {
+		t.Fatalf("Behind = %v, want 0", stRemote.Behind)
+	}
+
+	// 4. Create from PR number (pr/123)
+	recPR, err := svc.Create(ctx, CreateRequest{Repo: repo, Base: "pr/123", Branch: "review/pr-123"})
+	if err != nil {
+		t.Fatalf("create from pr/123: %v", err)
+	}
+	if recPR.BaseCommit != c1 {
+		t.Fatalf("BaseCommit = %q, want %q", recPR.BaseCommit, c1)
+	}
+	if recPR.BaseRef != "origin/pr/123" {
+		t.Fatalf("BaseRef = %q, want origin/pr/123", recPR.BaseRef)
+	}
+	if recPR.Branch != "review/pr-123" {
+		t.Fatalf("Branch = %q, want review/pr-123", recPR.Branch)
+	}
+
+	// Verify status of the PR worktree
+	stPR, err := svc.Get(ctx, recPR.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if stPR.Ahead == nil || *stPR.Ahead != 0 {
+		t.Fatalf("Ahead = %v, want 0", stPR.Ahead)
+	}
+	if stPR.Behind == nil || *stPR.Behind != 0 {
+		t.Fatalf("Behind = %v, want 0", stPR.Behind)
+	}
+}

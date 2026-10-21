@@ -38,6 +38,13 @@ type worktreeCreateRequest struct {
 	Branch string `json:"branch"`
 }
 
+type worktreeAdoptRequest struct {
+	Repo   string `json:"repo"`
+	Path   string `json:"path"`
+	Base   string `json:"base"`
+	Branch string `json:"branch"`
+}
+
 func toWorktreeResponse(r storage.WorktreeRecord) worktreeResponse {
 	return worktreeResponse{ID: r.ID, Repo: r.Repo, Path: r.Path, Branch: r.Branch, BaseCommit: r.BaseCommit, CreatedAt: r.CreatedAt}
 }
@@ -76,6 +83,32 @@ func (s *Server) handleWorktreeCreate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, toWorktreeResponse(rec))
 }
 
+// POST /v1/worktrees/adopt {path, repo?, base?, branch?}
+// Adopts an existing git worktree (created outside the gateway) into gateway
+// management so it appears in GET /v1/worktrees and gets base-aware diffs.
+func (s *Server) handleWorktreeAdopt(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireGatewayScope(w, r, pairing.ScopeControl); !ok {
+		return
+	}
+	var req worktreeAdoptRequest
+	r.Body = http.MaxBytesReader(w, r.Body, jsonBodyLimit)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	status, err := s.workspaceSvc.Adopt(r.Context(), workspace.AdoptRequest{
+		Repo:   req.Repo,
+		Path:   req.Path,
+		Base:   req.Base,
+		Branch: req.Branch,
+	})
+	if err != nil {
+		writeWorkspaceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, toWorktreeStatusResponse(status))
+}
+
 // GET /v1/worktrees
 // Lists managed worktrees with their ahead/behind/dirty state. Worktrees whose
 // directory was deleted out from under the gateway are left out; they are
@@ -94,6 +127,21 @@ func (s *Server) handleWorktreeList(w http.ResponseWriter, r *http.Request) {
 		out = append(out, toWorktreeStatusResponse(status))
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// GET /v1/worktrees/unmanaged?repo=<absolute path>
+// Lists git worktrees in the repository that are not currently managed by the
+// gateway, parsed from `git worktree list --porcelain`.
+func (s *Server) handleWorktreeUnmanaged(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireGatewayScope(w, r, pairing.ScopeControl); !ok {
+		return
+	}
+	list, err := s.workspaceSvc.Unmanaged(r.Context(), r.URL.Query().Get("repo"))
+	if err != nil {
+		writeWorkspaceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, list)
 }
 
 // GET /v1/worktrees/refs?repo=<absolute path>

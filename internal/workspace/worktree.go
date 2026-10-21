@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -138,15 +139,10 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (storage.Worktr
 	}
 	top = filepath.Clean(strings.TrimSpace(top))
 	base := strings.TrimSpace(req.Base)
-	if base == "" {
-		base = "HEAD"
-	}
-	// "--end-of-options" stops a base like "--foo" being read as a flag.
-	baseCommit, err := RunGit(ctx, top, "rev-parse", "--verify", "--quiet", "--end-of-options", base+"^{commit}")
+	baseCommit, baseRef, err := s.resolveBaseCommitAndRef(ctx, top, base)
 	if err != nil {
-		return storage.WorktreeRecord{}, errStatus(422, "unknown base: "+base)
+		return storage.WorktreeRecord{}, err
 	}
-	baseCommit = strings.TrimSpace(baseCommit)
 
 	idBytes := make([]byte, 4)
 	if _, err := rand.Read(idBytes); err != nil {
@@ -186,7 +182,7 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (storage.Worktr
 		discardWorktree(top, path, branch)
 		return storage.WorktreeRecord{}, errStatus(422, err.Error())
 	}
-	rec := storage.WorktreeRecord{ID: id, Repo: top, Path: path, Branch: branch, BaseCommit: baseCommit, BaseRef: baseRefOf(ctx, top, base), CreatedAt: s.now()}
+	rec := storage.WorktreeRecord{ID: id, Repo: top, Path: path, Branch: branch, BaseCommit: baseCommit, BaseRef: baseRef, CreatedAt: s.now()}
 	if err := s.store().SaveWorktree(ctx, rec); err != nil {
 		s.logger.Error("save worktree", "path", path, "error", err)
 		discardWorktree(top, path, branch)
@@ -363,6 +359,156 @@ func (s *Service) Delete(ctx context.Context, id string, force bool) (bool, erro
 		s.logger.Error("delete worktree record", "id", rec.ID, "error", err)
 	}
 	return branchErr == nil, nil
+}
+
+// isDigits reports whether s consists entirely of ASCII digits.
+func isDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// parsePRRef inspects name for PR shorthand like "pr/123", "pull/123",
+// "origin/pr/123", or "<remote>/pr/<id>".
+func parsePRRef(name string) (remote, prID string, ok bool) {
+	parts := strings.Split(name, "/")
+	if len(parts) == 2 {
+		if (parts[0] == "pr" || parts[0] == "pull") && isDigits(parts[1]) {
+			return "origin", parts[1], true
+		}
+	} else if len(parts) == 3 {
+		if (parts[1] == "pr" || parts[1] == "pull") && isDigits(parts[2]) {
+			return parts[0], parts[2], true
+		}
+	}
+	return "", "", false
+}
+
+func (s *Service) repoRemotes(ctx context.Context, top string) []string {
+	out, err := RunGit(ctx, top, "remote")
+	if err != nil {
+		return nil
+	}
+	var remotes []string
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			remotes = append(remotes, line)
+		}
+	}
+	return remotes
+}
+
+func (s *Service) hasRemote(ctx context.Context, top, remote string) bool {
+	for _, r := range s.repoRemotes(ctx, top) {
+		if r == remote {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Service) parseRemoteBranch(ctx context.Context, top, base string) (remote, branch string, ok bool) {
+	remotes := s.repoRemotes(ctx, top)
+	for _, r := range remotes {
+		prefix := r + "/"
+		if strings.HasPrefix(base, prefix) {
+			if _, _, isPR := parsePRRef(base); isPR {
+				return "", "", false
+			}
+			b := strings.TrimPrefix(base, prefix)
+			if b != "" {
+				return r, b, true
+			}
+		}
+	}
+	return "", "", false
+}
+
+func (s *Service) fetchAndResolvePR(ctx context.Context, top, remote, prID string) (string, string, error) {
+	dstRef := fmt.Sprintf("refs/remotes/%s/pr/%s", remote, prID)
+	shorthandRef := fmt.Sprintf("%s/pr/%s", remote, prID)
+
+	// Try GitHub PR refspec first (+refs/pull/<id>/head:refs/remotes/<remote>/pr/<id>)
+	ghRefspec := fmt.Sprintf("+refs/pull/%s/head:%s", prID, dstRef)
+	_, fetchErr := RunGitTimeout(ctx, CreateTimeout, top, "fetch", "--quiet", "--end-of-options", remote, ghRefspec)
+	if fetchErr != nil {
+		// Try GitLab MR refspec (+refs/merge-requests/<id>/head:refs/remotes/<remote>/pr/<id>)
+		glRefspec := fmt.Sprintf("+refs/merge-requests/%s/head:%s", prID, dstRef)
+		if _, glErr := RunGitTimeout(ctx, CreateTimeout, top, "fetch", "--quiet", "--end-of-options", remote, glRefspec); glErr != nil {
+			if out, err := RunGit(ctx, top, "rev-parse", "--verify", "--quiet", "--end-of-options", dstRef+"^{commit}"); err == nil {
+				return strings.TrimSpace(out), shorthandRef, nil
+			}
+			return "", "", errStatus(422, "failed to fetch PR "+prID+" from "+remote+": "+fetchErr.Error())
+		}
+	}
+
+	commit, err := RunGit(ctx, top, "rev-parse", "--verify", "--quiet", "--end-of-options", dstRef+"^{commit}")
+	if err != nil {
+		return "", "", errStatus(422, "failed to resolve PR commit for "+prID)
+	}
+	return strings.TrimSpace(commit), shorthandRef, nil
+}
+
+func (s *Service) fetchAndResolveRemoteBranch(ctx context.Context, top, remote, branch, originalRef string) (string, string, error) {
+	dstRef := fmt.Sprintf("refs/remotes/%s/%s", remote, branch)
+	refspec := fmt.Sprintf("+refs/heads/%s:%s", branch, dstRef)
+	_, fetchErr := RunGitTimeout(ctx, CreateTimeout, top, "fetch", "--quiet", "--end-of-options", remote, refspec)
+	if fetchErr != nil {
+		if out, err := RunGit(ctx, top, "rev-parse", "--verify", "--quiet", "--end-of-options", dstRef+"^{commit}"); err == nil {
+			return strings.TrimSpace(out), originalRef, nil
+		}
+		if out, err := RunGit(ctx, top, "rev-parse", "--verify", "--quiet", "--end-of-options", originalRef+"^{commit}"); err == nil {
+			return strings.TrimSpace(out), originalRef, nil
+		}
+		return "", "", errStatus(422, "failed to fetch "+originalRef+": "+fetchErr.Error())
+	}
+
+	commit, err := RunGit(ctx, top, "rev-parse", "--verify", "--quiet", "--end-of-options", dstRef+"^{commit}")
+	if err != nil {
+		return "", "", errStatus(422, "failed to resolve ref "+originalRef)
+	}
+	return strings.TrimSpace(commit), originalRef, nil
+}
+
+// resolveBaseCommitAndRef resolves the base ref for a new worktree. If base
+// names a pull request (e.g. "pr/123", "origin/pr/123") or a remote branch
+// (e.g. "origin/feat-x"), it fetches it from the remote first. It strictly
+// validates the ref name to prevent option or revision injection.
+func (s *Service) resolveBaseCommitAndRef(ctx context.Context, top, base string) (baseCommit, baseRef string, err error) {
+	if base == "" {
+		base = "HEAD"
+	} else if !validRefName(base) {
+		return "", "", errStatus(400, "invalid base: "+base)
+	}
+
+	if remote, prID, ok := parsePRRef(base); ok {
+		return s.fetchAndResolvePR(ctx, top, remote, prID)
+	}
+
+	if remote, branch, ok := s.parseRemoteBranch(ctx, top, base); ok {
+		return s.fetchAndResolveRemoteBranch(ctx, top, remote, branch, base)
+	}
+
+	out, err := RunGit(ctx, top, "rev-parse", "--verify", "--quiet", "--end-of-options", base+"^{commit}")
+	if err == nil {
+		commit := strings.TrimSpace(out)
+		return commit, baseRefOf(ctx, top, base), nil
+	}
+
+	if s.hasRemote(ctx, top, "origin") {
+		if commit, ref, fetchErr := s.fetchAndResolveRemoteBranch(ctx, top, "origin", base, "origin/"+base); fetchErr == nil {
+			return commit, ref, nil
+		}
+	}
+
+	return "", "", errStatus(422, "unknown base: "+base)
 }
 
 // baseRefOf resolves what to remember as the worktree's base ref: the base
@@ -544,4 +690,321 @@ func RepoRefs(ctx context.Context, repo string) (RefsPayload, error) {
 		return RefsPayload{}, errStatus(400, "repo must be an absolute path")
 	}
 	return Refs(ctx, repo)
+}
+
+// UnmanagedWorktree describes a git worktree that exists in git but is not
+// tracked by the gateway store.
+type UnmanagedWorktree struct {
+	Path     string `json:"path"`
+	Branch   string `json:"branch,omitempty"`
+	Head     string `json:"head,omitempty"`
+	Detached bool   `json:"detached,omitempty"`
+}
+
+type porcelainWorktree struct {
+	path     string
+	head     string
+	branch   string
+	detached bool
+	bare     bool
+	locked   bool
+	prunable bool
+}
+
+func parseWorktreeListPorcelain(output string) []porcelainWorktree {
+	var worktrees []porcelainWorktree
+	var current porcelainWorktree
+	lines := strings.Split(output, "\n")
+	hasEntry := false
+
+	flush := func() {
+		if hasEntry && current.path != "" {
+			worktrees = append(worktrees, current)
+		}
+		current = porcelainWorktree{}
+		hasEntry = false
+	}
+
+	for _, line := range lines {
+		line = strings.TrimRight(line, "\r")
+		if line == "" {
+			flush()
+			continue
+		}
+		if strings.HasPrefix(line, "worktree ") {
+			if hasEntry {
+				flush()
+			}
+			current.path = strings.TrimPrefix(line, "worktree ")
+			hasEntry = true
+		} else if strings.HasPrefix(line, "HEAD ") {
+			current.head = strings.TrimPrefix(line, "HEAD ")
+		} else if strings.HasPrefix(line, "branch ") {
+			ref := strings.TrimPrefix(line, "branch ")
+			current.branch = strings.TrimPrefix(ref, "refs/heads/")
+		} else if line == "detached" {
+			current.detached = true
+		} else if line == "bare" {
+			current.bare = true
+		} else if strings.HasPrefix(line, "locked") {
+			current.locked = true
+		} else if strings.HasPrefix(line, "prunable") {
+			current.prunable = true
+		}
+	}
+	flush()
+	return worktrees
+}
+
+// Unmanaged lists git worktrees in the repository that are not currently
+// managed by the gateway, parsed from `git worktree list --porcelain`.
+func (s *Service) Unmanaged(ctx context.Context, repo string) ([]UnmanagedWorktree, error) {
+	repo = strings.TrimSpace(repo)
+	if !filepath.IsAbs(repo) {
+		return nil, errStatus(400, "repo must be an absolute path")
+	}
+	top, err := RunGit(ctx, repo, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return nil, errStatus(422, err.Error())
+	}
+	top = filepath.Clean(strings.TrimSpace(top))
+	out, err := RunGit(ctx, top, "worktree", "list", "--porcelain")
+	if err != nil {
+		return nil, errStatus(422, err.Error())
+	}
+	parsed := parseWorktreeListPorcelain(out)
+
+	managedPaths := make(map[string]bool)
+	if store := s.store(); store != nil {
+		records, err := store.ListWorktrees(ctx)
+		if err != nil {
+			s.logger.Error("list worktrees", "error", err)
+			return nil, errStatus(500, "failed to list worktrees")
+		}
+		for _, rec := range records {
+			managedPaths[filepath.Clean(rec.Path)] = true
+			if eval, err := filepath.EvalSymlinks(rec.Path); err == nil {
+				managedPaths[filepath.Clean(eval)] = true
+			}
+		}
+	}
+
+	topEval, _ := filepath.EvalSymlinks(top)
+	outList := make([]UnmanagedWorktree, 0)
+	for _, wt := range parsed {
+		p := filepath.Clean(wt.path)
+		pEval, _ := filepath.EvalSymlinks(p)
+		if p == top || (topEval != "" && pEval == topEval) {
+			continue
+		}
+		if wt.bare {
+			continue
+		}
+		if managedPaths[p] || (pEval != "" && managedPaths[pEval]) {
+			continue
+		}
+		if folderMissing(p) {
+			continue
+		}
+		outList = append(outList, UnmanagedWorktree{
+			Path:     p,
+			Branch:   wt.branch,
+			Head:     wt.head,
+			Detached: wt.detached,
+		})
+	}
+	return outList, nil
+}
+
+// AdoptRequest is the client-supplied shape of a worktree adoption.
+type AdoptRequest struct {
+	Repo   string
+	Path   string
+	Base   string
+	Branch string
+}
+
+// Adopt brings an existing git worktree (created outside the gateway, e.g. on
+// a PC or via Claude Code) under gateway management by saving a WorktreeRecord
+// for it, so it gets base-aware diffs and appears in List.
+func (s *Service) Adopt(ctx context.Context, req AdoptRequest) (WorktreeStatus, error) {
+	path := strings.TrimSpace(req.Path)
+	if path == "" || !filepath.IsAbs(path) {
+		return WorktreeStatus{}, errStatus(400, "path must be an absolute path")
+	}
+	path = filepath.Clean(path)
+	if folderMissing(path) {
+		return WorktreeStatus{}, errStatus(404, "worktree folder does not exist: "+path)
+	}
+
+	var top string
+	if repo := strings.TrimSpace(req.Repo); repo != "" {
+		if !filepath.IsAbs(repo) {
+			return WorktreeStatus{}, errStatus(400, "repo must be an absolute path")
+		}
+		topOut, err := RunGit(ctx, repo, "rev-parse", "--show-toplevel")
+		if err != nil {
+			return WorktreeStatus{}, errStatus(422, err.Error())
+		}
+		top = filepath.Clean(strings.TrimSpace(topOut))
+	} else {
+		commonDir, err := RunGit(ctx, path, "rev-parse", "--git-common-dir")
+		if err != nil {
+			return WorktreeStatus{}, errStatus(422, "path is not inside a git repository: "+err.Error())
+		}
+		commonDir = strings.TrimSpace(commonDir)
+		if !filepath.IsAbs(commonDir) {
+			commonDir = filepath.Join(path, commonDir)
+		}
+		topDir := filepath.Dir(filepath.Clean(commonDir))
+		topOut, err := RunGit(ctx, topDir, "rev-parse", "--show-toplevel")
+		if err != nil {
+			return WorktreeStatus{}, errStatus(422, err.Error())
+		}
+		top = filepath.Clean(strings.TrimSpace(topOut))
+	}
+
+	pathEval, _ := filepath.EvalSymlinks(path)
+	topEval, _ := filepath.EvalSymlinks(top)
+	if path == top || (topEval != "" && pathEval == topEval) {
+		return WorktreeStatus{}, errStatus(400, "cannot adopt the main repository checkout as a worktree")
+	}
+
+	if _, ok := s.find(ctx, func(rec storage.WorktreeRecord) bool {
+		recClean := filepath.Clean(rec.Path)
+		if recClean == path {
+			return true
+		}
+		if pathEval != "" {
+			if recEval, err := filepath.EvalSymlinks(rec.Path); err == nil && recEval == pathEval {
+				return true
+			}
+		}
+		return false
+	}); ok {
+		return WorktreeStatus{}, errStatus(409, "worktree is already managed: "+path)
+	}
+
+	out, err := RunGit(ctx, top, "worktree", "list", "--porcelain")
+	if err != nil {
+		return WorktreeStatus{}, errStatus(422, err.Error())
+	}
+	parsed := parseWorktreeListPorcelain(out)
+	var found *porcelainWorktree
+	for i := range parsed {
+		entryClean := filepath.Clean(parsed[i].path)
+		if entryClean == path {
+			found = &parsed[i]
+			break
+		}
+		if pathEval != "" {
+			if entryEval, err := filepath.EvalSymlinks(entryClean); err == nil && entryEval == pathEval {
+				found = &parsed[i]
+				break
+			}
+		}
+	}
+	if found == nil {
+		return WorktreeStatus{}, errStatus(422, "path is not a git worktree of repo")
+	}
+	if found.bare {
+		return WorktreeStatus{}, errStatus(400, "cannot adopt a bare worktree")
+	}
+
+	branch := found.branch
+	if branch == "" {
+		if reqBranch := strings.TrimSpace(req.Branch); reqBranch != "" {
+			if _, err := RunGit(ctx, path, "checkout", "-b", reqBranch); err != nil {
+				if _, err := RunGit(ctx, path, "checkout", reqBranch); err != nil {
+					return WorktreeStatus{}, errStatus(422, "failed to checkout branch: "+err.Error())
+				}
+			}
+			branch = reqBranch
+		} else {
+			return WorktreeStatus{}, errStatus(400, "cannot adopt a detached worktree without a branch")
+		}
+	} else if reqBranch := strings.TrimSpace(req.Branch); reqBranch != "" && reqBranch != branch {
+		branch = reqBranch
+	}
+	if strings.HasPrefix(branch, "-") {
+		return WorktreeStatus{}, errStatus(400, "invalid branch name")
+	}
+	if _, err := RunGit(ctx, top, "check-ref-format", "--branch", branch); err != nil {
+		return WorktreeStatus{}, errStatus(400, "invalid branch name")
+	}
+
+	base := strings.TrimSpace(req.Base)
+	var baseRef string
+	var baseCommit string
+
+	if base != "" {
+		resolvedCommit, resolvedRef, err := s.resolveBaseCommitAndRef(ctx, top, base)
+		if err != nil {
+			return WorktreeStatus{}, err
+		}
+		baseRef = resolvedRef
+		if mb, err := RunGit(ctx, path, "merge-base", "--end-of-options", baseRef, "HEAD"); err == nil && strings.TrimSpace(mb) != "" {
+			baseCommit = strings.TrimSpace(mb)
+		} else {
+			baseCommit = resolvedCommit
+		}
+	} else {
+		candidates := make([]string, 0, 4)
+		if headBranch := baseRefOf(ctx, top, "HEAD"); headBranch != "" {
+			candidates = append(candidates, headBranch)
+		}
+		if defRef := defaultRefName(ctx, top); defRef != "" {
+			candidates = append(candidates, defRef)
+		}
+		candidates = append(candidates, "main", "master")
+
+		foundBase := false
+		for _, cand := range candidates {
+			if cand == "" || cand == branch {
+				continue
+			}
+			if _, err := RunGit(ctx, top, "rev-parse", "--verify", "--quiet", "--end-of-options", cand+"^{commit}"); err != nil {
+				continue
+			}
+			if mb, err := RunGit(ctx, path, "merge-base", "--end-of-options", cand, "HEAD"); err == nil && strings.TrimSpace(mb) != "" {
+				baseRef = cand
+				baseCommit = strings.TrimSpace(mb)
+				foundBase = true
+				break
+			}
+		}
+		if !foundBase {
+			baseRef = baseRefOf(ctx, top, "HEAD")
+			if headCommit, err := RunGit(ctx, top, "rev-parse", "--verify", "--quiet", "--end-of-options", "HEAD^{commit}"); err == nil {
+				baseCommit = strings.TrimSpace(headCommit)
+			} else {
+				wtHead, _ := RunGit(ctx, path, "rev-parse", "--verify", "HEAD")
+				baseCommit = strings.TrimSpace(wtHead)
+			}
+		}
+	}
+
+	if SubpathOf(path, filepath.Join(top, ".worktrees")) {
+		_ = excludeWorktreesDir(ctx, top)
+	}
+
+	idBytes := make([]byte, 4)
+	if _, err := rand.Read(idBytes); err != nil {
+		return WorktreeStatus{}, errStatus(500, "failed to generate id")
+	}
+	id := hex.EncodeToString(idBytes)
+	rec := storage.WorktreeRecord{
+		ID:         id,
+		Repo:       top,
+		Path:       path,
+		Branch:     branch,
+		BaseCommit: baseCommit,
+		BaseRef:    baseRef,
+		CreatedAt:  s.now(),
+	}
+	if err := s.store().SaveWorktree(ctx, rec); err != nil {
+		s.logger.Error("save adopted worktree", "path", path, "error", err)
+		return WorktreeStatus{}, errStatus(500, "failed to save worktree")
+	}
+	return s.statusOf(ctx, rec), nil
 }

@@ -696,6 +696,10 @@ clean. Worktrees outlive the chats that use them: they are removed only on an ex
     { "repo": "/abs/path/to/repo", "base": "origin/main", "branch": "feat/x" }
     ```
   - Creates a new branch at `base` and checks it out in a fresh worktree.
+  - `base` accepts local branches, commit SHAs, remote branches (e.g.
+    `origin/feat-x`), and pull request references (`pr/123`, `pull/123`, or
+    `origin/pr/123`). When a remote branch or PR is specified, the gateway
+    fetches the ref from the remote on demand before creating the worktree.
   - Response:
     ```json
     {
@@ -708,11 +712,54 @@ clean. Worktrees outlive the chats that use them: they are removed only on an ex
     }
     ```
   - Error responses:
-    - `400` — `repo` is not an absolute path, or `branch` is not a valid branch name
+    - `400` — `repo` is not an absolute path, `branch` is not a valid branch
+      name, or `base` is not a valid ref name
     - `409` — `branch` already exists, or its `.worktrees/` folder already exists
     - `422` — `repo` is not a git repository, `base` does not resolve to a
-      commit, or `git worktree add` failed or ran past its 2 minute limit. A
-      failed add leaves no folder, registration or branch behind.
+      commit, fetching the remote ref or PR failed, or `git worktree add`
+      failed or ran past its 2 minute limit. A failed add leaves no folder,
+      registration or branch behind.
+
+- `POST /v1/worktrees/adopt`
+  - Requires `control` scope.
+  - Takes `{ "path": "/abs/path/to/worktree", "repo": "/abs/path/to/repo", "base": "main", "branch": "feat-x" }`
+    (`path` is required; `repo`, `base`, and `branch` are optional).
+  - Adopts an existing git worktree (created outside the gateway, e.g. on a PC or
+    via another tool) into gateway management. Once adopted, the worktree gets
+    base-aware diffs and status against its merge-base with `base` and appears
+    in `GET /v1/worktrees`.
+  - When `base` is omitted, the gateway determines the base reference from the
+    repository's default branch / trunk. When `repo` is omitted, it is inferred
+    from the worktree's git metadata.
+  - Responds with the worktree as `GET /v1/worktrees` lists it (including `ahead`,
+    `behind`, `dirty`, `chats`).
+  - Error responses:
+    - `400` — `path` is missing or not absolute, worktree is the main repository
+      checkout, worktree has detached HEAD without a specified `branch`, or
+      invalid branch name
+    - `404` — `path` does not exist on disk
+    - `409` — worktree is already managed
+    - `422` — `path` is not a git worktree of the repository, or unknown base ref
+
+- `GET /v1/worktrees/unmanaged?repo=<absolute path>`
+  - Requires `control` scope.
+  - Reads `git worktree list --porcelain` and lists worktrees of the repository
+    that are not currently managed by the gateway. The main repository checkout
+    and deleted/prunable worktrees are excluded.
+  - Response shape:
+    ```json
+    [
+      {
+        "path": "/abs/path/to/worktree",
+        "branch": "feat-x",
+        "head": "<sha>",
+        "detached": false
+      }
+    ]
+    ```
+  - Error responses:
+    - `400` — `repo` is missing or not an absolute path
+    - `422` — `repo` is not a git repository
 
 - `GET /v1/worktrees/refs?repo=<absolute path>`
   - Requires `control` scope, like `POST /v1/worktrees`.

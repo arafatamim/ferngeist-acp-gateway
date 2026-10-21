@@ -53,6 +53,18 @@ not be coupled. Full release notes live in GitHub Releases.
 ## History
 
 - Unreleased:
+- `[additive]` `POST /v1/worktrees` accepts remote branches (e.g.
+  `origin/feat-x`) and PR numbers (`pr/123`, `pull/123`, `origin/pr/123`) as
+  the `base`, fetching the ref on-demand before checkout and validating refs
+  strictly. (2026-10-21)
+- `[additive]` `GET /v1/worktrees/unmanaged?repo=<absolute path>` — lists git
+  worktrees in a repository that are not currently managed by the gateway,
+  parsed from `git worktree list --porcelain`. Needs `control` scope.
+  (2026-10-21)
+- `[additive]` `POST /v1/worktrees/adopt` — adopts an existing git worktree
+  (created outside the gateway, e.g. on a PC or via Claude Code) into gateway
+  management so it appears in `GET /v1/worktrees` and gets base-aware diffs.
+  (2026-10-21)
 - `[additive]` `GET /v1/worktrees/{worktreeId}` — one worktree in the list's
   shape (`ahead`, `behind`, `dirty`, `chats`). (2026-10-21)
 - `[additive]` `GET /v1/worktrees` (and the rebase response) gain `chats`: the

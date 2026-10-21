@@ -320,3 +320,182 @@ func TestWorktreeRefs_Endpoint(t *testing.T) {
 		t.Fatalf("relative repo = %d, want 400", code)
 	}
 }
+
+func TestWorktree_UnmanagedAndAdopt(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	repo := t.TempDir()
+	runGitCLI(t, repo, "init", "-q")
+	runGitCLI(t, repo, "checkout", "-qb", "main")
+	runGitCLI(t, repo, "config", "user.email", "t@t")
+	runGitCLI(t, repo, "config", "user.name", "t")
+	runGitCLI(t, repo, "config", "commit.gpgSign", "false")
+	if err := os.WriteFile(filepath.Join(repo, "a.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitCLI(t, repo, "add", "a.txt")
+	runGitCLI(t, repo, "commit", "-qm", "init")
+
+	extPath := filepath.Join(t.TempDir(), "external-wt")
+	runGitCLI(t, repo, "worktree", "add", "-b", "feat/ext", extPath, "main")
+
+	h := newResilientTestHarness(t)
+	do := func(t *testing.T, method, path, body string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+h.token)
+		rec := httptest.NewRecorder()
+		h.server.Handler().ServeHTTP(rec, req)
+		return rec
+	}
+
+	// GET /v1/worktrees/unmanaged error cases
+	if rec := do(t, http.MethodGet, "/v1/worktrees/unmanaged?repo=relative/path", ""); rec.Code != http.StatusBadRequest {
+		t.Fatalf("unmanaged relative = %d, want 400", rec.Code)
+	}
+	if rec := do(t, http.MethodGet, "/v1/worktrees/unmanaged?repo="+url.QueryEscape(t.TempDir()), ""); rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("unmanaged non-repo = %d, want 422", rec.Code)
+	}
+
+	// GET /v1/worktrees/unmanaged lists extPath
+	rec := do(t, http.MethodGet, "/v1/worktrees/unmanaged?repo="+url.QueryEscape(repo), "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unmanaged code = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var unmanaged []workspace.UnmanagedWorktree
+	if err := json.Unmarshal(rec.Body.Bytes(), &unmanaged); err != nil {
+		t.Fatal(err)
+	}
+	if len(unmanaged) != 1 || unmanaged[0].Path != extPath || unmanaged[0].Branch != "feat/ext" {
+		t.Fatalf("unmanaged = %+v, want 1 worktree at %s with branch feat/ext", unmanaged, extPath)
+	}
+
+	// POST /v1/worktrees/adopt
+	adoptBody, _ := json.Marshal(map[string]string{
+		"repo": repo,
+		"path": extPath,
+	})
+	rec = do(t, http.MethodPost, "/v1/worktrees/adopt", string(adoptBody))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("adopt code = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var adopted worktreeResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &adopted); err != nil {
+		t.Fatal(err)
+	}
+	if adopted.Path != extPath || adopted.Branch != "feat/ext" || adopted.BaseCommit == "" {
+		t.Fatalf("adopted response = %+v", adopted)
+	}
+
+	// GET /v1/worktrees now includes the adopted worktree
+	rec = do(t, http.MethodGet, "/v1/worktrees", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list code = %d", rec.Code)
+	}
+	var list []worktreeResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 || list[0].ID != adopted.ID {
+		t.Fatalf("list = %+v, want adopted worktree %s", list, adopted.ID)
+	}
+
+	// GET /v1/worktrees/unmanaged is now empty
+	rec = do(t, http.MethodGet, "/v1/worktrees/unmanaged?repo="+url.QueryEscape(repo), "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unmanaged code = %d", rec.Code)
+	}
+	var unmanagedAfter []workspace.UnmanagedWorktree
+	if err := json.Unmarshal(rec.Body.Bytes(), &unmanagedAfter); err != nil {
+		t.Fatal(err)
+	}
+	if len(unmanagedAfter) != 0 {
+		t.Fatalf("unmanagedAfter = %+v, want empty", unmanagedAfter)
+	}
+
+	// Adopting again returns 409
+	rec = do(t, http.MethodPost, "/v1/worktrees/adopt", string(adoptBody))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("adopt again code = %d, want 409", rec.Code)
+	}
+}
+
+func TestWorktree_CreateFromRemoteBranchAndPR(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	repo := t.TempDir()
+	runGitCLI(t, repo, "init", "-q")
+	runGitCLI(t, repo, "checkout", "-qb", "main")
+	runGitCLI(t, repo, "config", "user.email", "t@t")
+	runGitCLI(t, repo, "config", "user.name", "t")
+	runGitCLI(t, repo, "config", "commit.gpgSign", "false")
+	if err := os.WriteFile(filepath.Join(repo, "a.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitCLI(t, repo, "add", "a.txt")
+	runGitCLI(t, repo, "commit", "-qm", "init")
+
+	bare := t.TempDir()
+	runGitCLI(t, bare, "init", "-q", "--bare")
+	runGitCLI(t, repo, "remote", "add", "origin", bare)
+	runGitCLI(t, repo, "push", "-q", "origin", "main:refs/heads/feat-remote")
+	runGitCLI(t, repo, "push", "-q", "origin", "main:refs/pull/123/head")
+
+	h := newResilientTestHarness(t)
+	do := func(t *testing.T, method, path, body string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+h.token)
+		rec := httptest.NewRecorder()
+		h.server.Handler().ServeHTTP(rec, req)
+		return rec
+	}
+
+	repoJSON, _ := json.Marshal(repo)
+
+	// Invalid base syntax returns 400
+	if rec := do(t, http.MethodPost, "/v1/worktrees", `{"repo":`+string(repoJSON)+`,"base":"--flag"}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("invalid base code = %d, want 400", rec.Code)
+	}
+
+	// Create from origin/feat-remote
+	rec := do(t, http.MethodPost, "/v1/worktrees", `{"repo":`+string(repoJSON)+`,"base":"origin/feat-remote","branch":"review-remote"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create from origin/feat-remote code = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var wtRemote worktreeResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &wtRemote); err != nil {
+		t.Fatal(err)
+	}
+	if wtRemote.Branch != "review-remote" || wtRemote.BaseCommit == "" {
+		t.Fatalf("wtRemote = %+v", wtRemote)
+	}
+
+	// Create from pr/123
+	rec = do(t, http.MethodPost, "/v1/worktrees", `{"repo":`+string(repoJSON)+`,"base":"pr/123","branch":"review-pr"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create from pr/123 code = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var wtPR worktreeResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &wtPR); err != nil {
+		t.Fatal(err)
+	}
+	if wtPR.Branch != "review-pr" || wtPR.BaseCommit == "" {
+		t.Fatalf("wtPR = %+v", wtPR)
+	}
+
+	// Both appear in GET /v1/worktrees
+	rec = do(t, http.MethodGet, "/v1/worktrees", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list code = %d", rec.Code)
+	}
+	var list []worktreeResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 2 {
+		t.Fatalf("list len = %d, want 2: %+v", len(list), list)
+	}
+}
