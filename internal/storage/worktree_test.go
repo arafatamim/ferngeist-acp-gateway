@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -93,5 +94,59 @@ func TestMigrateAddsWorktreeBaseRef(t *testing.T) {
 		BaseCommit: "cafef00d", BaseRef: "main", CreatedAt: time.Now().UTC(),
 	}); err != nil {
 		t.Fatalf("SaveWorktree() with BaseRef error = %v", err)
+	}
+}
+
+// TestMigrateMakesWorktreePathUnique covers the v2→v3 upgrade: duplicate rows
+// for one folder collapse to the oldest, and saving that folder again is
+// refused with ErrWorktreePathTaken.
+func TestMigrateMakesWorktreePathUnique(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v2.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	if _, err := db.Exec(`CREATE TABLE worktrees (
+		worktree_id TEXT PRIMARY KEY,
+		repo TEXT NOT NULL,
+		path TEXT NOT NULL,
+		branch TEXT NOT NULL,
+		base_commit TEXT NOT NULL,
+		base_ref TEXT NOT NULL DEFAULT '',
+		created_at TEXT NOT NULL
+	)`); err != nil {
+		t.Fatalf("create v2 worktrees: %v", err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	for _, id := range []string{"wt-first", "wt-dup"} {
+		if _, err := db.Exec(
+			`INSERT INTO worktrees(worktree_id, repo, path, branch, base_commit, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+			id, "/r", "/r/.worktrees/x", "x", "deadbeef", now); err != nil {
+			t.Fatalf("insert %s: %v", id, err)
+		}
+	}
+	if _, err := db.Exec(`PRAGMA user_version = 2`); err != nil {
+		t.Fatalf("set user_version: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close v2 db: %v", err)
+	}
+
+	store, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	list, err := store.ListWorktrees(ctx)
+	if err != nil {
+		t.Fatalf("ListWorktrees() error = %v", err)
+	}
+	if len(list) != 1 || list[0].ID != "wt-first" {
+		t.Fatalf("ListWorktrees() = %+v, want only wt-first", list)
+	}
+	err = store.SaveWorktree(ctx, WorktreeRecord{ID: "wt-again", Repo: "/r", Path: "/r/.worktrees/x", Branch: "x", BaseCommit: "cafef00d", CreatedAt: time.Now()})
+	if !errors.Is(err, ErrWorktreePathTaken) {
+		t.Fatalf("SaveWorktree() duplicate path error = %v, want ErrWorktreePathTaken", err)
 	}
 }

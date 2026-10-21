@@ -2,8 +2,13 @@ package storage
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"time"
 )
+
+// ErrWorktreePathTaken is SaveWorktree's answer for a folder already recorded.
+var ErrWorktreePathTaken = errors.New("worktree path is already recorded")
 
 // WorktreeRecord is a git worktree the gateway created for an agent to work
 // in. BaseCommit is the commit the branch started from; the workspace git
@@ -26,6 +31,9 @@ func (s *SQLiteStore) SaveWorktree(ctx context.Context, r WorktreeRecord) error 
 		`INSERT INTO worktrees(worktree_id, repo, path, branch, base_commit, base_ref, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		r.ID, r.Repo, r.Path, r.Branch, r.BaseCommit, r.BaseRef, r.CreatedAt.UTC().Format(time.RFC3339Nano),
 	)
+	if err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed: worktrees.path") {
+		return ErrWorktreePathTaken
+	}
 	return err
 }
 

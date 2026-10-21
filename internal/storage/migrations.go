@@ -24,6 +24,7 @@ type migration struct {
 var migrations = []migration{
 	{version: 1, name: "baseline", up: migrateBaseline},
 	{version: 2, name: "worktree_base_ref", up: migrateWorktreeBaseRef},
+	{version: 3, name: "worktree_unique_path", up: migrateWorktreeUniquePath},
 }
 
 // latestMigrationVersion is the schema version a fully migrated database reports.
@@ -232,6 +233,17 @@ func migrateBaseline(ctx context.Context, tx *sql.Tx) error {
 func migrateWorktreeBaseRef(ctx context.Context, tx *sql.Tx) error {
 	return ensureColumn(ctx, tx, "worktrees", "base_ref",
 		`ALTER TABLE worktrees ADD COLUMN base_ref TEXT NOT NULL DEFAULT ''`)
+}
+
+// migrateWorktreeUniquePath makes a worktree folder registrable once, so two
+// concurrent adopts of one path cannot both save. Duplicates an older gateway
+// could write describe the same folder; the oldest row is kept.
+func migrateWorktreeUniquePath(ctx context.Context, tx *sql.Tx) error {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM worktrees WHERE rowid NOT IN (SELECT MIN(rowid) FROM worktrees GROUP BY path)`); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS worktrees_path ON worktrees(path)`)
+	return err
 }
 
 // ensureColumn adds a column only when it is missing. modernc.org/sqlite's
