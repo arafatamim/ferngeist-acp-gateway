@@ -283,6 +283,8 @@ func RunGitTimeout(ctx context.Context, timeout time.Duration, dir string, args 
 	// unescaped in porcelain/numstat output, so they parse and open correctly.
 	full := append([]string{"-c", "core.quotePath=false", "-C", dir}, args...)
 	cmd := exec.CommandContext(ctx, "git", full...)
+	// A daemon has no terminal: a credential prompt would only wait out the timeout.
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	// A hook or helper that outlives the killed git would otherwise hold the
 	// output pipe open and keep us waiting past the timeout.
 	cmd.WaitDelay = time.Second

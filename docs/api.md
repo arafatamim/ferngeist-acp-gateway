@@ -715,9 +715,10 @@ clean. Worktrees outlive the chats that use them: they are removed only on an ex
     - `400` — `repo` is not an absolute path, `branch` is not a valid branch
       name, or `base` is not a valid ref name
     - `409` — `branch` already exists, or its `.worktrees/` folder already exists
+      or is being made by another create
     - `422` — `repo` is not a git repository, `base` does not resolve to a
-      commit, fetching the remote ref or PR failed, or `git worktree add`
-      failed or ran past its 2 minute limit. A failed add leaves no folder,
+      commit, fetching the remote ref or PR failed, or fetching and
+      `git worktree add` together failed or ran past their 2 minute limit. A failed add leaves no folder,
       registration or branch behind.
 
 - `POST /v1/worktrees/adopt`
@@ -738,7 +739,7 @@ clean. Worktrees outlive the chats that use them: they are removed only on an ex
       checkout, worktree has detached HEAD without a specified `branch`, or
       invalid branch name
     - `404` — `path` does not exist on disk
-    - `409` — worktree is already managed
+    - `409` — worktree is already managed, or is on a branch other than `branch`
     - `422` — `path` is not a git worktree of the repository, or unknown base ref
 
 - `GET /v1/worktrees/unmanaged?repo=<absolute path>`

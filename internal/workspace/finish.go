@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/storage"
 )
@@ -184,7 +185,9 @@ func (s *Service) Push(ctx context.Context, id string, req PushRequest) (PushRes
 		}
 	}
 	if _, err := runTool(ctx, rec.Path, "git", "push", "--set-upstream", "origin", rec.Branch); err != nil {
-		if strings.Contains(err.Error(), "rejected") {
+		// Only these mean origin is ahead; a hook or protected branch says
+		// "[remote rejected]" and is a plain failure.
+		if msg := err.Error(); strings.Contains(msg, "(fetch first)") || strings.Contains(msg, "(non-fast-forward)") {
 			return PushResult{}, errStatus(409, "origin has commits this branch lacks; it was not overwritten: "+err.Error())
 		}
 		return PushResult{}, errStatus(422, err.Error())
@@ -193,10 +196,8 @@ func (s *Service) Push(ctx context.Context, id string, req PushRequest) (PushRes
 		return PushResult{}, nil
 	}
 	args := []string{"pr", "create", "--head", rec.Branch}
-	if rec.BaseRef != "" {
-		if _, err := RunGit(ctx, rec.Repo, "show-ref", "--verify", "--quiet", "refs/heads/"+rec.BaseRef); err == nil {
-			args = append(args, "--base", rec.BaseRef)
-		}
+	if base := prBase(ctx, rec); base != "" {
+		args = append(args, "--base", base)
 	}
 	if title := strings.TrimSpace(req.Title); title != "" {
 		args = append(args, "--title", title, "--body", req.Body)
@@ -210,6 +211,22 @@ func (s *Service) Push(ctx context.Context, id string, req PushRequest) (PushRes
 	return PushResult{PRURL: lastLine(out)}, nil
 }
 
+// prBase is the branch on origin a pull request should target: the base ref
+// when it is a local branch or one of origin's, else "" and gh picks the
+// default branch.
+func prBase(ctx context.Context, rec storage.WorktreeRecord) string {
+	if _, _, isPR := parsePRRef(rec.BaseRef); isPR || rec.BaseRef == "" {
+		return ""
+	}
+	if b, ok := strings.CutPrefix(rec.BaseRef, "origin/"); ok {
+		return b
+	}
+	if _, err := RunGit(ctx, rec.Repo, "show-ref", "--verify", "--quiet", "refs/heads/"+rec.BaseRef); err == nil {
+		return rec.BaseRef
+	}
+	return ""
+}
+
 // runTool runs an external command in dir with RunGit's timeout and no
 // credential prompts, returning stdout; failures carry its stderr.
 func runTool(ctx context.Context, dir, name string, args ...string) (string, error) {
@@ -218,6 +235,8 @@ func runTool(ctx context.Context, dir, name string, args ...string) (string, err
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GH_PROMPT_DISABLED=1")
+	// As in RunGitTimeout: a push hook that outlives a killed git holds the pipe.
+	cmd.WaitDelay = time.Second
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()

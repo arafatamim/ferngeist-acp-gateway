@@ -37,15 +37,15 @@ func ResolveRef(ctx context.Context, cwd, name string) (string, error) {
 	if !validRefName(name) {
 		return "", errStatus(http.StatusBadRequest, "invalid ref: "+name)
 	}
-	out, err := RunGit(ctx, cwd, "rev-parse", "--verify", "--quiet", "--end-of-options", name+"^{commit}")
-	if err != nil {
+	commit, ok := commitOf(ctx, cwd, name)
+	if !ok {
 		// Only on the failure path, so a resolvable name costs no second process.
 		if _, repoErr := RunGit(ctx, cwd, "rev-parse", "--git-dir"); repoErr != nil {
 			return "", errStatus(http.StatusUnprocessableEntity, repoErr.Error())
 		}
 		return "", errStatus(http.StatusBadRequest, "unknown ref: "+name)
 	}
-	return strings.TrimSpace(out), nil
+	return commit, nil
 }
 
 // CompareChanges lists the files that differ between the working tree (with

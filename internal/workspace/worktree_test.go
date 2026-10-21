@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1059,7 +1060,7 @@ func TestAdoptWorktree(t *testing.T) {
 	wantWorkspaceStatus(t, err, 409)
 }
 
-func TestAdoptWorktree_ErrorsAndDetached(t *testing.T) {
+func TestAdoptRefusesBadInputAndChecksOutADetachedWorktree(t *testing.T) {
 	repo, _ := initMainRepo(t)
 	svc, _ := newWorktreeTestService(t)
 	ctx := context.Background()
@@ -1090,6 +1091,17 @@ func TestAdoptWorktree_ErrorsAndDetached(t *testing.T) {
 	// Detached without branch fails with 400
 	_, err = svc.Adopt(ctx, AdoptRequest{Path: extPath})
 	wantWorkspaceStatus(t, err, 400)
+
+	// An option-like branch is refused before any checkout runs: "-f" would
+	// otherwise reach `git checkout -f` and discard the uncommitted edit.
+	if err := os.WriteFile(filepath.Join(extPath, "README.md"), []byte("unsaved\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err = svc.Adopt(ctx, AdoptRequest{Path: extPath, Branch: "-f"})
+	wantWorkspaceStatus(t, err, 400)
+	if got, _ := os.ReadFile(filepath.Join(extPath, "README.md")); string(got) != "unsaved\n" {
+		t.Fatalf("uncommitted edit lost: %q", got)
+	}
 
 	// Detached with branch succeeds and checks out the branch
 	status, err := svc.Adopt(ctx, AdoptRequest{Path: extPath, Branch: "feat/from-detached"})
@@ -1186,5 +1198,140 @@ func TestCreateFromRemoteBranchAndPR(t *testing.T) {
 	}
 	if stPR.Behind == nil || *stPR.Behind != 0 {
 		t.Fatalf("Behind = %v, want 0", stPR.Behind)
+	}
+}
+
+func TestAdoptRefusesTheMainCheckoutNamedThroughALinkedWorktree(t *testing.T) {
+	repo, _ := initMainRepo(t)
+	svc, _ := newWorktreeTestService(t)
+	ctx := context.Background()
+	linked := filepath.Join(t.TempDir(), "linked")
+	if _, err := RunGit(ctx, repo, "worktree", "add", "-b", "feat/linked", linked, "main"); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := svc.Adopt(ctx, AdoptRequest{Repo: linked, Path: repo})
+	wantWorkspaceStatus(t, err, 400)
+	list, err := svc.Unmanaged(ctx, linked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 || list[0].Path != linked {
+		t.Fatalf("Unmanaged via linked worktree = %+v, want only %s", list, linked)
+	}
+
+	// The recorded repo is the main checkout, whichever checkout named it.
+	status, err := svc.Adopt(ctx, AdoptRequest{Repo: linked, Path: linked})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Repo != repo {
+		t.Fatalf("Repo = %q, want %q", status.Repo, repo)
+	}
+}
+
+func TestAdoptRefusesABranchTheWorktreeIsNotOn(t *testing.T) {
+	repo, _ := initMainRepo(t)
+	svc, _ := newWorktreeTestService(t)
+	ctx := context.Background()
+	ext := filepath.Join(t.TempDir(), "ext")
+	if _, err := RunGit(ctx, repo, "worktree", "add", "-b", "feat/real", ext, "main"); err != nil {
+		t.Fatal(err)
+	}
+	_, err := svc.Adopt(ctx, AdoptRequest{Path: ext, Branch: "feat/other"})
+	wantWorkspaceStatus(t, err, 409)
+	if _, err := svc.Adopt(ctx, AdoptRequest{Path: ext, Branch: "feat/real"}); err != nil {
+		t.Fatalf("Adopt with its own branch: %v", err)
+	}
+}
+
+func TestDeleteRefusesAMainCheckoutRecord(t *testing.T) {
+	repo, _ := initMainRepo(t)
+	svc, store := newWorktreeTestService(t)
+	ctx := context.Background()
+	// A record from before Adopt refused main checkouts.
+	if err := store().SaveWorktree(ctx, storage.WorktreeRecord{ID: "main0001", Repo: repo, Path: repo, Branch: "main", CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := svc.Delete(ctx, "main0001", true)
+	wantWorkspaceStatus(t, err, 409)
+	if _, err := os.Stat(filepath.Join(repo, ".git")); err != nil {
+		t.Fatalf("repository was removed: %v", err)
+	}
+}
+
+func TestPushReportsAHookRejectionAsAFailureNotADivergence(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("hook is a shell script")
+	}
+	repo, _ := initMainRepo(t)
+	bare := addBareOrigin(t, repo)
+	if err := os.WriteFile(filepath.Join(bare, "hooks", "pre-receive"), []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	svc, _ := newWorktreeTestService(t)
+	ctx := context.Background()
+	rec, err := svc.Create(ctx, CreateRequest{Repo: repo, Base: "main", Branch: "feat/x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitFile(t, rec.Path, "agent.txt", "work\n", "agent work")
+	_, err = svc.Push(ctx, rec.ID, PushRequest{})
+	wantWorkspaceStatus(t, err, 422)
+}
+
+func TestPRBaseTargetsTheBranchOnOrigin(t *testing.T) {
+	repo, _ := initMainRepo(t)
+	ctx := context.Background()
+	for base, want := range map[string]string{
+		"":             "",
+		"main":         "main",
+		"no-such":      "",
+		"origin/feat":  "feat",
+		"origin/pr/12": "",
+		"pr/12":        "",
+	} {
+		if got := prBase(ctx, storage.WorktreeRecord{Repo: repo, BaseRef: base}); got != want {
+			t.Errorf("prBase(%q) = %q, want %q", base, got, want)
+		}
+	}
+}
+
+func TestConcurrentCreatesOfOneFolderLeaveTheWinnerIntact(t *testing.T) {
+	repo, _ := initMainRepo(t)
+	svc, _ := newWorktreeTestService(t)
+	ctx := context.Background()
+	// feat/x and feat-x share the folder .worktrees/feat-x.
+	branches := []string{"feat/x", "feat-x"}
+	recs := make([]storage.WorktreeRecord, len(branches))
+	errs := make([]error, len(branches))
+	var wg sync.WaitGroup
+	for i, b := range branches {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			recs[i], errs[i] = svc.Create(ctx, CreateRequest{Repo: repo, Base: "main", Branch: b})
+		}()
+	}
+	wg.Wait()
+	won := -1
+	for i, err := range errs {
+		if err == nil {
+			if won >= 0 {
+				t.Fatal("both creates succeeded for one folder")
+			}
+			won = i
+		} else {
+			wantWorkspaceStatus(t, err, 409)
+		}
+	}
+	if won < 0 {
+		t.Fatalf("no create succeeded: %v", errs)
+	}
+	if _, err := os.Stat(filepath.Join(recs[won].Path, ".git")); err != nil {
+		t.Fatalf("winner's worktree was removed: %v", err)
+	}
+	if _, err := RunGit(ctx, repo, "show-ref", "--verify", "--quiet", "refs/heads/"+branches[won]); err != nil {
+		t.Fatalf("winner's branch was deleted: %v", err)
 	}
 }

@@ -96,6 +96,8 @@ func (s *Server) handleWorktreeAdopt(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
+	// A remote base is fetched first, which can outlast the server's write timeout.
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(workspace.CreateTimeout + 5*time.Second))
 	status, err := s.workspaceSvc.Adopt(r.Context(), workspace.AdoptRequest{
 		Repo:   req.Repo,
 		Path:   req.Path,
