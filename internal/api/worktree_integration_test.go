@@ -499,3 +499,26 @@ func TestWorktree_CreateFromRemoteBranchAndPR(t *testing.T) {
 		t.Fatalf("list len = %d, want 2: %+v", len(list), list)
 	}
 }
+
+func TestPathsMissingReportsOnlyGonePaths(t *testing.T) {
+	h := newResilientTestHarness(t)
+	there, gone := t.TempDir(), filepath.Join(t.TempDir(), "removed")
+	post := func(body string) (int, []string) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, "/v1/paths/missing", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+h.token)
+		rec := httptest.NewRecorder()
+		h.server.Handler().ServeHTTP(rec, req)
+		var payload struct{ Missing []string }
+		_ = json.Unmarshal(rec.Body.Bytes(), &payload)
+		return rec.Code, payload.Missing
+	}
+
+	paths, _ := json.Marshal(map[string][]string{"paths": {there, gone}})
+	if code, missing := post(string(paths)); code != http.StatusOK || len(missing) != 1 || missing[0] != gone {
+		t.Fatalf("missing = %d %v, want only %s", code, missing, gone)
+	}
+	if code, _ := post(`{"paths":["relative/dir"]}`); code != http.StatusBadRequest {
+		t.Fatalf("relative path = %d, want 400", code)
+	}
+}

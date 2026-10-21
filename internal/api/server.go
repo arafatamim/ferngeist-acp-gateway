@@ -296,6 +296,7 @@ func NewServer(deps Deps) *Server {
 	mux.HandleFunc("POST /v1/worktrees/{worktreeId}/rebase", server.handleWorktreeRebase)
 	mux.HandleFunc("POST /v1/worktrees/{worktreeId}/merge", server.handleWorktreeMerge)
 	mux.HandleFunc("POST /v1/worktrees/{worktreeId}/push", server.handleWorktreePush)
+	mux.HandleFunc("POST /v1/paths/missing", server.handlePathsMissing)
 	server.registerSessionRoutes(mux)
 	mux.HandleFunc("POST /v1/devices/push-token", server.handleRegisterPushToken)
 	mux.HandleFunc("GET /v1/devices/push-config", server.handlePushConfig)

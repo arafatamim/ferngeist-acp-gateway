@@ -854,6 +854,17 @@ clean. Worktrees outlive the chats that use them: they are removed only on an ex
       the push succeeded but opening the pull request did not (the message
       says which)
 
+- `POST /v1/paths/missing`
+  - Requires `read` scope.
+  - Body: `{"paths": ["/abs/path", ...]}`, typically the `cwd` of each chat
+    from the agent's `session/list`.
+  - Response: `{"missing": [...]}`, the given paths that no longer exist on
+    disk, such as a worktree removed outside the gateway. A path the gateway
+    cannot check (for example, permission denied) counts as still there.
+    Nothing is stored.
+  - Error responses:
+    - `400` — a path is not absolute, or the body is invalid or over 16 KiB
+
 ### Gateway sessions
 
 > **Terminology note:** A "gateway session" is a gateway-internal object that owns an agent process and keeps it alive across WebSocket disconnections. It runs the stdio pump (for agent stdout) and dispatches push notifications on notable events. Connecting starts the agent, so a gateway session and its runtime are 1:1: `POST /v1/agents/{agentId}/connect` both launches the process and creates the session. It is not an ACP agent session — ACP agent sessions are negotiated between the client and agent during protocol initialization and are not tracked by this API.

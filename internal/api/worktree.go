@@ -4,7 +4,10 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"io/fs"
 	"net/http"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/pairing"
@@ -272,6 +275,37 @@ func (s *Server) handleWorktreePush(w http.ResponseWriter, r *http.Request) {
 		resp["prUrl"] = result.PRURL
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+type pathsMissingRequest struct {
+	Paths []string `json:"paths"`
+}
+
+// POST /v1/paths/missing {paths}
+// Returns the given absolute paths that no longer exist on disk, so a client
+// can set aside chats whose cwd (often a deleted worktree) is gone. A path
+// that cannot be checked counts as still there.
+func (s *Server) handlePathsMissing(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireGatewayScope(w, r, pairing.ScopeRead); !ok {
+		return
+	}
+	var req pathsMissingRequest
+	r.Body = http.MaxBytesReader(w, r.Body, jsonBodyLimit)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	missing := []string{}
+	for _, p := range req.Paths {
+		if !filepath.IsAbs(p) {
+			writeError(w, http.StatusBadRequest, "path must be absolute: "+p)
+			return
+		}
+		if _, err := os.Stat(p); errors.Is(err, fs.ErrNotExist) {
+			missing = append(missing, p)
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"missing": missing})
 }
 
 // writeWorkspaceError maps a workspace service error to the HTTP status it
