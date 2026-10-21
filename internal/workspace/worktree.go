@@ -74,6 +74,10 @@ type WorktreeStatus struct {
 	Ahead  *int
 	Behind *int
 	Dirty  *bool
+	// Merged reports that the branch has commits of its own and they are all
+	// on its base: merging it again would change nothing. Merged and not
+	// Dirty marks a worktree that is safe to suggest cleaning up.
+	Merged *bool
 	// Chats are the ACP session ids of the running chats working in the
 	// worktree.
 	Chats []string
@@ -338,7 +342,31 @@ func (s *Service) statusOf(ctx context.Context, rec storage.WorktreeRecord) Work
 		dirty := strings.TrimSpace(st) != ""
 		status.Dirty = &dirty
 	}
+	status.Merged = s.mergedOf(ctx, rec)
 	return status
+}
+
+// mergedOf reports whether the worktree's work has landed on its base ref, by
+// fast-forward, merge, rebase or squash alike: merging HEAD into the base
+// yields the base's own tree. A HEAD still at the base commit has no work to
+// have landed. nil without a base ref that resolves.
+func (s *Service) mergedOf(ctx context.Context, rec storage.WorktreeRecord) *bool {
+	if rec.BaseRef == "" {
+		return nil
+	}
+	baseTree, err := RunGit(ctx, rec.Path, "rev-parse", "--verify", "--quiet", "--end-of-options", rec.BaseRef+"^{tree}")
+	if err != nil {
+		return nil
+	}
+	merged := false
+	if head, ok := commitOf(ctx, rec.Path, "HEAD"); ok && head != rec.BaseCommit {
+		// A conflict exits non-zero, which is rightly not merged.
+		if out, err := RunGit(ctx, rec.Path, "merge-tree", "--write-tree", "--end-of-options", rec.BaseRef, "HEAD"); err == nil {
+			tree, _, _ := strings.Cut(out, "\n")
+			merged = strings.TrimSpace(tree) == strings.TrimSpace(baseTree)
+		}
+	}
+	return &merged
 }
 
 // inUse refuses (409) while a running chat uses the worktree as its cwd.

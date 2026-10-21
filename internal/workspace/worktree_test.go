@@ -1355,3 +1355,49 @@ func TestConcurrentCreatesOfOneFolderLeaveTheWinnerIntact(t *testing.T) {
 		t.Fatalf("winner's branch was deleted: %v", err)
 	}
 }
+
+func TestMergedFlagsWorkThatLandedOnTheBase(t *testing.T) {
+	repo, _ := initMainRepo(t)
+	svc, _ := newWorktreeTestService(t)
+	ctx := context.Background()
+	merged := func(rec storage.WorktreeRecord) bool {
+		t.Helper()
+		st, err := svc.Get(ctx, rec.ID)
+		if err != nil || st.Merged == nil {
+			t.Fatalf("Get = %+v, %v; want a merged flag", st, err)
+		}
+		return *st.Merged
+	}
+	fresh, err := svc.Create(ctx, CreateRequest{Repo: repo, Base: "main", Branch: "fresh"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ff, err := svc.Create(ctx, CreateRequest{Repo: repo, Base: "main", Branch: "ff"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	squashed, err := svc.Create(ctx, CreateRequest{Repo: repo, Base: "main", Branch: "squashed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitFile(t, ff.Path, "ff.txt", "ff\n", "ff work")
+	commitFile(t, squashed.Path, "one.txt", "1\n", "one")
+	commitFile(t, squashed.Path, "two.txt", "2\n", "two")
+	if merged(fresh) || merged(ff) || merged(squashed) {
+		t.Fatal("flagged a worktree whose work has not landed")
+	}
+
+	if _, err := svc.Merge(ctx, ff.ID, MergeRequest{}); err != nil {
+		t.Fatalf("merge ff: %v", err)
+	}
+	if _, err := svc.Merge(ctx, squashed.ID, MergeRequest{Squash: true}); err != nil {
+		t.Fatalf("merge squashed: %v", err)
+	}
+	if !merged(ff) || !merged(squashed) {
+		t.Fatal("missed a fast-forwarded or squashed branch")
+	}
+	// The base moved, but the fresh branch never had work of its own.
+	if merged(fresh) {
+		t.Fatal("flagged a branch with no commits of its own")
+	}
+}

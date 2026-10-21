@@ -30,6 +30,9 @@ type worktreeResponse struct {
 	Ahead  *int  `json:"ahead,omitempty"`
 	Behind *int  `json:"behind,omitempty"`
 	Dirty  *bool `json:"dirty,omitempty"`
+	// Merged reports the branch's commits are all on its base ref; with Dirty
+	// false the worktree can be suggested for cleanup.
+	Merged *bool `json:"merged,omitempty"`
 	// Chats are the ACP session ids of the running chats working in the
 	// worktree, so a client can show a count and open one.
 	Chats []string `json:"chats,omitempty"`
@@ -57,6 +60,7 @@ func toWorktreeStatusResponse(status workspace.WorktreeStatus) worktreeResponse 
 	resp.Ahead = status.Ahead
 	resp.Behind = status.Behind
 	resp.Dirty = status.Dirty
+	resp.Merged = status.Merged
 	resp.Chats = status.Chats
 	return resp
 }

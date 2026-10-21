@@ -778,6 +778,14 @@ clean. Worktrees outlive the chats that use them: they are removed only on an ex
     `baseCommit`), `behind` (commits the base ref has gained since the fork,
     so a stale worktree is easy to spot; omitted when the worktree has no base
     ref or it no longer resolves) and `dirty` (uncommitted changes).
+  - `merged` is `true` when the branch has commits of its own and all of them
+    are on its base ref, whether they landed by fast-forward, merge, rebase or
+    squash: merging the branch again would change nothing. A worktree with
+    `merged: true` and `dirty: false` is safe to suggest cleaning up; the
+    gateway never deletes it on its own. `false` for a branch with no commits
+    of its own yet or work still to land; omitted when the worktree has no
+    base ref or it no longer resolves. To clean up several, call
+    `DELETE /v1/worktrees/{worktreeId}` for each.
   - Also lists `chats`: the ACP session ids of the running (active or
     disconnected) chats whose working directory is in the worktree, a
     subdirectory included. Omitted when none runs. The same field appears in the
