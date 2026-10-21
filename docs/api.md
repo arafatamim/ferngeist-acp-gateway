@@ -721,47 +721,6 @@ clean. Worktrees outlive the chats that use them: they are removed only on an ex
       `git worktree add` together failed or ran past their 2 minute limit. A failed add leaves no folder,
       registration or branch behind.
 
-- `POST /v1/worktrees/adopt`
-  - Requires `control` scope.
-  - Takes `{ "path": "/abs/path/to/worktree", "repo": "/abs/path/to/repo", "base": "main", "branch": "feat-x" }`
-    (`path` is required; `repo`, `base`, and `branch` are optional).
-  - Adopts an existing git worktree (created outside the gateway, e.g. on a PC or
-    via another tool) into gateway management. Once adopted, the worktree gets
-    base-aware diffs and status against its merge-base with `base` and appears
-    in `GET /v1/worktrees`.
-  - When `base` is omitted, the gateway determines the base reference from the
-    repository's default branch / trunk. When `repo` is omitted, it is inferred
-    from the worktree's git metadata.
-  - Responds with the worktree as `GET /v1/worktrees` lists it (including `ahead`,
-    `behind`, `dirty`, `chats`).
-  - Error responses:
-    - `400` — `path` is missing or not absolute, worktree is the main repository
-      checkout, worktree has detached HEAD without a specified `branch`, or
-      invalid branch name
-    - `404` — `path` does not exist on disk
-    - `409` — worktree is already managed, or is on a branch other than `branch`
-    - `422` — `path` is not a git worktree of the repository, or unknown base ref
-
-- `GET /v1/worktrees/unmanaged?repo=<absolute path>`
-  - Requires `control` scope.
-  - Reads `git worktree list --porcelain` and lists worktrees of the repository
-    that are not currently managed by the gateway. The main repository checkout
-    and deleted/prunable worktrees are excluded.
-  - Response shape:
-    ```json
-    [
-      {
-        "path": "/abs/path/to/worktree",
-        "branch": "feat-x",
-        "head": "<sha>",
-        "detached": false
-      }
-    ]
-    ```
-  - Error responses:
-    - `400` — `repo` is missing or not an absolute path
-    - `422` — `repo` is not a git repository
-
 - `GET /v1/worktrees/refs?repo=<absolute path>`
   - Requires `control` scope, like `POST /v1/worktrees`.
   - Returns the `GET /v1/runtimes/{runtimeId}/git/refs` payload (`default` and `refs`) for the
@@ -771,9 +730,20 @@ clean. Worktrees outlive the chats that use them: they are removed only on an ex
     - `400` — `repo` is missing or not an absolute path
     - `422` — `repo` is not a git repository
 
-- `GET /v1/worktrees`
+- `GET /v1/worktrees?repo=<absolute path>`
   - Requires `read` scope.
-  - Lists managed worktrees (the create response shape) plus `ahead` (commits
+  - Lists every git worktree (`git worktree list`) of every repository the
+    gateway knows: those of the worktrees it made, of running chats' working
+    directories, and of earlier `repo` listings (until the gateway restarts).
+    `repo` (optional) narrows it to one repository, known or not. Worktrees
+    made outside the gateway (plain git, an editor, another agent tool) are
+    listed too, after the gateway's own, and accept every
+    `/v1/worktrees/{worktreeId}` operation; their `id` is derived from the
+    folder, so it stays the same across lists, and `ahead` counts from the
+    repository's default branch.
+    The main checkout is never an entry. Errors: `400` for a relative `repo`,
+    `422` when `repo` is not a git repository.
+  - Each entry has the create response shape plus `ahead` (commits
     on the branch since its merge-base with the base ref, falling back to
     `baseCommit`), `behind` (commits the base ref has gained since the fork,
     so a stale worktree is easy to spot; omitted when the worktree has no base
@@ -791,8 +761,8 @@ clean. Worktrees outlive the chats that use them: they are removed only on an ex
     subdirectory included. Omitted when none runs. The same field appears in the
     rebase response. Closed chats and chats from before a gateway restart are
     not listed.
-  - Worktrees whose directory was deleted outside the gateway are left out of
-    the list. The gateway forgets them (and prunes git's bookkeeping) the next
+  - Worktrees whose directory was deleted outside the gateway, or that git no
+    longer lists, are left out of the list. The gateway forgets its own (and prunes git's bookkeeping) the next
     time a worktree is created or the server starts, not on this read.
 
 - `GET /v1/worktrees/{worktreeId}`
@@ -811,6 +781,7 @@ clean. Worktrees outlive the chats that use them: they are removed only on an ex
   - Error responses:
     - `404` — unknown worktree
     - `409` — the worktree has uncommitted changes (retry with `force=true`)
+    - `409` — the folder is a main repository checkout
     - `409` — a running chat uses the worktree as its working directory
       (`worktree is in use by chat <acpSessionId>`); `force=true` does not
       override it, close the chat first
@@ -842,7 +813,8 @@ clean. Worktrees outlive the chats that use them: they are removed only on an ex
       base is not a local branch checked out in the main checkout; there is
       nothing to merge; the base moved so a fast-forward is impossible (rebase
       first, or squash); a squash conflicted (undone); or `delete` was asked
-      while a running chat uses the worktree
+      while a running chat uses the worktree; or the worktree is on a detached
+      `HEAD`
     - `422` — the squash commit failed (for example a rejecting hook)
 
 - `POST /v1/worktrees/{worktreeId}/push`
@@ -856,8 +828,8 @@ clean. Worktrees outlive the chats that use them: they are removed only on an ex
     when a pull request was opened.
   - Error responses:
     - `404` — unknown worktree
-    - `409` — the worktree has uncommitted changes, or `origin` has commits
-      the branch lacks (rebase, then push again)
+    - `409` — the worktree has uncommitted changes or a detached `HEAD`, or
+      `origin` has commits the branch lacks (rebase, then push again)
     - `422` — `pr` was asked but `gh` is not installed, the push failed, or
       the push succeeded but opening the pull request did not (the message
       says which)

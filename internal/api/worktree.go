@@ -38,25 +38,8 @@ type worktreeResponse struct {
 	Chats []string `json:"chats,omitempty"`
 }
 
-// unmanagedWorktreeResponse is one git worktree that exists in the repo but is
-// not managed by the gateway. Path is what the client passes to adopt it.
-// Branch, head and detached are omitted when zero.
-type unmanagedWorktreeResponse struct {
-	Path     string `json:"path"`
-	Branch   string `json:"branch,omitempty"`
-	Head     string `json:"head,omitempty"`
-	Detached bool   `json:"detached,omitempty"`
-}
-
 type worktreeCreateRequest struct {
 	Repo   string `json:"repo"`
-	Base   string `json:"base"`
-	Branch string `json:"branch"`
-}
-
-type worktreeAdoptRequest struct {
-	Repo   string `json:"repo"`
-	Path   string `json:"path"`
 	Base   string `json:"base"`
 	Branch string `json:"branch"`
 }
@@ -100,43 +83,15 @@ func (s *Server) handleWorktreeCreate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, toWorktreeResponse(rec))
 }
 
-// POST /v1/worktrees/adopt {path, repo?, base?, branch?}
-// Adopts an existing git worktree (created outside the gateway) into gateway
-// management so it appears in GET /v1/worktrees and gets base-aware diffs.
-func (s *Server) handleWorktreeAdopt(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireGatewayScope(w, r, pairing.ScopeControl); !ok {
-		return
-	}
-	var req worktreeAdoptRequest
-	r.Body = http.MaxBytesReader(w, r.Body, jsonBodyLimit)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
-		return
-	}
-	// A remote base is fetched first, which can outlast the server's write timeout.
-	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(workspace.CreateTimeout + 5*time.Second))
-	status, err := s.workspaceSvc.Adopt(r.Context(), workspace.AdoptRequest{
-		Repo:   req.Repo,
-		Path:   req.Path,
-		Base:   req.Base,
-		Branch: req.Branch,
-	})
-	if err != nil {
-		writeWorkspaceError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, toWorktreeStatusResponse(status))
-}
-
-// GET /v1/worktrees
-// Lists managed worktrees with their ahead/behind/dirty state. Worktrees whose
-// directory was deleted out from under the gateway are left out; they are
-// forgotten when a worktree is next created or the server restarts.
+// GET /v1/worktrees?repo=<absolute path, optional>
+// Lists every git worktree of the repositories the gateway knows, whoever made
+// it, with its ahead/behind/dirty state; repo narrows it to one repository.
+// Worktrees whose directory was deleted are left out.
 func (s *Server) handleWorktreeList(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireGatewayScope(w, r, pairing.ScopeRead); !ok {
 		return
 	}
-	statuses, err := s.workspaceSvc.List(r.Context())
+	statuses, err := s.workspaceSvc.List(r.Context(), r.URL.Query().Get("repo"))
 	if err != nil {
 		writeWorkspaceError(w, err)
 		return
@@ -144,25 +99,6 @@ func (s *Server) handleWorktreeList(w http.ResponseWriter, r *http.Request) {
 	out := make([]worktreeResponse, 0, len(statuses))
 	for _, status := range statuses {
 		out = append(out, toWorktreeStatusResponse(status))
-	}
-	writeJSON(w, http.StatusOK, out)
-}
-
-// GET /v1/worktrees/unmanaged?repo=<absolute path>
-// Lists git worktrees in the repository that are not currently managed by the
-// gateway, parsed from `git worktree list --porcelain`.
-func (s *Server) handleWorktreeUnmanaged(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireGatewayScope(w, r, pairing.ScopeControl); !ok {
-		return
-	}
-	list, err := s.workspaceSvc.Unmanaged(r.Context(), r.URL.Query().Get("repo"))
-	if err != nil {
-		writeWorkspaceError(w, err)
-		return
-	}
-	out := make([]unmanagedWorktreeResponse, 0, len(list))
-	for _, wt := range list {
-		out = append(out, unmanagedWorktreeResponse{Path: wt.Path, Branch: wt.Branch, Head: wt.Head, Detached: wt.Detached})
 	}
 	writeJSON(w, http.StatusOK, out)
 }

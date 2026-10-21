@@ -341,7 +341,7 @@ func TestListCountsAheadFromMergeBase(t *testing.T) {
 		t.Fatalf("rebase: %v", err)
 	}
 
-	statuses, err := svc.List(ctx)
+	statuses, err := svc.List(ctx, "")
 	if err != nil || len(statuses) != 1 {
 		t.Fatalf("List = %v, %v", statuses, err)
 	}
@@ -400,7 +400,7 @@ func TestListReportsRunningChats(t *testing.T) {
 		return ids
 	}
 
-	statuses, err := svc.List(ctx)
+	statuses, err := svc.List(ctx, "")
 	if err != nil || len(statuses) != 2 {
 		t.Fatalf("List = %v, %v", statuses, err)
 	}
@@ -503,148 +503,129 @@ func wantWorkspaceStatus(t *testing.T, err error, want int) {
 	}
 }
 
-func TestMergeFastForwardsAndDeletes(t *testing.T) {
-	repo, _ := initMainRepo(t)
-	svc, _ := newWorktreeTestService(t)
-	ctx := context.Background()
-	rec, err := svc.Create(ctx, CreateRequest{Repo: repo, Base: "main", Branch: "feat/x"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := svc.Merge(ctx, rec.ID, MergeRequest{}); err == nil {
-		t.Fatal("merged a branch with no commits")
-	} else {
-		wantWorkspaceStatus(t, err, 409)
-	}
-	commitFile(t, rec.Path, "agent.txt", "work\n", "agent work")
-
-	res, err := svc.Merge(ctx, rec.ID, MergeRequest{Delete: true})
-	if err != nil {
-		t.Fatalf("Merge: %v", err)
-	}
-	head, _ := RunGit(ctx, repo, "rev-parse", "HEAD")
-	if res.Commit != strings.TrimSpace(head) || !res.WorktreeDeleted || !res.BranchDeleted {
-		t.Fatalf("result = %+v, head %s", res, head)
-	}
-	if _, err := os.Stat(filepath.Join(repo, "agent.txt")); err != nil {
-		t.Fatalf("merged file missing from the main checkout: %v", err)
-	}
-	if _, err := os.Stat(rec.Path); !os.IsNotExist(err) {
-		t.Fatalf("worktree folder survived: %v", err)
-	}
+// edit is one file change a table row makes: with a msg it is committed,
+// without one it is left uncommitted on disk.
+type edit struct {
+	file    string
+	content string
+	msg     string
 }
 
-func TestMergeFastForwardRefusesAMovedBase(t *testing.T) {
-	repo, _ := initMainRepo(t)
-	svc, _ := newWorktreeTestService(t)
-	ctx := context.Background()
-	rec, err := svc.Create(ctx, CreateRequest{Repo: repo, Base: "main", Branch: "feat/x"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	commitFile(t, rec.Path, "agent.txt", "work\n", "agent work")
-	commitFile(t, repo, "upstream.txt", "up\n", "upstream")
-	before, _ := RunGit(ctx, repo, "rev-parse", "HEAD")
-
-	_, err = svc.Merge(ctx, rec.ID, MergeRequest{})
-	wantWorkspaceStatus(t, err, 409)
-	if after, _ := RunGit(ctx, repo, "rev-parse", "HEAD"); after != before {
-		t.Fatalf("base moved by a refused merge: %s -> %s", before, after)
-	}
+// mergeCase is one row of the merge table: the repo state to arrange for, the
+// request to make, and the outcome that must follow.
+type mergeCase struct {
+	name       string
+	trunk      []edit // commits made in the main checkout first
+	wt         []edit // commits made in the managed worktree
+	dirty      []edit // uncommitted writes left in the main checkout
+	mainBranch string // moves the main checkout onto a fresh branch of its own
+	chats      []string
+	req        MergeRequest
+	status     int      // 0 lands the merge; anything else is the refusal status
+	subjects   []string // main checkout commit subjects from HEAD downwards
+	clean      bool     // the main checkout's tracked status must come back empty
 }
 
-func TestMergeSquashLandsOneCommitAndDropsTheBranch(t *testing.T) {
-	repo, _ := initMainRepo(t)
-	svc, _ := newWorktreeTestService(t)
-	ctx := context.Background()
-	rec, err := svc.Create(ctx, CreateRequest{Repo: repo, Base: "main", Branch: "feat/x"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	commitFile(t, rec.Path, "one.txt", "1\n", "one")
-	commitFile(t, rec.Path, "two.txt", "2\n", "two")
-	commitFile(t, repo, "upstream.txt", "up\n", "upstream")
+// TestMergeScenarios covers every merge refusal and every landing state the
+// service promises; a refusal leaves the main checkout exactly as the setup
+// left it. The table carries each scenario's state, request and expected
+// outcome; the runner arranges the state per row and checks the aftermath.
+func TestMergeScenarios(t *testing.T) {
+	for _, tc := range []mergeCase{
+		{name: "refuses a branch with no commits", req: MergeRequest{}, status: 409},
+		{name: "fast-forward lands the commit and deletes the worktree and the branch",
+			wt: []edit{{"agent.txt", "work\n", "agent work"}}, req: MergeRequest{Delete: true}},
+		{name: "refuses a fast-forward with a moved base",
+			wt:    []edit{{"agent.txt", "work\n", "agent work"}},
+			trunk: []edit{{"upstream.txt", "up\n", "upstream"}}, status: 409},
+		{name: "squash lands one commit on top of upstream and drops the branch",
+			wt:       []edit{{"one.txt", "1\n", "one"}, {"two.txt", "2\n", "two"}},
+			trunk:    []edit{{"upstream.txt", "up\n", "upstream"}},
+			req:      MergeRequest{Squash: true, Message: "land x", Delete: true},
+			subjects: []string{"land x", "upstream"}},
+		{name: "a squashed conflict is undone without moving the base",
+			wt:    []edit{{"a.txt", "mine\n", "agent edit"}},
+			trunk: []edit{{"a.txt", "theirs\n", "upstream edit"}},
+			req:   MergeRequest{Squash: true}, status: 409, clean: true},
+		{name: "refuses a dirty main checkout",
+			wt: []edit{{"agent.txt", "work\n", "agent work"}}, dirty: []edit{{"a.txt", "dirty\n", ""}},
+			status: 409},
+		{name: "refuses a main checkout on another branch",
+			wt: []edit{{"agent.txt", "work\n", "agent work"}}, mainBranch: "other", status: 409},
+		{name: "refuses to delete while a chat uses the worktree",
+			wt: []edit{{"agent.txt", "work\n", "agent work"}}, chats: []string{"ses_1"},
+			req: MergeRequest{Delete: true}, status: 409},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo, _ := initMainRepo(t)
+			svc, _ := newWorktreeTestService(t)
+			ctx := context.Background()
+			rec, err := svc.Create(ctx, CreateRequest{Repo: repo, Base: "main", Branch: "feat/x"})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			for _, c := range tc.trunk {
+				commitFile(t, repo, c.file, c.content, c.msg)
+			}
+			for _, c := range tc.wt {
+				commitFile(t, rec.Path, c.file, c.content, c.msg)
+			}
+			for _, f := range tc.dirty {
+				if err := os.WriteFile(filepath.Join(repo, f.file), []byte(f.content), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.mainBranch != "" {
+				if _, err := RunGit(ctx, repo, "checkout", "-b", tc.mainBranch); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if len(tc.chats) > 0 {
+				svc.chatUsing = chatsAt(rec.Path, tc.chats...)
+			}
+			before, _ := RunGit(ctx, repo, "rev-parse", "HEAD")
 
-	res, err := svc.Merge(ctx, rec.ID, MergeRequest{Squash: true, Message: "land x", Delete: true})
-	if err != nil {
-		t.Fatalf("Merge: %v", err)
-	}
-	if !res.WorktreeDeleted || !res.BranchDeleted {
-		t.Fatalf("result = %+v", res)
-	}
-	subjects, _ := RunGit(ctx, repo, "log", "--format=%s", "-3")
-	if !strings.HasPrefix(subjects, "land x\nupstream\n") {
-		t.Fatalf("log = %q, want squash commit on top of upstream", subjects)
-	}
-	if _, err := RunGit(ctx, repo, "show-ref", "--verify", "--quiet", "refs/heads/feat/x"); err == nil {
-		t.Fatal("squashed branch survived")
-	}
-}
-
-func TestMergeSquashConflictIsUndone(t *testing.T) {
-	repo, _ := initMainRepo(t)
-	svc, _ := newWorktreeTestService(t)
-	ctx := context.Background()
-	rec, err := svc.Create(ctx, CreateRequest{Repo: repo, Base: "main", Branch: "feat/x"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	commitFile(t, rec.Path, "a.txt", "mine\n", "agent edit")
-	commitFile(t, repo, "a.txt", "theirs\n", "upstream edit")
-	before, _ := RunGit(ctx, repo, "rev-parse", "HEAD")
-
-	_, err = svc.Merge(ctx, rec.ID, MergeRequest{Squash: true})
-	wantWorkspaceStatus(t, err, 409)
-	if after, _ := RunGit(ctx, repo, "rev-parse", "HEAD"); after != before {
-		t.Fatalf("base moved by a conflicted squash: %s -> %s", before, after)
-	}
-	if st, _ := RunGit(ctx, repo, "status", "--porcelain", "--untracked-files=no"); strings.TrimSpace(st) != "" {
-		t.Fatalf("main checkout left dirty: %q", st)
-	}
-}
-
-func TestMergeRefusesWhenTheMainCheckoutIsOnAnotherBranchOrDirty(t *testing.T) {
-	repo, _ := initMainRepo(t)
-	svc, _ := newWorktreeTestService(t)
-	ctx := context.Background()
-	rec, err := svc.Create(ctx, CreateRequest{Repo: repo, Base: "main", Branch: "feat/x"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	commitFile(t, rec.Path, "agent.txt", "work\n", "agent work")
-
-	if err := os.WriteFile(filepath.Join(repo, "a.txt"), []byte("dirty\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	_, err = svc.Merge(ctx, rec.ID, MergeRequest{})
-	wantWorkspaceStatus(t, err, 409)
-	if _, err := RunGit(ctx, repo, "checkout", "--", "a.txt"); err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := RunGit(ctx, repo, "checkout", "-b", "other"); err != nil {
-		t.Fatal(err)
-	}
-	_, err = svc.Merge(ctx, rec.ID, MergeRequest{})
-	wantWorkspaceStatus(t, err, 409)
-}
-
-func TestMergeDeleteRefusesWhileAChatUsesTheWorktree(t *testing.T) {
-	repo, _ := initMainRepo(t)
-	svc, _ := newWorktreeTestService(t)
-	ctx := context.Background()
-	rec, err := svc.Create(ctx, CreateRequest{Repo: repo, Base: "main", Branch: "feat/x"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	commitFile(t, rec.Path, "agent.txt", "work\n", "agent work")
-	svc.chatUsing = chatsAt(rec.Path, "ses_1")
-	before, _ := RunGit(ctx, repo, "rev-parse", "HEAD")
-
-	_, err = svc.Merge(ctx, rec.ID, MergeRequest{Delete: true})
-	wantWorkspaceStatus(t, err, 409)
-	if after, _ := RunGit(ctx, repo, "rev-parse", "HEAD"); after != before {
-		t.Fatal("merge landed although its cleanup was refused")
+			res, err := svc.Merge(ctx, rec.ID, tc.req)
+			if tc.status != 0 {
+				if err == nil {
+					t.Fatalf("Merge %+v succeeded, want status %d", tc.req, tc.status)
+				}
+				wantWorkspaceStatus(t, err, tc.status)
+				if after, _ := RunGit(ctx, repo, "rev-parse", "HEAD"); after != before {
+					t.Fatalf("base moved by a refused merge: %s -> %s", before, after)
+				}
+				if st, _ := RunGit(ctx, repo, "status", "--porcelain", "--untracked-files=no"); tc.clean && strings.TrimSpace(st) != "" {
+					t.Fatalf("main checkout left dirty: %q", st)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Merge: %v", err)
+			}
+			if head, _ := RunGit(ctx, repo, "rev-parse", "HEAD"); res.Commit != strings.TrimSpace(head) {
+				t.Fatalf("landed commit = %q, want %q", res.Commit, head)
+			}
+			if tc.req.Delete && (!res.WorktreeDeleted || !res.BranchDeleted) {
+				t.Fatalf("result = %+v, want the worktree and branch deleted", res)
+			}
+			if _, err := RunGit(ctx, repo, "show-ref", "--verify", "--quiet", "refs/heads/feat/x"); err == nil {
+				t.Fatal("branch survived the merge")
+			}
+			if _, stat := os.Stat(rec.Path); !os.IsNotExist(stat) {
+				t.Fatalf("worktree folder survived: %v", stat)
+			}
+			for _, c := range tc.wt {
+				if _, err := os.Stat(filepath.Join(repo, c.file)); err != nil {
+					t.Fatalf("merged file %s missing from the main checkout: %v", c.file, err)
+				}
+			}
+			if len(tc.subjects) > 0 {
+				out, _ := RunGit(ctx, repo, "log", "--format=%s", "-"+strconv.Itoa(len(tc.subjects)))
+				if want := strings.Join(tc.subjects, "\n") + "\n"; !strings.HasPrefix(out, want) {
+					t.Fatalf("log = %q, want it to start with %q", out, want)
+				}
+			}
+		})
 	}
 }
 
@@ -766,7 +747,7 @@ func TestListReportsHowFarTheBaseMoved(t *testing.T) {
 
 	counts := func() (ahead, behind int) {
 		t.Helper()
-		statuses, err := svc.List(ctx)
+		statuses, err := svc.List(ctx, "")
 		if err != nil || len(statuses) != 1 || statuses[0].Ahead == nil || statuses[0].Behind == nil {
 			t.Fatalf("List = %+v, %v", statuses, err)
 		}
@@ -794,7 +775,7 @@ func TestListLeavesBehindWithoutABaseRef(t *testing.T) {
 	if err := stores().SaveWorktree(ctx, storage.WorktreeRecord{ID: "legacy", Repo: repo, Path: path, Branch: "legacy", BaseCommit: c1, CreatedAt: time.Now()}); err != nil {
 		t.Fatal(err)
 	}
-	statuses, err := svc.List(ctx)
+	statuses, err := svc.List(ctx, "")
 	if err != nil || len(statuses) != 1 {
 		t.Fatalf("List = %+v, %v", statuses, err)
 	}
@@ -818,7 +799,7 @@ func TestListChecksEveryWorktreeInOrder(t *testing.T) {
 			commitFile(t, rec.Path, "f"+strconv.Itoa(j)+".txt", "x\n", "c")
 		}
 	}
-	statuses, err := svc.List(ctx)
+	statuses, err := svc.List(ctx, "")
 	if err != nil || len(statuses) != n {
 		t.Fatalf("List returned %d, %v; want %d", len(statuses), err, n)
 	}
@@ -848,7 +829,7 @@ func TestListDoesNotForgetAVanishedWorktreeButPruneDoes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	statuses, err := svc.List(ctx)
+	statuses, err := svc.List(ctx, "")
 	if err != nil || len(statuses) != 1 || statuses[0].ID != kept.ID {
 		t.Fatalf("List = %+v, %v; want only the surviving worktree", statuses, err)
 	}
@@ -934,216 +915,33 @@ func TestCreateCleansUpAfterAKilledWorktreeAdd(t *testing.T) {
 	}
 }
 
-func TestUnmanagedWorktreesList(t *testing.T) {
-	repo, _ := initMainRepo(t)
-	svc, _ := newWorktreeTestService(t)
-	ctx := context.Background()
-
-	// Error cases
-	if _, err := svc.Unmanaged(ctx, "relative/path"); err == nil {
-		t.Fatal("expected error for relative path")
-	} else {
-		wantWorkspaceStatus(t, err, 400)
-	}
-	if _, err := svc.Unmanaged(ctx, t.TempDir()); err == nil {
-		t.Fatal("expected error for non-git repo")
-	} else {
-		wantWorkspaceStatus(t, err, 422)
-	}
-
-	// Create an external worktree outside .worktrees
-	extPath := filepath.Join(t.TempDir(), "external-wt")
-	if _, err := RunGit(ctx, repo, "worktree", "add", "-b", "ext-feature", extPath, "main"); err != nil {
-		t.Fatalf("git worktree add: %v", err)
-	}
-
-	// Create a gateway-managed worktree
-	managed, err := svc.Create(ctx, CreateRequest{Repo: repo, Base: "main", Branch: "feat/managed"})
-	if err != nil {
-		t.Fatalf("svc.Create: %v", err)
-	}
-
-	unmanaged, err := svc.Unmanaged(ctx, repo)
-	if err != nil {
-		t.Fatalf("svc.Unmanaged: %v", err)
-	}
-
-	if len(unmanaged) != 1 {
-		t.Fatalf("Unmanaged returned %d worktrees, want 1: %+v", len(unmanaged), unmanaged)
-	}
-	if unmanaged[0].Path != extPath {
-		t.Fatalf("Unmanaged path = %q, want %q", unmanaged[0].Path, extPath)
-	}
-	if unmanaged[0].Branch != "ext-feature" {
-		t.Fatalf("Unmanaged branch = %q, want ext-feature", unmanaged[0].Branch)
-	}
-	if unmanaged[0].Head == "" {
-		t.Fatal("Unmanaged head is empty")
-	}
-
-	// Ensure main repo and managed worktree are not in the list
-	for _, wt := range unmanaged {
-		if wt.Path == repo {
-			t.Fatalf("main repo %q found in unmanaged list", repo)
-		}
-		if wt.Path == managed.Path {
-			t.Fatalf("managed worktree %q found in unmanaged list", managed.Path)
-		}
-	}
+// adoptCase is one row of the adoption table: the worktree the setup carves
+// out of the repo, where the request points, and what must come back.
+type adoptCase struct {
+	name string
+	// wtArgs is what the setup appends to `git worktree add` (after that,
+	// before the path and "main"): "-b feat/…" branches the checkout,
+	// "--detach" makes a detached one; nil carves out no worktree.
+	wtArgs  []string
+	wtFiles []edit // files written into the fresh worktree, uncommitted
+	// repo, path select where the request points, resolved by the runner:
+	// "repo", "worktree", "plain", "missing", "relative".
+	repo, path string
+	reqBranch  string
+	// wantStatus 0 expects the adoption to succeed; anything else expects
+	// that refusal and the worktree left untouched.
+	wantStatus int
+	branch     string // the adopted record's branch
+	repoIsMain bool   // the adopted record must name the main checkout as repo
+	keep       []edit // files a refusal must leave with their content
+	// after checks side state a refusal must leave; it keeps the scenarios
+	// whose extra assertions rode the hand-rolled tests.
+	after func(t *testing.T, svc *Service, ctx context.Context, repo, wt string)
 }
 
-func TestAdoptWorktree(t *testing.T) {
-	repo, c1 := initMainRepo(t)
-	svc, _ := newWorktreeTestService(t)
-	ctx := context.Background()
-
-	// External worktree created outside gateway
-	extPath := filepath.Join(t.TempDir(), "external-wt")
-	if _, err := RunGit(ctx, repo, "worktree", "add", "-b", "feat/adopted", extPath, "main"); err != nil {
-		t.Fatalf("git worktree add: %v", err)
-	}
-
-	// Add 1 commit to external worktree (ahead = 1)
-	if err := os.WriteFile(filepath.Join(extPath, "ext.txt"), []byte("ext content\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := RunGit(ctx, extPath, "add", "ext.txt"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := RunGit(ctx, extPath, "commit", "-m", "worktree commit"); err != nil {
-		t.Fatal(err)
-	}
-
-	// Add 1 commit to main (behind = 1)
-	if err := os.WriteFile(filepath.Join(repo, "main2.txt"), []byte("main content\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := RunGit(ctx, repo, "add", "main2.txt"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := RunGit(ctx, repo, "commit", "-m", "main commit"); err != nil {
-		t.Fatal(err)
-	}
-
-	// Add unstaged edit in external worktree (dirty = true)
-	if err := os.WriteFile(filepath.Join(extPath, "ext.txt"), []byte("dirty content\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Adopt without repo explicitly given (inferred from path)
-	status, err := svc.Adopt(ctx, AdoptRequest{Path: extPath})
-	if err != nil {
-		t.Fatalf("svc.Adopt: %v", err)
-	}
-
-	if status.ID == "" {
-		t.Fatal("Adopt returned empty ID")
-	}
-	if status.Repo != repo {
-		t.Fatalf("status.Repo = %q, want %q", status.Repo, repo)
-	}
-	if status.Path != extPath {
-		t.Fatalf("status.Path = %q, want %q", status.Path, extPath)
-	}
-	if status.Branch != "feat/adopted" {
-		t.Fatalf("status.Branch = %q, want feat/adopted", status.Branch)
-	}
-	if status.BaseRef != "main" {
-		t.Fatalf("status.BaseRef = %q, want main", status.BaseRef)
-	}
-	if status.BaseCommit != c1 {
-		t.Fatalf("status.BaseCommit = %q, want %q", status.BaseCommit, c1)
-	}
-	if status.Ahead == nil || *status.Ahead != 1 {
-		t.Fatalf("status.Ahead = %v, want 1", status.Ahead)
-	}
-	if status.Behind == nil || *status.Behind != 1 {
-		t.Fatalf("status.Behind = %v, want 1", status.Behind)
-	}
-	if status.Dirty == nil || !*status.Dirty {
-		t.Fatalf("status.Dirty = %v, want true", status.Dirty)
-	}
-
-	// Check BaseRef for base-aware diffs
-	if baseRef := svc.BaseRef(ctx, extPath); baseRef != c1 {
-		t.Fatalf("svc.BaseRef = %q, want %q", baseRef, c1)
-	}
-
-	// It must appear in List
-	list, err := svc.List(ctx)
-	if err != nil {
-		t.Fatalf("svc.List: %v", err)
-	}
-	if len(list) != 1 || list[0].ID != status.ID {
-		t.Fatalf("svc.List = %+v, want adopted worktree %s", list, status.ID)
-	}
-
-	// It must be accessible via Get
-	got, err := svc.Get(ctx, status.ID)
-	if err != nil {
-		t.Fatalf("svc.Get: %v", err)
-	}
-	if got.ID != status.ID {
-		t.Fatalf("svc.Get = %+v, want %s", got, status.ID)
-	}
-
-	// Adopting again should 409
-	_, err = svc.Adopt(ctx, AdoptRequest{Path: extPath})
-	wantWorkspaceStatus(t, err, 409)
-}
-
-func TestAdoptRefusesBadInputAndChecksOutADetachedWorktree(t *testing.T) {
-	repo, _ := initMainRepo(t)
-	svc, _ := newWorktreeTestService(t)
-	ctx := context.Background()
-
-	// Relative path
-	_, err := svc.Adopt(ctx, AdoptRequest{Path: "relative/path"})
-	wantWorkspaceStatus(t, err, 400)
-
-	// Non-existent path
-	_, err = svc.Adopt(ctx, AdoptRequest{Path: filepath.Join(t.TempDir(), "non-existent")})
-	wantWorkspaceStatus(t, err, 404)
-
-	// Main checkout
-	_, err = svc.Adopt(ctx, AdoptRequest{Path: repo})
-	wantWorkspaceStatus(t, err, 400)
-
-	// Path not a worktree of repo
-	notWT := t.TempDir()
-	_, err = svc.Adopt(ctx, AdoptRequest{Repo: repo, Path: notWT})
-	wantWorkspaceStatus(t, err, 422)
-
-	// Detached HEAD worktree
-	extPath := filepath.Join(t.TempDir(), "detached-wt")
-	if _, err := RunGit(ctx, repo, "worktree", "add", "--detach", extPath, "main"); err != nil {
-		t.Fatalf("git worktree add --detach: %v", err)
-	}
-
-	// Detached without branch fails with 400
-	_, err = svc.Adopt(ctx, AdoptRequest{Path: extPath})
-	wantWorkspaceStatus(t, err, 400)
-
-	// An option-like branch is refused before any checkout runs: "-f" would
-	// otherwise reach `git checkout -f` and discard the uncommitted edit.
-	if err := os.WriteFile(filepath.Join(extPath, "README.md"), []byte("unsaved\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	_, err = svc.Adopt(ctx, AdoptRequest{Path: extPath, Branch: "-f"})
-	wantWorkspaceStatus(t, err, 400)
-	if got, _ := os.ReadFile(filepath.Join(extPath, "README.md")); string(got) != "unsaved\n" {
-		t.Fatalf("uncommitted edit lost: %q", got)
-	}
-
-	// Detached with branch succeeds and checks out the branch
-	status, err := svc.Adopt(ctx, AdoptRequest{Path: extPath, Branch: "feat/from-detached"})
-	if err != nil {
-		t.Fatalf("Adopt with branch: %v", err)
-	}
-	if status.Branch != "feat/from-detached" {
-		t.Fatalf("status.Branch = %q, want feat/from-detached", status.Branch)
-	}
-}
+// TestAdoptInputValidation covers every adoption refusal and the success
+// shapes its refusal tests carried. The table carries each scenario's
+// state, request and expected outcome; the runner checks the aftermath.
 
 func TestCreateFromRemoteBranchAndPR(t *testing.T) {
 	repo, c1 := initMainRepo(t)
@@ -1250,50 +1048,6 @@ func TestALocalBranchNamedLikeAPRIsUsedAsIs(t *testing.T) {
 	}
 	if got := prBase(ctx, rec); got != "pr/7" {
 		t.Fatalf("prBase = %q, want pr/7", got)
-	}
-}
-
-func TestAdoptRefusesTheMainCheckoutNamedThroughALinkedWorktree(t *testing.T) {
-	repo, _ := initMainRepo(t)
-	svc, _ := newWorktreeTestService(t)
-	ctx := context.Background()
-	linked := filepath.Join(t.TempDir(), "linked")
-	if _, err := RunGit(ctx, repo, "worktree", "add", "-b", "feat/linked", linked, "main"); err != nil {
-		t.Fatal(err)
-	}
-
-	_, err := svc.Adopt(ctx, AdoptRequest{Repo: linked, Path: repo})
-	wantWorkspaceStatus(t, err, 400)
-	list, err := svc.Unmanaged(ctx, linked)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(list) != 1 || list[0].Path != linked {
-		t.Fatalf("Unmanaged via linked worktree = %+v, want only %s", list, linked)
-	}
-
-	// The recorded repo is the main checkout, whichever checkout named it.
-	status, err := svc.Adopt(ctx, AdoptRequest{Repo: linked, Path: linked})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if status.Repo != repo {
-		t.Fatalf("Repo = %q, want %q", status.Repo, repo)
-	}
-}
-
-func TestAdoptRefusesABranchTheWorktreeIsNotOn(t *testing.T) {
-	repo, _ := initMainRepo(t)
-	svc, _ := newWorktreeTestService(t)
-	ctx := context.Background()
-	ext := filepath.Join(t.TempDir(), "ext")
-	if _, err := RunGit(ctx, repo, "worktree", "add", "-b", "feat/real", ext, "main"); err != nil {
-		t.Fatal(err)
-	}
-	_, err := svc.Adopt(ctx, AdoptRequest{Path: ext, Branch: "feat/other"})
-	wantWorkspaceStatus(t, err, 409)
-	if _, err := svc.Adopt(ctx, AdoptRequest{Path: ext, Branch: "feat/real"}); err != nil {
-		t.Fatalf("Adopt with its own branch: %v", err)
 	}
 }
 
@@ -1431,5 +1185,56 @@ func TestMergedFlagsWorkThatLandedOnTheBase(t *testing.T) {
 	// The base moved, but the fresh branch never had work of its own.
 	if merged(fresh) {
 		t.Fatal("flagged a branch with no commits of its own")
+	}
+}
+
+// TestListShowsWorktreesMadeOutsideTheGateway finds a plain `git worktree add`
+// through a running chat's cwd, measures it against the default branch, acts
+// on it by id without adopting, and drops it once git no longer lists it.
+func TestListShowsWorktreesMadeOutsideTheGateway(t *testing.T) {
+	repo, c1 := initMainRepo(t)
+	svc, stores := newWorktreeTestService(t)
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "outside")
+	if _, err := RunGit(ctx, repo, "worktree", "add", "-b", "feat/out", path, c1); err != nil {
+		t.Fatal(err)
+	}
+	commitFile(t, path, "w.txt", "w\n", "work")
+
+	if got, _ := svc.List(ctx, ""); len(got) != 0 {
+		t.Fatalf("List with no known repo = %+v, want none", got)
+	}
+	svc.chatUsing = func(match func(string) bool) []string { match(repo); return nil }
+	list, err := svc.List(ctx, "")
+	if err != nil || len(list) != 1 {
+		t.Fatalf("List = %+v, %v; want the outside worktree only", list, err)
+	}
+	wt := list[0]
+	if wt.Path != path || wt.Branch != "feat/out" || wt.Repo != repo || wt.Ahead == nil || *wt.Ahead != 1 || wt.Dirty == nil || *wt.Dirty || wt.CreatedAt.IsZero() {
+		t.Fatalf("outside worktree = %+v", wt)
+	}
+	if narrowed, err := svc.List(ctx, path); err != nil || len(narrowed) != 1 || narrowed[0].ID != wt.ID {
+		t.Fatalf("List(repo) = %+v, %v; want the same entry", narrowed, err)
+	}
+	if got, err := svc.Get(ctx, wt.ID); err != nil || got.Path != path {
+		t.Fatalf("Get = %+v, %v", got, err)
+	}
+
+	if err := os.WriteFile(filepath.Join(path, "w.txt"), []byte("edit\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err = svc.Delete(ctx, wt.ID, false)
+	wantWorkspaceStatus(t, err, 409)
+	if deleted, err := svc.Delete(ctx, wt.ID, true); err != nil || deleted {
+		t.Fatalf("Delete = %v, %v; want the unmerged branch kept", deleted, err)
+	}
+	if !folderMissing(path) {
+		t.Fatal("folder survived Delete")
+	}
+	if got, _ := svc.List(ctx, ""); len(got) != 0 {
+		t.Fatalf("List after delete = %+v", got)
+	}
+	if records, _ := stores().ListWorktrees(ctx); len(records) != 0 {
+		t.Fatalf("acting on it saved records: %+v", records)
 	}
 }

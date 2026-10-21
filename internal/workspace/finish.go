@@ -15,7 +15,7 @@ import (
 // merging or pushing only moves committed work, so uncommitted edits would
 // either be lost or silently left behind.
 func (s *Service) cleanWorktree(ctx context.Context, id string) (storage.WorktreeRecord, error) {
-	rec, ok := s.find(ctx, func(rec storage.WorktreeRecord) bool { return rec.ID == id })
+	rec, ok := s.worktree(ctx, id)
 	if !ok {
 		return rec, errStatus(404, "unknown worktree")
 	}
@@ -84,6 +84,9 @@ func (s *Service) Merge(ctx context.Context, id string, req MergeRequest) (Merge
 	}
 	if rec.BaseRef == "" {
 		return MergeResult{}, errStatus(409, "worktree has no base branch to merge into")
+	}
+	if rec.Branch == "" {
+		return MergeResult{}, errStatus(409, "worktree is detached; check out a branch first")
 	}
 	if !branchExists(ctx, rec.Repo, rec.BaseRef) {
 		return MergeResult{}, errStatus(409, "base "+rec.BaseRef+" is not a local branch")
@@ -176,6 +179,9 @@ func (s *Service) Push(ctx context.Context, id string, req PushRequest) (PushRes
 	rec, err := s.cleanWorktree(ctx, id)
 	if err != nil {
 		return PushResult{}, err
+	}
+	if rec.Branch == "" {
+		return PushResult{}, errStatus(409, "worktree is detached; check out a branch first")
 	}
 	if req.PR {
 		if _, err := exec.LookPath("gh"); err != nil {

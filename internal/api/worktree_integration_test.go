@@ -325,7 +325,7 @@ func TestWorktreeRefs_Endpoint(t *testing.T) {
 	}
 }
 
-func TestWorktree_UnmanagedAndAdopt(t *testing.T) {
+func TestWorktree_ListShowsWorktreesMadeOutsideTheGateway(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not installed")
 	}
@@ -354,74 +354,30 @@ func TestWorktree_UnmanagedAndAdopt(t *testing.T) {
 		return rec
 	}
 
-	// GET /v1/worktrees/unmanaged error cases
-	if rec := do(t, http.MethodGet, "/v1/worktrees/unmanaged?repo=relative/path", ""); rec.Code != http.StatusBadRequest {
-		t.Fatalf("unmanaged relative = %d, want 400", rec.Code)
+	if rec := do(t, http.MethodGet, "/v1/worktrees?repo=relative/path", ""); rec.Code != http.StatusBadRequest {
+		t.Fatalf("list relative repo = %d, want 400", rec.Code)
 	}
-	if rec := do(t, http.MethodGet, "/v1/worktrees/unmanaged?repo="+url.QueryEscape(t.TempDir()), ""); rec.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("unmanaged non-repo = %d, want 422", rec.Code)
-	}
-
-	// GET /v1/worktrees/unmanaged lists extPath
-	rec := do(t, http.MethodGet, "/v1/worktrees/unmanaged?repo="+url.QueryEscape(repo), "")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("unmanaged code = %d, body = %s", rec.Code, rec.Body.String())
-	}
-	var unmanaged []unmanagedWorktreeResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &unmanaged); err != nil {
-		t.Fatal(err)
-	}
-	if len(unmanaged) != 1 || unmanaged[0].Path != extPath || unmanaged[0].Branch != "feat/ext" {
-		t.Fatalf("unmanaged = %+v, want 1 worktree at %s with branch feat/ext", unmanaged, extPath)
+	if rec := do(t, http.MethodGet, "/v1/worktrees?repo="+url.QueryEscape(t.TempDir()), ""); rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("list non-repo = %d, want 422", rec.Code)
 	}
 
-	// POST /v1/worktrees/adopt
-	adoptBody, _ := json.Marshal(map[string]string{
-		"repo": repo,
-		"path": extPath,
-	})
-	rec = do(t, http.MethodPost, "/v1/worktrees/adopt", string(adoptBody))
+	rec := do(t, http.MethodGet, "/v1/worktrees?repo="+url.QueryEscape(repo), "")
 	if rec.Code != http.StatusOK {
-		t.Fatalf("adopt code = %d, body = %s", rec.Code, rec.Body.String())
-	}
-	var adopted worktreeResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &adopted); err != nil {
-		t.Fatal(err)
-	}
-	if adopted.Path != extPath || adopted.Branch != "feat/ext" || adopted.BaseCommit == "" {
-		t.Fatalf("adopted response = %+v", adopted)
-	}
-
-	// GET /v1/worktrees now includes the adopted worktree
-	rec = do(t, http.MethodGet, "/v1/worktrees", "")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("list code = %d", rec.Code)
+		t.Fatalf("list code = %d, body = %s", rec.Code, rec.Body.String())
 	}
 	var list []worktreeResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
 		t.Fatal(err)
 	}
-	if len(list) != 1 || list[0].ID != adopted.ID {
-		t.Fatalf("list = %+v, want adopted worktree %s", list, adopted.ID)
+	if len(list) != 1 || list[0].Path != extPath || list[0].Branch != "feat/ext" || list[0].Ahead == nil || *list[0].Ahead != 0 {
+		t.Fatalf("list = %+v, want the outside worktree at %s", list, extPath)
 	}
 
-	// GET /v1/worktrees/unmanaged is now empty
-	rec = do(t, http.MethodGet, "/v1/worktrees/unmanaged?repo="+url.QueryEscape(repo), "")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("unmanaged code = %d", rec.Code)
+	if rec := do(t, http.MethodDelete, "/v1/worktrees/"+list[0].ID, ""); rec.Code != http.StatusOK {
+		t.Fatalf("delete code = %d, body = %s", rec.Code, rec.Body.String())
 	}
-	var unmanagedAfter []unmanagedWorktreeResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &unmanagedAfter); err != nil {
-		t.Fatal(err)
-	}
-	if len(unmanagedAfter) != 0 {
-		t.Fatalf("unmanagedAfter = %+v, want empty", unmanagedAfter)
-	}
-
-	// Adopting again returns 409
-	rec = do(t, http.MethodPost, "/v1/worktrees/adopt", string(adoptBody))
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("adopt again code = %d, want 409", rec.Code)
+	if _, err := os.Stat(extPath); !os.IsNotExist(err) {
+		t.Fatalf("outside worktree survived delete: %v", err)
 	}
 }
 

@@ -61,14 +61,11 @@ not be coupled. Full release notes live in GitHub Releases.
   `origin/feat-x`) and PR numbers (`pr/123`, `pull/123`, `origin/pr/123`) as
   the `base`, fetching the ref on-demand before checkout and validating refs
   strictly. (2026-10-21)
-- `[additive]` `GET /v1/worktrees/unmanaged?repo=<absolute path>` — lists git
-  worktrees in a repository that are not currently managed by the gateway,
-  parsed from `git worktree list --porcelain`. Needs `control` scope.
-  (2026-10-21)
-- `[additive]` `POST /v1/worktrees/adopt` — adopts an existing git worktree
-  (created outside the gateway, e.g. on a PC or via Claude Code) into gateway
-  management so it appears in `GET /v1/worktrees` and gets base-aware diffs.
-  (2026-10-21)
+- `[additive]` `GET /v1/worktrees` lists every git worktree of the
+  repositories the gateway knows, including ones made outside it (plain git,
+  editors, other agent tools), and takes an optional `?repo=<absolute path>`
+  to list one repository. Those worktrees carry a folder-derived `id` and
+  accept every `/v1/worktrees/{worktreeId}` operation. (2026-10-22)
 - `[additive]` `GET /v1/worktrees/{worktreeId}` — one worktree in the list's
   shape (`ahead`, `behind`, `dirty`, `chats`). (2026-10-21)
 - `[additive]` `GET /v1/worktrees` (and the rebase response) gain `chats`: the
@@ -78,6 +75,37 @@ not be coupled. Full release notes live in GitHub Releases.
   `/git/refs` payload (`default` and `refs`) for a repository named by path, so a
   client can offer a base branch before any chat exists in it. Needs `control`
   scope, like `POST /v1/worktrees`. (2026-10-21)
+- `[additive]` `POST /v1/worktrees/{worktreeId}/rebase` — rebases the worktree's
+  branch onto its base ref and responds with the worktree as `GET
+  /v1/worktrees` lists it. A conflicted rebase is aborted and the branch is
+  left as it was. (2026-10-20)
+- `[additive]` `POST /v1/worktrees/{worktreeId}/merge` — lands the worktree's
+  branch on its base branch in the main checkout (a fast-forward, or one squash
+  commit with `squash` and `message`), optionally deleting the worktree and its
+  branch once merged; response `{"commit", "worktreeDeleted",
+  "branchDeleted"}`. (2026-10-20)
+- `[additive]` `POST /v1/worktrees/{worktreeId}/push` — pushes the branch to
+  `origin` (setting its upstream, never force-pushing) and, with `pr: true`,
+  opens a pull request through the `gh` CLI; response `{"pushed", "prUrl"}`.
+  (2026-10-20)
+- `[additive]` `POST /v1/paths/missing` — reports which of the given absolute
+  paths no longer exist on disk, so a client can mark chats whose working
+  directory (typically a removed worktree) is gone. Nothing is stored.
+  (2026-10-22)
+- `[additive]` `GET /v1/worktrees` entries gain `behind` — commits the base ref
+  gained since the fork, so a stale worktree is easy to spot — omitted when the
+  worktree has no base ref or it no longer resolves. (2026-10-20)
+- `[additive]` `GET /v1/worktrees` entries gain `merged`: all of the branch's
+  own commits are on its base ref, whether they landed by fast-forward, merge,
+  rebase or squash, so a client can suggest cleanup. Omitted when the base ref
+  no longer resolves. (2026-10-22)
+- `[additive]` `GET /v1/worktrees` counts `ahead` from the merge-base of the
+  branch and its base ref instead of the fixed `baseCommit`, so a rebased
+  worktree no longer counts the upstream commits the rebase picked up — the
+  same rule the managed-worktree `git/diff` endpoint uses. Not `[semantic]`:
+  the field still means the commits the branch adds over its base, and only a
+  worktree whose base moved reports a different number, so no `protocolVersion`
+  bump. (2026-10-20)
 
 - `v1.2.0` — branch comparison, workspace file listing, clock-skew recovery and
   direct bun/node npm launches; additive only, `protocolVersion` stays `v2`:

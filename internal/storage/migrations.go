@@ -236,7 +236,7 @@ func migrateWorktreeBaseRef(ctx context.Context, tx *sql.Tx) error {
 }
 
 // migrateWorktreeUniquePath makes a worktree folder registrable once, so two
-// concurrent adopts of one path cannot both save. Duplicates an older gateway
+// gateways or processes saving one path cannot both succeed. Duplicates an older gateway
 // could write describe the same folder; the oldest row is kept.
 func migrateWorktreeUniquePath(ctx context.Context, tx *sql.Tx) error {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM worktrees WHERE rowid NOT IN (SELECT MIN(rowid) FROM worktrees GROUP BY path)`); err != nil {

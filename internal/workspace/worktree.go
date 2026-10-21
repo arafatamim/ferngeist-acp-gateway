@@ -3,11 +3,13 @@ package workspace
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -54,6 +56,10 @@ type Service struct {
 	// same folder cannot pass the existence checks and then discard the first.
 	creatingMu sync.Mutex
 	creating   map[string]bool
+	// repos are the repositories ?repo= listings named, which discover keeps
+	// listing; in memory only, so a restart forgets them.
+	reposMu sync.Mutex
+	repos   []string
 }
 
 func New(store func() *storage.SQLiteStore, logger *slog.Logger, now func() time.Time, chatUsing func(match func(cwd string) bool) []string) *Service {
@@ -250,20 +256,15 @@ func discardWorktree(top, path, branch string) {
 	_, _ = RunGit(ctx, top, "branch", "-D", branch)
 }
 
-// List returns managed worktrees with their ahead/behind/dirty state, checked
-// concurrently. Records whose directory was deleted out from under the gateway
-// are left out; Prune forgets them.
-func (s *Service) List(ctx context.Context) ([]WorktreeStatus, error) {
-	records, err := s.store().ListWorktrees(ctx)
+// List returns every linked git worktree of the repositories the gateway
+// knows (or of repo alone, when set) with its ahead/behind/dirty state, checked
+// concurrently. Managed worktrees come first in the order they were recorded;
+// the rest follow as git lists them, measured against the repo's default
+// branch. Folders deleted outside the gateway are left out; Prune forgets them.
+func (s *Service) List(ctx context.Context, repo string) ([]WorktreeStatus, error) {
+	present, trunks, err := s.discover(ctx, repo)
 	if err != nil {
-		s.logger.Error("list worktrees", "error", err)
-		return nil, errStatus(500, "failed to list worktrees")
-	}
-	present := records[:0:0]
-	for _, rec := range records {
-		if !folderMissing(rec.Path) {
-			present = append(present, rec)
-		}
+		return nil, err
 	}
 	out := make([]WorktreeStatus, len(present))
 	slots := make(chan struct{}, listConcurrency)
@@ -274,17 +275,182 @@ func (s *Service) List(ctx context.Context) ([]WorktreeStatus, error) {
 		go func() {
 			defer wg.Done()
 			defer func() { <-slots }()
-			out[i] = s.statusOf(ctx, rec)
+			out[i] = s.statusOf(ctx, withDefaultBase(ctx, rec, trunks[rec.Repo]))
 		}()
 	}
 	wg.Wait()
 	return out, nil
 }
 
+// discover lists the linked worktrees of every repository the gateway knows:
+// those of managed records, of running chats' working directories and of
+// earlier ?repo= listings, or repo alone when set. A worktree the gateway did
+// not make gets a record that is never saved, with an id derived from its path
+// and no base yet (see withDefaultBase), so it drops out as soon as git stops
+// listing it. trunks holds each such repo's candidate bases, resolved once.
+func (s *Service) discover(ctx context.Context, repo string) (_ []storage.WorktreeRecord, trunks map[string][]string, _ error) {
+	var records []storage.WorktreeRecord
+	if store := s.store(); store != nil {
+		var err error
+		if records, err = store.ListWorktrees(ctx); err != nil {
+			s.logger.Error("list worktrees", "error", err)
+			return nil, nil, errStatus(500, "failed to list worktrees")
+		}
+	}
+	var dirs []string
+	if repo = strings.TrimSpace(repo); repo != "" {
+		if !filepath.IsAbs(repo) {
+			return nil, nil, errStatus(400, "repo must be an absolute path")
+		}
+		dirs = []string{repo}
+	} else {
+		for _, rec := range records {
+			dirs = append(dirs, rec.Repo)
+		}
+		s.reposMu.Lock()
+		dirs = append(dirs, s.repos...)
+		s.reposMu.Unlock()
+		if s.chatUsing != nil {
+			// The predicate sees every running chat's cwd; matching none collects them.
+			s.chatUsing(func(cwd string) bool { dirs = append(dirs, cwd); return false })
+		}
+	}
+
+	listed := make(map[string]bool) // canonical paths of every worktree git listed
+	var seen []string               // checkouts already covered by a listing
+	var unmanaged []storage.WorktreeRecord
+	trunks = make(map[string][]string)
+	managed := make(map[string]bool)
+	for _, rec := range records {
+		managed[canonPath(rec.Path)] = true
+	}
+	for _, dir := range dirs {
+		dir = canonPath(dir)
+		if slices.ContainsFunc(seen, func(p string) bool { return SubpathOf(dir, p) }) {
+			continue
+		}
+		out, err := RunGit(ctx, dir, "worktree", "list", "--porcelain")
+		if err != nil {
+			if repo != "" {
+				return nil, nil, errStatus(422, err.Error())
+			}
+			continue
+		}
+		parsed := parseWorktreeListPorcelain(out)
+		if len(parsed) == 0 {
+			continue
+		}
+		top := filepath.Clean(parsed[0].path)
+		if repo != "" {
+			s.rememberRepo(top)
+		}
+		for i, wt := range parsed {
+			canon := canonPath(wt.path)
+			seen = append(seen, canon)
+			// The first entry is the main checkout, never a worktree to list.
+			if i == 0 || wt.prunable || folderMissing(wt.path) {
+				continue
+			}
+			listed[canon] = true
+			if !managed[canon] {
+				if _, ok := trunks[top]; !ok {
+					trunks[top] = trunkRefs(ctx, top)
+				}
+				unmanaged = append(unmanaged, storage.WorktreeRecord{ID: pathID(canon), Repo: top, Path: filepath.Clean(wt.path), Branch: wt.branch, CreatedAt: createdAt(wt.path)})
+			}
+		}
+	}
+	present := records[:0:0]
+	for _, rec := range records {
+		if listed[canonPath(rec.Path)] {
+			present = append(present, rec)
+		}
+	}
+	return append(present, unmanaged...), trunks, nil
+}
+
+// rememberRepo adds top to the repositories discover lists, so a worktree
+// shown by a ?repo= listing can be acted on by id afterwards.
+func (s *Service) rememberRepo(top string) {
+	s.reposMu.Lock()
+	defer s.reposMu.Unlock()
+	if !slices.Contains(s.repos, top) {
+		s.repos = append(s.repos, top)
+	}
+}
+
+// pathID is the id of a worktree the gateway did not make: stable for its
+// folder, so the client can act on it by id.
+func pathID(canon string) string {
+	sum := sha256.Sum256([]byte(canon))
+	return hex.EncodeToString(sum[:4])
+}
+
+// createdAt is when git made the worktree, which wrote its .git file then.
+func createdAt(path string) time.Time {
+	if fi, err := os.Stat(filepath.Join(path, ".git")); err == nil {
+		return fi.ModTime()
+	}
+	return time.Time{}
+}
+
+// withDefaultBase fills the base of a record discover made up, measuring it
+// against the first of its repo's trunks it shares history with; a saved
+// record already has one. With none, it counts from its own HEAD.
+func withDefaultBase(ctx context.Context, rec storage.WorktreeRecord, trunks []string) storage.WorktreeRecord {
+	if rec.BaseCommit != "" {
+		return rec
+	}
+	for _, trunk := range trunks {
+		if trunk == rec.Branch {
+			continue
+		}
+		if mb, err := RunGit(ctx, rec.Path, "merge-base", "--end-of-options", trunk, "HEAD"); err == nil && strings.TrimSpace(mb) != "" {
+			rec.BaseRef, rec.BaseCommit = trunk, strings.TrimSpace(mb)
+			return rec
+		}
+	}
+	rec.BaseCommit, _ = commitOf(ctx, rec.Path, "HEAD")
+	return rec
+}
+
+// trunkRefs are the refs a worktree with no recorded base may be measured
+// from, those that resolve, in order: origin's default branch, main, master
+// and the main checkout's branch.
+func trunkRefs(ctx context.Context, top string) []string {
+	var out []string
+	for _, ref := range []string{defaultRefName(ctx, top), "main", "master", baseRefOf(ctx, top, "HEAD")} {
+		if ref == "" || slices.Contains(out, ref) {
+			continue
+		}
+		if _, ok := commitOf(ctx, top, ref); ok {
+			out = append(out, ref)
+		}
+	}
+	return out
+}
+
+// worktree finds the worktree id names: a managed one, else one List shows.
+func (s *Service) worktree(ctx context.Context, id string) (storage.WorktreeRecord, bool) {
+	if rec, ok := s.find(ctx, func(rec storage.WorktreeRecord) bool { return rec.ID == id }); ok {
+		return rec, true
+	}
+	records, trunks, err := s.discover(ctx, "")
+	if err != nil {
+		return storage.WorktreeRecord{}, false
+	}
+	for _, rec := range records {
+		if rec.ID == id {
+			return withDefaultBase(ctx, rec, trunks[rec.Repo]), true
+		}
+	}
+	return storage.WorktreeRecord{}, false
+}
+
 // Get returns one managed worktree as List shows it. A worktree whose folder
 // was deleted outside the gateway is unknown here too, like in the list.
 func (s *Service) Get(ctx context.Context, id string) (WorktreeStatus, error) {
-	rec, ok := s.find(ctx, func(rec storage.WorktreeRecord) bool { return rec.ID == id })
+	rec, ok := s.worktree(ctx, id)
 	if !ok || folderMissing(rec.Path) {
 		return WorktreeStatus{}, errStatus(404, "unknown worktree")
 	}
@@ -322,19 +488,27 @@ func (s *Service) Prune(ctx context.Context) {
 }
 
 // statusOf fills a record's ahead, behind and dirty state; each stays nil when
-// git cannot answer. Behind is how far the base has moved since the fork, and
-// stays nil without a base ref.
+// git cannot answer. Ahead and behind count the branch's and the base's
+// commits since they forked, in one rev-list; without a base ref that
+// resolves, behind and merged stay nil and ahead counts from the base commit.
 func (s *Service) statusOf(ctx context.Context, rec storage.WorktreeRecord) WorktreeStatus {
 	status := WorktreeStatus{WorktreeRecord: rec, Chats: s.chatsOf(rec)}
-	if n, err := RunGit(ctx, rec.Path, "rev-list", "--count", s.baseOf(ctx, rec)+"..HEAD"); err == nil {
-		if ahead, err := strconv.Atoi(strings.TrimSpace(n)); err == nil {
-			status.Ahead = &ahead
+	if rec.BaseRef != "" {
+		if out, err := RunGit(ctx, rec.Path, "rev-list", "--left-right", "--count", "--end-of-options", rec.BaseRef+"...HEAD"); err == nil {
+			l, r, _ := strings.Cut(strings.TrimSpace(out), "\t")
+			behind, errB := strconv.Atoi(l)
+			ahead, errA := strconv.Atoi(r)
+			if errB == nil && errA == nil {
+				status.Ahead, status.Behind = &ahead, &behind
+				merged := mergedOf(ctx, rec, ahead)
+				status.Merged = &merged
+			}
 		}
 	}
-	if rec.BaseRef != "" {
-		if n, err := RunGit(ctx, rec.Path, "rev-list", "--count", "--end-of-options", "HEAD.."+rec.BaseRef); err == nil {
-			if behind, err := strconv.Atoi(strings.TrimSpace(n)); err == nil {
-				status.Behind = &behind
+	if status.Ahead == nil {
+		if n, err := RunGit(ctx, rec.Path, "rev-list", "--count", "--end-of-options", rec.BaseCommit+"..HEAD"); err == nil {
+			if ahead, err := strconv.Atoi(strings.TrimSpace(n)); err == nil {
+				status.Ahead = &ahead
 			}
 		}
 	}
@@ -342,31 +516,30 @@ func (s *Service) statusOf(ctx context.Context, rec storage.WorktreeRecord) Work
 		dirty := strings.TrimSpace(st) != ""
 		status.Dirty = &dirty
 	}
-	status.Merged = s.mergedOf(ctx, rec)
 	return status
 }
 
 // mergedOf reports whether the worktree's work has landed on its base ref, by
-// fast-forward, merge, rebase or squash alike: merging HEAD into the base
-// yields the base's own tree. A HEAD still at the base commit has no work to
-// have landed. nil without a base ref that resolves.
-func (s *Service) mergedOf(ctx context.Context, rec storage.WorktreeRecord) *bool {
-	if rec.BaseRef == "" {
-		return nil
+// fast-forward, merge, rebase or squash alike. With nothing ahead of the base,
+// HEAD is on it, and has work only if it moved off the base commit. Otherwise
+// merging HEAD into the base must yield the base's own tree, which a rebased or
+// squashed branch does; merge-tree runs only then, as it writes objects.
+func mergedOf(ctx context.Context, rec storage.WorktreeRecord, ahead int) bool {
+	if ahead == 0 {
+		head, ok := commitOf(ctx, rec.Path, "HEAD")
+		return ok && head != rec.BaseCommit
 	}
 	baseTree, err := RunGit(ctx, rec.Path, "rev-parse", "--verify", "--quiet", "--end-of-options", rec.BaseRef+"^{tree}")
 	if err != nil {
-		return nil
+		return false
 	}
-	merged := false
-	if head, ok := commitOf(ctx, rec.Path, "HEAD"); ok && head != rec.BaseCommit {
-		// A conflict exits non-zero, which is rightly not merged.
-		if out, err := RunGit(ctx, rec.Path, "merge-tree", "--write-tree", "--end-of-options", rec.BaseRef, "HEAD"); err == nil {
-			tree, _, _ := strings.Cut(out, "\n")
-			merged = strings.TrimSpace(tree) == strings.TrimSpace(baseTree)
-		}
+	// A conflict exits non-zero, which is rightly not merged.
+	out, err := RunGit(ctx, rec.Path, "merge-tree", "--write-tree", "--end-of-options", rec.BaseRef, "HEAD")
+	if err != nil {
+		return false
 	}
-	return &merged
+	tree, _, _ := strings.Cut(out, "\n")
+	return strings.TrimSpace(tree) == strings.TrimSpace(baseTree)
 }
 
 // inUse refuses (409) while a running chat uses the worktree as its cwd.
@@ -391,7 +564,7 @@ func (s *Service) chatsOf(rec storage.WorktreeRecord) []string {
 // merged (git branch -d); otherwise it is kept so committed work survives. The
 // returned bool reports whether the branch was deleted.
 func (s *Service) Delete(ctx context.Context, id string, force bool) (bool, error) {
-	rec, ok := s.find(ctx, func(rec storage.WorktreeRecord) bool { return rec.ID == id })
+	rec, ok := s.worktree(ctx, id)
 	if !ok {
 		return false, errStatus(404, "unknown worktree")
 	}
@@ -642,16 +815,6 @@ func RepoRefs(ctx context.Context, repo string) (RefsPayload, error) {
 	return Refs(ctx, repo)
 }
 
-// UnmanagedWorktree describes a git worktree that exists in git but is not
-// tracked by the gateway store. Its JSON shape lives in the api layer as
-// unmanagedWorktreeResponse.
-type UnmanagedWorktree struct {
-	Path     string
-	Branch   string
-	Head     string
-	Detached bool
-}
-
 type porcelainWorktree struct {
 	path     string
 	head     string
@@ -703,196 +866,4 @@ func canonPath(p string) string {
 		return eval
 	}
 	return filepath.Clean(p)
-}
-
-// Unmanaged lists git worktrees in the repository that are not currently
-// managed by the gateway, parsed from `git worktree list --porcelain`.
-func (s *Service) Unmanaged(ctx context.Context, repo string) ([]UnmanagedWorktree, error) {
-	repo = strings.TrimSpace(repo)
-	if !filepath.IsAbs(repo) {
-		return nil, errStatus(400, "repo must be an absolute path")
-	}
-	out, err := RunGit(ctx, repo, "worktree", "list", "--porcelain")
-	if err != nil {
-		return nil, errStatus(422, err.Error())
-	}
-	parsed := parseWorktreeListPorcelain(out)
-
-	managed := make(map[string]bool)
-	if store := s.store(); store != nil {
-		records, err := store.ListWorktrees(ctx)
-		if err != nil {
-			s.logger.Error("list worktrees", "error", err)
-			return nil, errStatus(500, "failed to list worktrees")
-		}
-		for _, rec := range records {
-			managed[canonPath(rec.Path)] = true
-		}
-	}
-
-	outList := make([]UnmanagedWorktree, 0)
-	for i, wt := range parsed {
-		// The first entry is the main checkout, never a candidate.
-		if i == 0 || wt.prunable || managed[canonPath(wt.path)] || folderMissing(wt.path) {
-			continue
-		}
-		outList = append(outList, UnmanagedWorktree{
-			Path:     filepath.Clean(wt.path),
-			Branch:   wt.branch,
-			Head:     wt.head,
-			Detached: wt.detached,
-		})
-	}
-	return outList, nil
-}
-
-// AdoptRequest is the client-supplied shape of a worktree adoption.
-type AdoptRequest struct {
-	Repo   string
-	Path   string
-	Base   string
-	Branch string
-}
-
-// Adopt brings an existing git worktree (created outside the gateway, e.g. on
-// a PC or via Claude Code) under gateway management by saving a WorktreeRecord
-// for it, so it gets base-aware diffs and appears in List. Fetching a remote
-// base shares one CreateTimeout, as in Create.
-func (s *Service) Adopt(ctx context.Context, req AdoptRequest) (WorktreeStatus, error) {
-	ctx, cancel := context.WithTimeout(ctx, CreateTimeout)
-	defer cancel()
-	path := strings.TrimSpace(req.Path)
-	if !filepath.IsAbs(path) {
-		return WorktreeStatus{}, errStatus(400, "path must be an absolute path")
-	}
-	path = filepath.Clean(path)
-	if folderMissing(path) {
-		return WorktreeStatus{}, errStatus(404, "worktree folder does not exist: "+path)
-	}
-
-	// Any checkout of the repository lists all of its worktrees.
-	listDir := path
-	if repo := strings.TrimSpace(req.Repo); repo != "" {
-		if !filepath.IsAbs(repo) {
-			return WorktreeStatus{}, errStatus(400, "repo must be an absolute path")
-		}
-		listDir = repo
-	}
-	out, err := RunGit(ctx, listDir, "worktree", "list", "--porcelain")
-	if err != nil {
-		return WorktreeStatus{}, errStatus(422, "path is not inside a git repository: "+err.Error())
-	}
-	parsed := parseWorktreeListPorcelain(out)
-	canon := canonPath(path)
-	found := -1
-	for i := range parsed {
-		if canonPath(parsed[i].path) == canon {
-			found = i
-			break
-		}
-	}
-	if found < 0 {
-		return WorktreeStatus{}, errStatus(422, "path is not a git worktree of repo")
-	}
-	// Git lists the main checkout (or bare repository) first; Delete would take
-	// the whole repository with it.
-	if found == 0 {
-		return WorktreeStatus{}, errStatus(400, "cannot adopt the main repository checkout as a worktree")
-	}
-	top := filepath.Clean(parsed[0].path)
-
-	if _, ok := s.find(ctx, func(rec storage.WorktreeRecord) bool { return canonPath(rec.Path) == canon }); ok {
-		return WorktreeStatus{}, errStatus(409, "worktree is already managed: "+path)
-	}
-
-	branch := parsed[found].branch
-	reqBranch := strings.TrimSpace(req.Branch)
-	switch {
-	case branch == "" && reqBranch == "":
-		return WorktreeStatus{}, errStatus(400, "cannot adopt a detached worktree without a branch")
-	case branch != "" && reqBranch != "" && reqBranch != branch:
-		return WorktreeStatus{}, errStatus(409, "worktree is on branch "+branch+", not "+reqBranch)
-	case branch == "":
-		// Validated before checkout: a name like "-f" would reach git as an option.
-		if strings.HasPrefix(reqBranch, "-") {
-			return WorktreeStatus{}, errStatus(400, "invalid branch name")
-		}
-		if _, err := RunGit(ctx, top, "check-ref-format", "--branch", reqBranch); err != nil {
-			return WorktreeStatus{}, errStatus(400, "invalid branch name")
-		}
-		if _, err := RunGit(ctx, path, "checkout", "-b", reqBranch); err != nil {
-			if _, err := RunGit(ctx, path, "checkout", reqBranch); err != nil {
-				return WorktreeStatus{}, errStatus(422, "failed to checkout branch: "+err.Error())
-			}
-		}
-		branch = reqBranch
-	}
-
-	base := strings.TrimSpace(req.Base)
-	var baseRef string
-	var baseCommit string
-
-	if base != "" {
-		resolvedCommit, resolvedRef, err := s.resolveBaseCommitAndRef(ctx, top, base)
-		if err != nil {
-			return WorktreeStatus{}, err
-		}
-		baseRef = resolvedRef
-		if mb, err := RunGit(ctx, path, "merge-base", "--end-of-options", baseRef, "HEAD"); err == nil && strings.TrimSpace(mb) != "" {
-			baseCommit = strings.TrimSpace(mb)
-		} else {
-			baseCommit = resolvedCommit
-		}
-	} else {
-		// The trunk first, as the docs promise; the main checkout's branch last.
-		candidates := []string{defaultRefName(ctx, top), "main", "master", baseRefOf(ctx, top, "HEAD")}
-		for _, cand := range candidates {
-			if cand == "" || cand == branch {
-				continue
-			}
-			if _, ok := commitOf(ctx, top, cand); !ok {
-				continue
-			}
-			if mb, err := RunGit(ctx, path, "merge-base", "--end-of-options", cand, "HEAD"); err == nil && strings.TrimSpace(mb) != "" {
-				baseRef = cand
-				baseCommit = strings.TrimSpace(mb)
-				break
-			}
-		}
-		if baseCommit == "" {
-			baseRef = baseRefOf(ctx, top, "HEAD")
-			if headCommit, ok := commitOf(ctx, top, "HEAD"); ok {
-				baseCommit = headCommit
-			} else {
-				wtHead, _ := RunGit(ctx, path, "rev-parse", "--verify", "HEAD")
-				baseCommit = strings.TrimSpace(wtHead)
-			}
-		}
-	}
-
-	if SubpathOf(path, filepath.Join(top, ".worktrees")) {
-		_ = excludeWorktreesDir(ctx, top)
-	}
-
-	id, err := newWorktreeID()
-	if err != nil {
-		return WorktreeStatus{}, err
-	}
-	rec := storage.WorktreeRecord{
-		ID:         id,
-		Repo:       top,
-		Path:       path,
-		Branch:     branch,
-		BaseCommit: baseCommit,
-		BaseRef:    baseRef,
-		CreatedAt:  s.now(),
-	}
-	if err := s.store().SaveWorktree(ctx, rec); err != nil {
-		if errors.Is(err, storage.ErrWorktreePathTaken) {
-			return WorktreeStatus{}, errStatus(409, "worktree is already managed: "+path)
-		}
-		s.logger.Error("save adopted worktree", "path", path, "error", err)
-		return WorktreeStatus{}, errStatus(500, "failed to save worktree")
-	}
-	return s.statusOf(ctx, rec), nil
 }
