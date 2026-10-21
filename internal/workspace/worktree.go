@@ -590,6 +590,17 @@ func (s *Service) baseOf(ctx context.Context, rec storage.WorktreeRecord) string
 	return rec.BaseCommit
 }
 
+// BranchOf is the branch of the managed worktree containing cwd, and "" when
+// none does or the lookup fails, so a caller that decorates with the branch
+// (the push path) loses only the branch, never its event. Unlike BaseRef it
+// needs no git round-trips: the record's branch is the answer.
+func (s *Service) BranchOf(ctx context.Context, cwd string) string {
+	if rec, ok := s.find(ctx, func(rec storage.WorktreeRecord) bool { return SubpathOf(cwd, rec.Path) }); ok {
+		return rec.Branch
+	}
+	return ""
+}
+
 // LogBase is the commit /git/log reports as the workspace's base, which a
 // client uses to tell the branch's own commits from the history it inherited.
 // A managed worktree answers from its record; any other checkout asks git,

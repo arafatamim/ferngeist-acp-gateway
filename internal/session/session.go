@@ -85,6 +85,12 @@ type Config struct {
 	// PushSvc is the push notification service for turn-complete notifications.
 	// nil-able — when nil, push notifications are disabled.
 	PushSvc push.PushService
+	// BranchOf resolves the managed-worktree branch behind a chat's cwd for
+	// push notifications, and "" for a chat outside any managed worktree or on
+	// lookup failure. nil-able — when nil, pushes go out without a branch.
+	// The daemon injects workspace.Service.BranchOf; the session layer keeps
+	// only this narrow lookup, not the whole workspace service.
+	BranchOf func(ctx context.Context, cwd string) string
 	// GatewayID is this gateway's stable instance id, sent as the server identity
 	// in push notifications so clients can deep-link into the right chat.
 	GatewayID string

@@ -152,6 +152,38 @@ func TestBaseRefFallsBackToBaseCommit(t *testing.T) {
 	}
 }
 
+// TestBranchOfAnswersFromTheRecord covers the push-path lookup: the recorded
+// branch of the worktree containing cwd, "" outside any managed worktree, and
+// "" when the lookup fails.
+func TestBranchOfAnswersFromTheRecord(t *testing.T) {
+	svc, stores := newWorktreeTestService(t)
+	ctx := context.Background()
+	rec := storage.WorktreeRecord{
+		ID: "wt1", Repo: "/r", Path: "/r/.worktrees/feat-x", Branch: "feat/x",
+		BaseCommit: "abc123", CreatedAt: time.Now(),
+	}
+	if err := stores().SaveWorktree(ctx, rec); err != nil {
+		t.Fatal(err)
+	}
+	for cwd, want := range map[string]string{
+		"/r/.worktrees/feat-x":       "feat/x",
+		"/r/.worktrees/feat-x/sub":   "feat/x",
+		"/r":                         "",
+		"/r/.worktrees/feat-x-other": "",
+		"":                           "",
+	} {
+		if got := svc.BranchOf(ctx, cwd); got != want {
+			t.Errorf("BranchOf(%q) = %q, want %q", cwd, got, want)
+		}
+	}
+
+	// A lookup failure (here: no store bound) costs the branch, nothing else.
+	broken := New(func() *storage.SQLiteStore { return nil }, slog.Default(), time.Now, nil)
+	if got := broken.BranchOf(ctx, "/r/.worktrees/feat-x"); got != "" {
+		t.Errorf("BranchOf on a failed lookup = %q, want empty", got)
+	}
+}
+
 // TestCreateDefaultsBaseRefToCurrentBranch cuts a worktree off HEAD: the
 // recorded ref is HEAD's branch, not the literal "HEAD" (which would
 // merge-base to the worktree tip itself and hide every commit).

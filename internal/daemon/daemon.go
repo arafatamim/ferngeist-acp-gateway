@@ -23,6 +23,7 @@ import (
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/session"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/storage"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/update"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/workspace"
 )
 
 // tsnetLogf receives the embedded Tailscale node's internal subsystem lines.
@@ -113,11 +114,18 @@ func Run(ctx context.Context, build api.BuildInfo) error {
 
 	access := newRemoteAccess(ctx, &cfg, store, pushSvc, logger)
 	startUpdateNotifier(ctx, cfg, build, pushSvc, store)
+	// The push path only needs the branch behind a chat's cwd, so the session
+	// layer gets that one workspace lookup rather than the whole workspace
+	// service, whose full instance (with its chat callback) the API layer
+	// builds. This accessor-only instance shares the store and its BranchOf is
+	// a read, so the two never contend.
+	worktrees := workspace.New(func() *storage.SQLiteStore { return store }, logger, time.Now, nil)
 	sessionSvc := session.NewRuntimeSession(logger, store, runtimeSvc, tokenSvc, session.Config{
 		MaxDisconnected:    cfg.SessionMaxDisconnected,
 		MaxPerDevice:       cfg.MaxSessionsPerDevice,
 		ProgressInterval:   cfg.ProgressInterval,
 		PushSvc:            pushSvc,
+		BranchOf:           worktrees.BranchOf,
 		GatewayID:          cfg.GatewayID,
 		FrameLogEnabled:    cfg.FrameLogEnabled,
 		FrameLogDir:        cfg.LogDir,

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/storage"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/workspace"
 )
 
 func TestFormatPushDuration(t *testing.T) {
@@ -79,7 +80,12 @@ func TestWorktreeBranch(t *testing.T) {
 	if err := store.SaveWorktree(context.Background(), rec); err != nil {
 		t.Fatal(err)
 	}
-	rs := &RuntimeSession{store: store, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	rs := &RuntimeSession{
+		store:  store,
+		logger: logger,
+		cfg:    Config{BranchOf: workspace.New(func() *storage.SQLiteStore { return store }, logger, time.Now, nil).BranchOf},
+	}
 	for cwd, want := range map[string]string{
 		"/r/.worktrees/feat-x":       "feat/x",
 		"/r/.worktrees/feat-x/sub":   "feat/x",
@@ -90,5 +96,11 @@ func TestWorktreeBranch(t *testing.T) {
 		if got := rs.worktreeBranch(context.Background(), cwd); got != want {
 			t.Errorf("worktreeBranch(%q) = %q, want %q", cwd, got, want)
 		}
+	}
+
+	// Without a wired lookup a push goes out without a branch.
+	rs.cfg.BranchOf = nil
+	if got := rs.worktreeBranch(context.Background(), "/r/.worktrees/feat-x"); got != "" {
+		t.Errorf("worktreeBranch with nil lookup = %q, want empty", got)
 	}
 }

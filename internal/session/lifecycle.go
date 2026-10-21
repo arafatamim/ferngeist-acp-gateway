@@ -17,7 +17,6 @@ import (
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/push"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/runtime"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/storage"
-	"github.com/arafatamim/ferngeist-acp-gateway/internal/workspace"
 	"github.com/coder/acp-go-sdk"
 	"github.com/coder/websocket"
 )
@@ -223,22 +222,14 @@ func (rs *RuntimeSession) sendPushNotification(deviceID, acpSessionID, cwd, titl
 }
 
 // worktreeBranch returns the branch of the managed worktree containing cwd, or
-// "" for a chat outside any. A failed lookup only costs the push its branch.
+// "" for a chat outside any. The lookup is the single BranchOf function wired
+// at daemon startup, so the push path never scans the worktree table itself. A
+// failed lookup only costs the push its branch.
 func (rs *RuntimeSession) worktreeBranch(ctx context.Context, cwd string) string {
-	if cwd == "" {
+	if cwd == "" || rs.cfg.BranchOf == nil {
 		return ""
 	}
-	records, err := rs.store.ListWorktrees(ctx)
-	if err != nil {
-		rs.logger.Debug("push branch lookup failed", "error", err)
-		return ""
-	}
-	for _, rec := range records {
-		if workspace.SubpathOf(cwd, rec.Path) {
-			return rec.Branch
-		}
-	}
-	return ""
+	return rs.cfg.BranchOf(ctx, cwd)
 }
 
 // handleProcessExit reclaims a session whose agent process died. It detects
