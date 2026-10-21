@@ -496,13 +496,19 @@ func fetchAndResolveRemoteBranch(ctx context.Context, top, remote, branch string
 
 // resolveBaseCommitAndRef resolves the base ref for a new worktree. If base
 // names a pull request (e.g. "pr/123", "origin/pr/123") or a remote branch
-// (e.g. "origin/feat-x"), it fetches it from the remote first. It strictly
+// (e.g. "origin/feat-x") and is not a local branch, it fetches it from the
+// remote first. It strictly
 // validates the ref name to prevent option or revision injection.
 func (s *Service) resolveBaseCommitAndRef(ctx context.Context, top, base string) (baseCommit, baseRef string, err error) {
 	if base == "" {
 		base = "HEAD"
 	} else if !validRefName(base) {
 		return "", "", errStatus(400, "invalid base: "+base)
+	}
+
+	// A local branch wins over PR and remote shorthand, as it does in git.
+	if commit, ok := commitOf(ctx, top, "refs/heads/"+base); ok {
+		return commit, base, nil
 	}
 
 	if remote, prID, ok := parsePRRef(base); ok {

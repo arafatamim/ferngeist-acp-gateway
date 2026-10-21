@@ -1201,6 +1201,26 @@ func TestCreateFromRemoteBranchAndPR(t *testing.T) {
 	}
 }
 
+func TestALocalBranchNamedLikeAPRIsUsedAsIs(t *testing.T) {
+	repo, c1 := initMainRepo(t)
+	if out, err := exec.Command("git", "-C", repo, "branch", "pr/7").CombinedOutput(); err != nil {
+		t.Fatalf("branch pr/7: %v: %s", err, out)
+	}
+	svc, _ := newWorktreeTestService(t)
+	ctx := context.Background()
+	// With no origin, treating pr/7 as a pull request would fail the fetch.
+	rec, err := svc.Create(ctx, CreateRequest{Repo: repo, Base: "pr/7", Branch: "on-pr7"})
+	if err != nil {
+		t.Fatalf("create from local pr/7: %v", err)
+	}
+	if rec.BaseRef != "pr/7" || rec.BaseCommit != c1 {
+		t.Fatalf("base = %q %q, want pr/7 at %q", rec.BaseRef, rec.BaseCommit, c1)
+	}
+	if got := prBase(ctx, rec); got != "pr/7" {
+		t.Fatalf("prBase = %q, want pr/7", got)
+	}
+}
+
 func TestAdoptRefusesTheMainCheckoutNamedThroughALinkedWorktree(t *testing.T) {
 	repo, _ := initMainRepo(t)
 	svc, _ := newWorktreeTestService(t)

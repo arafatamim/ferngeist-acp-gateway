@@ -215,14 +215,17 @@ func (s *Service) Push(ctx context.Context, id string, req PushRequest) (PushRes
 // when it is a local branch or one of origin's, else "" and gh picks the
 // default branch.
 func prBase(ctx context.Context, rec storage.WorktreeRecord) string {
-	if _, _, isPR := parsePRRef(rec.BaseRef); isPR || rec.BaseRef == "" {
+	if rec.BaseRef == "" {
+		return ""
+	}
+	if _, err := RunGit(ctx, rec.Repo, "show-ref", "--verify", "--quiet", "refs/heads/"+rec.BaseRef); err == nil {
+		return rec.BaseRef
+	}
+	if _, _, isPR := parsePRRef(rec.BaseRef); isPR {
 		return ""
 	}
 	if b, ok := strings.CutPrefix(rec.BaseRef, "origin/"); ok {
 		return b
-	}
-	if _, err := RunGit(ctx, rec.Repo, "show-ref", "--verify", "--quiet", "refs/heads/"+rec.BaseRef); err == nil {
-		return rec.BaseRef
 	}
 	return ""
 }
