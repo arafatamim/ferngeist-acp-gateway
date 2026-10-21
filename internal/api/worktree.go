@@ -268,6 +268,12 @@ type worktreePushRequest struct {
 	Body  string `json:"body"`
 }
 
+// pushWriteDeadline covers the full bounded budget of a worktree push above
+// the server's 20s write timeout: git push and, with pr, gh pr create run
+// back to back, each bounded by workspace.GitCommandTimeout, plus slack for
+// serializing the response.
+const pushWriteDeadline = 2*workspace.GitCommandTimeout + 5*time.Second
+
 // POST /v1/worktrees/{worktreeId}/push {pr?, title?, body?}
 // Pushes the worktree's branch to origin and, with pr, opens a pull request
 // with the gh CLI. Never force-pushes. Refused (409) while the worktree has
@@ -283,6 +289,11 @@ func (s *Server) handleWorktreePush(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
+	// git push and, with pr, gh pr create run back to back, each bounded by
+	// git's command timeout, so together they can outlast the server's write
+	// timeout. The extension passes through the request logging
+	// ResponseWriter's Unwrap to the connection.
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(pushWriteDeadline))
 	result, err := s.workspaceSvc.Push(r.Context(), r.PathValue("worktreeId"), workspace.PushRequest{PR: req.PR, Title: req.Title, Body: req.Body})
 	if err != nil {
 		writeWorkspaceError(w, err)

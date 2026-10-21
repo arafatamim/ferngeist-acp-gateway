@@ -2,14 +2,18 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/workspace"
 	"github.com/coder/acp-go-sdk"
@@ -497,6 +501,144 @@ func TestWorktree_CreateFromRemoteBranchAndPR(t *testing.T) {
 	}
 	if len(list) != 2 {
 		t.Fatalf("list len = %d, want 2: %+v", len(list), list)
+	}
+}
+
+// TestWorktreePush_ExtendsWriteDeadlinePastTheServerWriteTimeout serves the
+// real public handler chain (withRequestLogging included, so the push handler's
+// SetWriteDeadline must pass through the logging ResponseWriter) under a server
+// write timeout far shorter than the backend work, making the handler's
+// extended write deadline the only reason any response serializes at all.
+func TestWorktreePush_ExtendsWriteDeadlinePastTheServerWriteTimeout(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("the slow pre-push hook and fake gh are shell scripts")
+	}
+
+	repo := t.TempDir()
+	runGitCLI(t, repo, "init", "-q", "-b", "main")
+	runGitCLI(t, repo, "config", "user.email", "t@t")
+	runGitCLI(t, repo, "config", "user.name", "t")
+	runGitCLI(t, repo, "config", "commit.gpgSign", "false")
+	if err := os.WriteFile(filepath.Join(repo, "a.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitCLI(t, repo, "add", "a.txt")
+	runGitCLI(t, repo, "commit", "-qm", "init")
+
+	bare := t.TempDir()
+	runGitCLI(t, bare, "init", "-q", "--bare")
+	runGitCLI(t, repo, "remote", "add", "origin", bare)
+
+	h := newResilientTestHarness(t)
+	repoJSON, _ := json.Marshal(repo)
+	req := httptest.NewRequest(http.MethodPost, "/v1/worktrees", strings.NewReader(`{"repo":`+string(repoJSON)+`,"base":"main","branch":"feat/x"}`))
+	req.Header.Set("Authorization", "Bearer "+h.token)
+	rec := httptest.NewRecorder()
+	h.server.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var wt worktreeResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &wt); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wt.Path, "agent.txt"), []byte("work\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitCLI(t, wt.Path, "add", "agent.txt")
+	runGitCLI(t, wt.Path, "commit", "-qm", "agent work")
+
+	// The backend work the extended write deadline has to cover, each slower
+	// than the server write timeout below but well inside git's command
+	// timeout: a pre-push hook stands in for a big push and a fake gh for a
+	// slow pull-request creation. Hooks live in the common git dir, so they
+	// also fire for pushes from the main checkout (hence --no-verify below),
+	// and the pre-receive hook a later phase installs refuses those too, so
+	// it is added and removed inside its phase.
+	const slow = "1.5" // seconds; the server write timeout below is 1s.
+	hook := filepath.Join(repo, ".git", "hooks", "pre-push")
+	writeHook := func(exit int) {
+		t.Helper()
+		script := fmt.Sprintf("#!/bin/sh\nsleep %s\nexit %d\n", slow, exit)
+		if err := os.WriteFile(hook, []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeHook(0)
+	bin := t.TempDir()
+	script := "#!/bin/sh\nsleep " + slow + "\necho https://example.test/pr/7\n"
+	if err := os.WriteFile(filepath.Join(bin, "gh"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	// The same handler chain as the live API, under a write timeout shorter
+	// than the backend work: without the handler's extension through the
+	// logging writer, the connection dies while git push and gh run.
+	srv := httptest.NewUnstartedServer(h.server.Handler())
+	srv.Config.WriteTimeout = 1 * time.Second
+	srv.Start()
+	defer srv.Close()
+
+	push := func(body string) (int, string) {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/worktrees/"+wt.ID+"/push", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer "+h.token)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("push %q did not serialize within the extended write deadline: %v", body, err)
+		}
+		defer resp.Body.Close()
+		out, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(out)
+	}
+
+	// With pr the push and the gh pr create run back to back and outlast the
+	// 1s write timeout; the deadline extension carries the 200 past it.
+	code, body := push(`{"pr":true}`)
+	if code != http.StatusOK || !strings.Contains(body, `"pushed":true`) || !strings.Contains(body, `"prUrl":"https://example.test/pr/7"`) {
+		t.Fatalf("slow push plus gh = %d, body=%s", code, body)
+	}
+
+	// A remote that declines the push answers 422: one more local commit (a
+	// fast-forward of origin) plus a pre-receive hook keeps the push bounded
+	// but failed, and the failure response still serializes past the write
+	// timeout.
+	if err := os.WriteFile(filepath.Join(wt.Path, "more.txt"), []byte("work\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitCLI(t, wt.Path, "add", "more.txt")
+	runGitCLI(t, wt.Path, "commit", "-qm", "more agent work")
+	if err := os.WriteFile(filepath.Join(bare, "hooks", "pre-receive"), []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	code, body = push(`{}`)
+	if code != http.StatusUnprocessableEntity || !strings.Contains(body, "remote rejected") {
+		t.Fatalf("declined push = %d, body=%s", code, body)
+	}
+
+	// A branch origin has moved past is refused (409) after the hook's sleep;
+	// git refuses the update before its pre-receive hook, but the hook is
+	// gone anyway, and the failure response still serializes past the write
+	// timeout.
+	if err := os.Remove(filepath.Join(bare, "hooks", "pre-receive")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "upstream.txt"), []byte("upstream\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitCLI(t, repo, "add", "upstream.txt")
+	runGitCLI(t, repo, "commit", "-qm", "upstream")
+	runGitCLI(t, repo, "push", "--no-verify", "--force", "origin", "main:refs/heads/feat/x")
+	code, body = push(`{}`)
+	if code != http.StatusConflict || !strings.Contains(body, "origin has commits this branch lacks") {
+		t.Fatalf("diverged push = %d, body=%s", code, body)
 	}
 }
 
