@@ -973,6 +973,7 @@ service reports gone (`404`/`410`) is deleted.
 | `serverId`  | the gateway's `gatewayId` (from pairing); deep-links with `sessionId` |
 | `sessionId` | target ACP session (chat)                                           |
 | `cwd`       | working directory for the chat route, when known                    |
+| `branch`    | branch of the managed worktree the chat runs in; absent for chats outside one |
 
 The message is data only: the **client** posts the notification, chooses its
 channel from `category`, suppresses one for the chat already on screen, and

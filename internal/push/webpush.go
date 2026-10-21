@@ -68,6 +68,7 @@ type Payload struct {
 	ServerID  string `json:"serverId,omitempty"`
 	SessionID string `json:"sessionId,omitempty"`
 	Cwd       string `json:"cwd,omitempty"`
+	Branch    string `json:"branch,omitempty"`
 }
 
 func (p *WebPushProvider) Send(ctx context.Context, token string, n Notification) error {
@@ -78,7 +79,7 @@ func (p *WebPushProvider) Send(ctx context.Context, token string, n Notification
 	}
 	payload, err := json.Marshal(Payload{
 		Title: n.Title, Body: n.Body, Category: n.Category,
-		ServerID: n.ServerID, SessionID: n.SessionID, Cwd: n.Cwd,
+		ServerID: n.ServerID, SessionID: n.SessionID, Cwd: n.Cwd, Branch: n.Branch,
 	})
 	if err != nil {
 		return fmt.Errorf("marshal web push payload: %w", err)

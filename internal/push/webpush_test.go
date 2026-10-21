@@ -120,6 +120,17 @@ func TestWebPushDeliversDecryptablePayloadSignedWithGatewayKey(t *testing.T) {
 	}
 }
 
+func TestWebPushPayloadCarriesBranch(t *testing.T) {
+	f := newFakeSubscriber(t)
+	p, _ := newTestWebPushProvider(t, f)
+	if err := p.Send(context.Background(), f.token(t), Notification{Title: "t", Branch: "feat/x"}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if got := f.decrypt(t); got.Branch != "feat/x" {
+		t.Fatalf("payload = %+v, want branch feat/x", got)
+	}
+}
+
 func TestWebPushProgressIsQuietShortLivedAndCollapsed(t *testing.T) {
 	f := newFakeSubscriber(t)
 	p, _ := newTestWebPushProvider(t, f)

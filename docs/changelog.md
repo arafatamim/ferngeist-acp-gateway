@@ -53,6 +53,10 @@ not be coupled. Full release notes live in GitHub Releases.
 ## History
 
 - Unreleased:
+- `[additive]` Push payloads carry an optional `branch` — the branch of the
+  managed worktree the chat runs in — so a client can show "feat-x finished"
+  without a `/v1/worktrees` round trip. Absent for chats outside a worktree.
+  (2026-10-22)
 - `[additive]` `POST /v1/worktrees` accepts remote branches (e.g.
   `origin/feat-x`) and PR numbers (`pr/123`, `pull/123`, `origin/pr/123`) as
   the `base`, fetching the ref on-demand before checkout and validating refs

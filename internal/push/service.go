@@ -49,6 +49,7 @@ type Notification struct {
 	ServerID  string // gateway-owned stable id, for client-side deep-link resolution
 	SessionID string // target session/chat
 	Cwd       string // working directory for the chat route, optional
+	Branch    string // branch of the managed worktree the chat runs in, optional
 }
 
 // PushService is the gateway-facing entry point. Implementations resolve the

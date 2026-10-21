@@ -1,8 +1,14 @@
 package session
 
 import (
+	"context"
+	"io"
+	"log/slog"
+	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/storage"
 )
 
 func TestFormatPushDuration(t *testing.T) {
@@ -60,5 +66,29 @@ func TestNotifyTurnCompleteLeavesShortTurnsAlone(t *testing.T) {
 func TestNotifyTurnCompleteSkipsCancelled(t *testing.T) {
 	if fired := turnCompletePush("cancelled", time.Now().Add(-4*time.Minute)); len(fired) != 0 {
 		t.Fatalf("cancelled turn pushed %+v, want nothing", fired)
+	}
+}
+
+func TestWorktreeBranch(t *testing.T) {
+	store, err := storage.Open(filepath.Join(t.TempDir(), "branch_test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	rec := storage.WorktreeRecord{ID: "wt1", Repo: "/r", Path: "/r/.worktrees/feat-x", Branch: "feat/x", CreatedAt: time.Now()}
+	if err := store.SaveWorktree(context.Background(), rec); err != nil {
+		t.Fatal(err)
+	}
+	rs := &RuntimeSession{store: store, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	for cwd, want := range map[string]string{
+		"/r/.worktrees/feat-x":       "feat/x",
+		"/r/.worktrees/feat-x/sub":   "feat/x",
+		"/r":                         "",
+		"/r/.worktrees/feat-x-other": "",
+		"":                           "",
+	} {
+		if got := rs.worktreeBranch(context.Background(), cwd); got != want {
+			t.Errorf("worktreeBranch(%q) = %q, want %q", cwd, got, want)
+		}
 	}
 }
