@@ -46,13 +46,13 @@ type Service struct {
 	store     func() *storage.SQLiteStore
 	logger    *slog.Logger
 	now       func() time.Time
-	chatUsing func(match func(cwd string) bool) (string, bool)
+	chatUsing func(match func(cwd string) bool) []string
 	// finishMu serializes rebase, merge and push, which change a branch or the
 	// main checkout and must not interleave.
 	finishMu sync.Mutex
 }
 
-func New(store func() *storage.SQLiteStore, logger *slog.Logger, now func() time.Time, chatUsing func(match func(cwd string) bool) (string, bool)) *Service {
+func New(store func() *storage.SQLiteStore, logger *slog.Logger, now func() time.Time, chatUsing func(match func(cwd string) bool) []string) *Service {
 	return &Service{store: store, logger: logger, now: now, chatUsing: chatUsing}
 }
 
@@ -70,6 +70,9 @@ type WorktreeStatus struct {
 	Ahead  *int
 	Behind *int
 	Dirty  *bool
+	// Chats are the ACP session ids of the running chats working in the
+	// worktree.
+	Chats []string
 }
 
 // worktreeDirName turns a branch name into a single safe folder name
@@ -237,6 +240,16 @@ func (s *Service) List(ctx context.Context) ([]WorktreeStatus, error) {
 	return out, nil
 }
 
+// Get returns one managed worktree as List shows it. A worktree whose folder
+// was deleted outside the gateway is unknown here too, like in the list.
+func (s *Service) Get(ctx context.Context, id string) (WorktreeStatus, error) {
+	rec, ok := s.find(ctx, func(rec storage.WorktreeRecord) bool { return rec.ID == id })
+	if !ok || folderMissing(rec.Path) {
+		return WorktreeStatus{}, errStatus(404, "unknown worktree")
+	}
+	return s.statusOf(ctx, rec), nil
+}
+
 // folderMissing reports that path was deleted (as opposed to merely unreadable).
 func folderMissing(path string) bool {
 	_, err := os.Stat(path)
@@ -271,7 +284,7 @@ func (s *Service) Prune(ctx context.Context) {
 // git cannot answer. Behind is how far the base has moved since the fork, and
 // stays nil without a base ref.
 func (s *Service) statusOf(ctx context.Context, rec storage.WorktreeRecord) WorktreeStatus {
-	status := WorktreeStatus{WorktreeRecord: rec}
+	status := WorktreeStatus{WorktreeRecord: rec, Chats: s.chatsOf(rec)}
 	if n, err := RunGit(ctx, rec.Path, "rev-list", "--count", s.baseOf(ctx, rec)+"..HEAD"); err == nil {
 		if ahead, err := strconv.Atoi(strings.TrimSpace(n)); err == nil {
 			status.Ahead = &ahead
@@ -293,13 +306,18 @@ func (s *Service) statusOf(ctx context.Context, rec storage.WorktreeRecord) Work
 
 // inUse refuses (409) while a running chat uses the worktree as its cwd.
 func (s *Service) inUse(rec storage.WorktreeRecord) error {
+	if chats := s.chatsOf(rec); len(chats) > 0 {
+		return errStatus(409, "worktree is in use by chat "+chats[0])
+	}
+	return nil
+}
+
+// chatsOf lists the running chats whose working directory is in the worktree.
+func (s *Service) chatsOf(rec storage.WorktreeRecord) []string {
 	if s.chatUsing == nil {
 		return nil
 	}
-	if chat, busy := s.chatUsing(func(cwd string) bool { return SubpathOf(cwd, rec.Path) }); busy {
-		return errStatus(409, "worktree is in use by chat "+chat)
-	}
-	return nil
+	return s.chatUsing(func(cwd string) bool { return SubpathOf(cwd, rec.Path) })
 }
 
 // Delete removes a worktree's directory. It refuses (409) while a running chat
@@ -515,4 +533,15 @@ func removeAllRetrying(dir string) error {
 		time.Sleep(200 * time.Millisecond)
 	}
 	return err
+}
+
+// RepoRefs is Refs for a repository named by absolute path, so a client can
+// learn the default branch and ref list before any chat exists in it. A
+// relative path is a 400; a non-repo is a 422.
+func RepoRefs(ctx context.Context, repo string) (RefsPayload, error) {
+	repo = strings.TrimSpace(repo)
+	if !filepath.IsAbs(repo) {
+		return RefsPayload{}, errStatus(400, "repo must be an absolute path")
+	}
+	return Refs(ctx, repo)
 }

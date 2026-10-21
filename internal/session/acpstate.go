@@ -301,16 +301,17 @@ func (p *StdioPump) AcpCwdFor(acpSessionID string) string {
 	return p.acp.cwdBySession[acpSessionID]
 }
 
-// AcpSessionWithCwd returns the id of an ACP session whose cwd satisfies match.
-func (p *StdioPump) AcpSessionWithCwd(match func(cwd string) bool) (string, bool) {
+// AcpSessionsWithCwd returns the ids of the ACP sessions whose cwd satisfies match.
+func (p *StdioPump) AcpSessionsWithCwd(match func(cwd string) bool) []string {
 	p.acp.mu.Lock()
 	defer p.acp.mu.Unlock()
+	var ids []string
 	for id, cwd := range p.acp.cwdBySession {
 		if match(cwd) {
-			return id, true
+			ids = append(ids, id)
 		}
 	}
-	return "", false
+	return ids
 }
 
 func (p *StdioPump) initResponseCached() bool {

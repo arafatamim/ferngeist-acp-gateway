@@ -320,24 +320,23 @@ func (rs *RuntimeSession) WorkingDir(runtimeID, acpSessionID string) (string, er
 	return "", ErrSessionNotFound
 }
 
-// ChatUsing returns the ACP session id of a live (active or disconnected)
-// session whose working directory satisfies match, so a caller can refuse to
-// pull a directory out from under a running agent.
-func (rs *RuntimeSession) ChatUsing(match func(cwd string) bool) (string, bool) {
+// ChatsUsing returns the sorted ACP session ids of the live (active or
+// disconnected) sessions whose working directory satisfies match, so a caller
+// can show them or refuse to pull a directory out from under a running agent.
+func (rs *RuntimeSession) ChatsUsing(match func(cwd string) bool) []string {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
+	var ids []string
 	for _, sess := range rs.sessions {
 		sess.mu.Lock()
 		live := sess.Status == StatusActive || sess.Status == StatusDisconnected
 		sess.mu.Unlock()
-		if !live {
-			continue
-		}
-		if id, ok := sess.pump.AcpSessionWithCwd(match); ok {
-			return id, true
+		if live {
+			ids = append(ids, sess.pump.AcpSessionsWithCwd(match)...)
 		}
 	}
-	return "", false
+	sort.Strings(ids)
+	return ids
 }
 
 // Resume mints a new single-use attach token for reconnecting to an existing session.

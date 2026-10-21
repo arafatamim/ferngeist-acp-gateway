@@ -27,6 +27,9 @@ type worktreeResponse struct {
 	Ahead  *int  `json:"ahead,omitempty"`
 	Behind *int  `json:"behind,omitempty"`
 	Dirty  *bool `json:"dirty,omitempty"`
+	// Chats are the ACP session ids of the running chats working in the
+	// worktree, so a client can show a count and open one.
+	Chats []string `json:"chats,omitempty"`
 }
 
 type worktreeCreateRequest struct {
@@ -44,6 +47,7 @@ func toWorktreeStatusResponse(status workspace.WorktreeStatus) worktreeResponse 
 	resp.Ahead = status.Ahead
 	resp.Behind = status.Behind
 	resp.Dirty = status.Dirty
+	resp.Chats = status.Chats
 	return resp
 }
 
@@ -90,6 +94,37 @@ func (s *Server) handleWorktreeList(w http.ResponseWriter, r *http.Request) {
 		out = append(out, toWorktreeStatusResponse(status))
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// GET /v1/worktrees/refs?repo=<absolute path>
+// Lists a repository's branches, remote refs and tags with its default branch,
+// the /git/refs payload, for pickers that run before any chat exists in the
+// repo. Same scope as creating a worktree.
+func (s *Server) handleWorktreeRefs(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireGatewayScope(w, r, pairing.ScopeControl); !ok {
+		return
+	}
+	payload, err := workspace.RepoRefs(r.Context(), r.URL.Query().Get("repo"))
+	if err != nil {
+		writeWorkspaceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, payload)
+}
+
+// GET /v1/worktrees/{worktreeId}
+// Returns one worktree as the list shows it, so a client can refresh a single
+// card. 404 for an unknown worktree or one whose directory was deleted.
+func (s *Server) handleWorktreeGet(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireGatewayScope(w, r, pairing.ScopeRead); !ok {
+		return
+	}
+	status, err := s.workspaceSvc.Get(r.Context(), r.PathValue("worktreeId"))
+	if err != nil {
+		writeWorkspaceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, toWorktreeStatusResponse(status))
 }
 
 // DELETE /v1/worktrees/{worktreeId}?force=true

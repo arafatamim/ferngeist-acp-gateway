@@ -52,6 +52,17 @@ not be coupled. Full release notes live in GitHub Releases.
 
 ## History
 
+- Unreleased:
+- `[additive]` `GET /v1/worktrees/{worktreeId}` — one worktree in the list's
+  shape (`ahead`, `behind`, `dirty`, `chats`). (2026-10-21)
+- `[additive]` `GET /v1/worktrees` (and the rebase response) gain `chats`: the
+  ACP session ids of the running chats working in each worktree. Omitted when
+  none runs. (2026-10-21)
+- `[additive]` `GET /v1/worktrees/refs?repo=<absolute path>` — the
+  `/git/refs` payload (`default` and `refs`) for a repository named by path, so a
+  client can offer a base branch before any chat exists in it. Needs `control`
+  scope, like `POST /v1/worktrees`. (2026-10-21)
+
 - `v1.2.0` — branch comparison, workspace file listing, clock-skew recovery and
   direct bun/node npm launches; additive only, `protocolVersion` stays `v2`:
 - `[additive]` `GET /v1/runtimes/{id}/git/diff` (whole-tree, no `?path=`) —

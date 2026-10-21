@@ -252,11 +252,11 @@ func NewServer(deps Deps) *Server {
 		func() *storage.SQLiteStore { return server.store },
 		server.logger,
 		func() time.Time { return server.now() },
-		func(match func(cwd string) bool) (string, bool) {
+		func(match func(cwd string) bool) []string {
 			if server.sessionSvc == nil {
-				return "", false
+				return nil
 			}
-			return server.sessionSvc.ChatUsing(match)
+			return server.sessionSvc.ChatsUsing(match)
 		},
 	)
 
@@ -288,6 +288,8 @@ func NewServer(deps Deps) *Server {
 	mux.HandleFunc("GET /v1/runtimes/{runtimeId}/git/commits/{sha}", server.handleWorkspaceGitCommit)
 	mux.HandleFunc("POST /v1/worktrees", server.handleWorktreeCreate)
 	mux.HandleFunc("GET /v1/worktrees", server.handleWorktreeList)
+	mux.HandleFunc("GET /v1/worktrees/refs", server.handleWorktreeRefs)
+	mux.HandleFunc("GET /v1/worktrees/{worktreeId}", server.handleWorktreeGet)
 	mux.HandleFunc("DELETE /v1/worktrees/{worktreeId}", server.handleWorktreeDelete)
 	mux.HandleFunc("POST /v1/worktrees/{worktreeId}/rebase", server.handleWorktreeRebase)
 	mux.HandleFunc("POST /v1/worktrees/{worktreeId}/merge", server.handleWorktreeMerge)

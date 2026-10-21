@@ -714,6 +714,15 @@ clean. Worktrees outlive the chats that use them: they are removed only on an ex
       commit, or `git worktree add` failed or ran past its 2 minute limit. A
       failed add leaves no folder, registration or branch behind.
 
+- `GET /v1/worktrees/refs?repo=<absolute path>`
+  - Requires `control` scope, like `POST /v1/worktrees`.
+  - Returns the `GET /v1/runtimes/{runtimeId}/git/refs` payload (`default` and `refs`) for the
+    repository at `repo`, so a client can offer a base branch before any chat
+    exists in it. `default` is the repository's default branch as described there.
+  - Error responses:
+    - `400` — `repo` is missing or not an absolute path
+    - `422` — `repo` is not a git repository
+
 - `GET /v1/worktrees`
   - Requires `read` scope.
   - Lists managed worktrees (the create response shape) plus `ahead` (commits
@@ -721,9 +730,20 @@ clean. Worktrees outlive the chats that use them: they are removed only on an ex
     `baseCommit`), `behind` (commits the base ref has gained since the fork,
     so a stale worktree is easy to spot; omitted when the worktree has no base
     ref or it no longer resolves) and `dirty` (uncommitted changes).
+  - Also lists `chats`: the ACP session ids of the running (active or
+    disconnected) chats whose working directory is in the worktree, a
+    subdirectory included. Omitted when none runs. The same field appears in the
+    rebase response. Closed chats and chats from before a gateway restart are
+    not listed.
   - Worktrees whose directory was deleted outside the gateway are left out of
     the list. The gateway forgets them (and prunes git's bookkeeping) the next
     time a worktree is created or the server starts, not on this read.
+
+- `GET /v1/worktrees/{worktreeId}`
+  - Requires `read` scope.
+  - Returns one worktree exactly as `GET /v1/worktrees` lists it, so a client
+    can refresh a single card.
+  - `404` — unknown worktree, or its directory was deleted outside the gateway.
 
 - `DELETE /v1/worktrees/{worktreeId}?force=true`
   - Requires `control` scope.

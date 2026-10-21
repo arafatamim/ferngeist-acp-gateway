@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -126,6 +127,17 @@ func TestWorktrees_EndToEnd(t *testing.T) {
 	if len(list) != 1 || list[0].Ahead == nil || *list[0].Ahead != 1 || list[0].Dirty == nil || *list[0].Dirty {
 		t.Fatalf("list = %s", rec.Body.String())
 	}
+	rec = do(t, http.MethodGet, "/v1/worktrees/"+wt.ID, "")
+	var one worktreeResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &one); err != nil || rec.Code != http.StatusOK || one.ID != wt.ID || one.Ahead == nil || *one.Ahead != 1 || len(one.Chats) != 1 {
+		t.Fatalf("get = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if rec := do(t, http.MethodGet, "/v1/worktrees/nope", ""); rec.Code != http.StatusNotFound {
+		t.Fatalf("get unknown = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if len(list[0].Chats) != 1 {
+		t.Fatalf("chats while the session is open = %v, want one", list[0].Chats)
+	}
 
 	// A live chat uses the worktree as its cwd, so it cannot be deleted, even
 	// with force.
@@ -134,6 +146,11 @@ func TestWorktrees_EndToEnd(t *testing.T) {
 	}
 	if rec := do(t, http.MethodDelete, "/v1/sessions/"+conn.SessionID, ""); rec.Code != http.StatusNoContent {
 		t.Fatalf("close session = %d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = do(t, http.MethodGet, "/v1/worktrees", "")
+	if strings.Contains(rec.Body.String(), `"chats"`) {
+		t.Fatalf("chats after the session closed = %s", rec.Body.String())
 	}
 
 	// Once the chat is closed the worktree goes. The branch has an unmerged
@@ -248,5 +265,58 @@ func TestWorktreeRebase_Endpoint(t *testing.T) {
 	}
 	if rec := do(http.MethodPost, "/v1/worktrees/"+wt.ID+"/merge", ""); rec.Code != http.StatusNotFound {
 		t.Fatalf("merge of a deleted worktree = %d, body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestWorktreeRefs_Endpoint pins the repo-scoped refs route: the default falls
+// back to a local main, follows origin/HEAD once there is one, and a relative
+// or non-repo path is refused.
+func TestWorktreeRefs_Endpoint(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	repo := t.TempDir()
+	runGitCLI(t, repo, "init", "-q", "-b", "main")
+	runGitCLI(t, repo, "config", "user.email", "t@t")
+	runGitCLI(t, repo, "config", "user.name", "t")
+	runGitCLI(t, repo, "config", "commit.gpgSign", "false")
+	runGitCLI(t, repo, "commit", "-q", "--allow-empty", "-m", "init")
+	runGitCLI(t, repo, "branch", "feat/x")
+
+	h := newResilientTestHarness(t)
+	refs := func(repoPath string) (int, workspace.RefsPayload) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/v1/worktrees/refs?repo="+url.QueryEscape(repoPath), nil)
+		req.Header.Set("Authorization", "Bearer "+h.token)
+		rec := httptest.NewRecorder()
+		h.server.Handler().ServeHTTP(rec, req)
+		var payload workspace.RefsPayload
+		if rec.Code == http.StatusOK {
+			if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return rec.Code, payload
+	}
+
+	code, payload := refs(repo)
+	if code != http.StatusOK || payload.Default != "main" || len(payload.Refs) != 2 {
+		t.Fatalf("refs = %d %+v, want default main with 2 branches", code, payload)
+	}
+
+	origin := t.TempDir()
+	runGitCLI(t, origin, "init", "-q", "--bare")
+	runGitCLI(t, repo, "remote", "add", "origin", origin)
+	runGitCLI(t, repo, "push", "-q", "origin", "feat/x")
+	runGitCLI(t, repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/feat/x")
+	if code, payload = refs(repo); code != http.StatusOK || payload.Default != "feat/x" {
+		t.Fatalf("refs = %d %+v, want default from origin/HEAD", code, payload)
+	}
+
+	if code, _ = refs(t.TempDir()); code != http.StatusUnprocessableEntity {
+		t.Fatalf("non-repo = %d, want 422", code)
+	}
+	if code, _ = refs("relative/repo"); code != http.StatusBadRequest {
+		t.Fatalf("relative repo = %d, want 400", code)
 	}
 }

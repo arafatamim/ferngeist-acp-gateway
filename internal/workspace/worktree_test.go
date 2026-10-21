@@ -317,6 +317,74 @@ func TestListCountsAheadFromMergeBase(t *testing.T) {
 	}
 }
 
+// TestGet returns one worktree with its status, and 404s for an unknown id or
+// a folder deleted behind the gateway's back, as the list hides it.
+func TestGet(t *testing.T) {
+	repo, _ := initMainRepo(t)
+	svc, _ := newWorktreeTestService(t)
+	ctx := context.Background()
+	rec, err := svc.Create(ctx, CreateRequest{Repo: repo, Base: "main", Branch: "feat/x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitFile(t, rec.Path, "agent.txt", "work\n", "agent work")
+
+	got, err := svc.Get(ctx, rec.ID)
+	if err != nil || got.ID != rec.ID || got.Ahead == nil || *got.Ahead != 1 || got.Dirty == nil || *got.Dirty {
+		t.Fatalf("Get = %+v, %v; want feat/x one ahead and clean", got, err)
+	}
+	_, err = svc.Get(ctx, "nope")
+	wantWorkspaceStatus(t, err, 404)
+	if err := os.RemoveAll(rec.Path); err != nil {
+		t.Fatal(err)
+	}
+	_, err = svc.Get(ctx, rec.ID)
+	wantWorkspaceStatus(t, err, 404)
+}
+
+// TestListReportsRunningChats lists every chat working in a worktree, one in a
+// subdirectory included, and none for a worktree no chat uses.
+func TestListReportsRunningChats(t *testing.T) {
+	repo, _ := initMainRepo(t)
+	svc, _ := newWorktreeTestService(t)
+	ctx := context.Background()
+	used, err := svc.Create(ctx, CreateRequest{Repo: repo, Base: "main", Branch: "feat/x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	idle, err := svc.Create(ctx, CreateRequest{Repo: repo, Base: "main", Branch: "feat/y"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc.chatUsing = func(match func(string) bool) []string {
+		var ids []string
+		if match(used.Path) {
+			ids = append(ids, "ses_a")
+		}
+		if match(filepath.Join(used.Path, "sub")) {
+			ids = append(ids, "ses_b")
+		}
+		return ids
+	}
+
+	statuses, err := svc.List(ctx)
+	if err != nil || len(statuses) != 2 {
+		t.Fatalf("List = %v, %v", statuses, err)
+	}
+	for _, st := range statuses {
+		switch st.ID {
+		case used.ID:
+			if len(st.Chats) != 2 {
+				t.Errorf("used Chats = %v, want 2", st.Chats)
+			}
+		case idle.ID:
+			if len(st.Chats) != 0 {
+				t.Errorf("idle Chats = %v, want none", st.Chats)
+			}
+		}
+	}
+}
+
 func TestRebaseOntoMovedBase(t *testing.T) {
 	repo, _ := initMainRepo(t)
 	svc, _ := newWorktreeTestService(t)
@@ -381,6 +449,16 @@ func TestRebaseRefusesDirtyAndAbortsConflicts(t *testing.T) {
 	}
 	if st, _ := RunGit(ctx, rec.Path, "status", "--porcelain"); strings.TrimSpace(st) != "" {
 		t.Fatalf("worktree left dirty after the abort: %q", st)
+	}
+}
+
+// chatsAt fakes the session service: the given chats run in dir.
+func chatsAt(dir string, ids ...string) func(match func(string) bool) []string {
+	return func(match func(string) bool) []string {
+		if match(dir) {
+			return ids
+		}
+		return nil
 	}
 }
 
@@ -527,7 +605,7 @@ func TestMergeDeleteRefusesWhileAChatUsesTheWorktree(t *testing.T) {
 		t.Fatal(err)
 	}
 	commitFile(t, rec.Path, "agent.txt", "work\n", "agent work")
-	svc.chatUsing = func(match func(string) bool) (string, bool) { return "ses_1", match(rec.Path) }
+	svc.chatUsing = chatsAt(rec.Path, "ses_1")
 	before, _ := RunGit(ctx, repo, "rev-parse", "HEAD")
 
 	_, err = svc.Merge(ctx, rec.ID, MergeRequest{Delete: true})
