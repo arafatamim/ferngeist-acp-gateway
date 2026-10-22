@@ -53,6 +53,12 @@ not be coupled. Full release notes live in GitHub Releases.
 ## History
 
 - Unreleased:
+- `[semantic]` `POST /v1/agents/{agentId}/stop` stops the agent only for the
+  calling device: it closes the sessions that device holds for the agent and
+  leaves other paired devices' sessions and agent processes running. It returns
+  `404` when the calling device has no live session for the agent. Shipped
+  without a `protocolVersion` bump: a single-device client sees identical
+  behavior, so the gate would force a needless update. (2026-10-23)
 - `[additive]` Push payloads carry an optional `branch` — the branch of the
   managed worktree the chat runs in — so a client can show "feat-x finished"
   without a `/v1/worktrees` round trip. Absent for chats outside a worktree.

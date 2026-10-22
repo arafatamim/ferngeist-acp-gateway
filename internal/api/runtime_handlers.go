@@ -202,10 +202,11 @@ func (s *Server) writeStartupExit(w http.ResponseWriter, r *http.Request, sess *
 	writeError(w, http.StatusBadGateway, message)
 }
 
-// handleAgentStop stops every runtime for the agent (each is owned by one
-// session) and reports the newest stopped runtime.
+// handleAgentStop stops every runtime the calling device has for the agent
+// (each is owned by one session) and reports the newest stopped runtime.
 func (s *Server) handleAgentStop(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireGatewayScope(w, r, pairing.ScopeControl); !ok {
+	credential, ok := s.requireGatewayScope(w, r, pairing.ScopeControl)
+	if !ok {
 		return
 	}
 	if s.sessionSvc == nil {
@@ -213,7 +214,7 @@ func (s *Server) handleAgentStop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	runtimeInfo, err := s.sessionSvc.StopByAgent(r.Context(), r.PathValue("agentId"))
+	runtimeInfo, err := s.sessionSvc.StopByAgent(r.Context(), r.PathValue("agentId"), credential.DeviceID)
 	if err != nil {
 		if errors.Is(err, session.ErrSessionNotFound) {
 			writeError(w, http.StatusNotFound, "no runtimes for agent")

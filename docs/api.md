@@ -156,11 +156,12 @@ Base path: `/v1`
     - `503` — session service not available
 
 - `POST /v1/agents/{agentId}/stop`
-  - Stops the agent: every gateway session for the agent is closed and its agent
-    process stopped. Reports the newest stopped runtime.
+  - Stops the agent for the calling device: every gateway session the device
+    holds for the agent is closed and its agent process stopped. Other devices'
+    sessions for the same agent keep running. Reports the newest stopped runtime.
   - Requires `control` scope.
   - Error responses:
-    - `404` — agent has no live session/runtime
+    - `404` — the device has no live session/runtime for the agent
     - `503` — session service not available
 
 ### Custom agents

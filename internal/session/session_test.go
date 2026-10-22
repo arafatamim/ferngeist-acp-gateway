@@ -400,6 +400,38 @@ func TestCreateAllowsSameAgentParallelSessions(t *testing.T) {
 	}
 }
 
+// TestStopByAgentSparesOtherDevices stops one device's sessions for an agent;
+// another device running the same agent keeps its session and process.
+func TestStopByAgentSparesOtherDevices(t *testing.T) {
+	rs, store, agent, _, ctx := setupTest(t, Config{})
+	defer rs.Shutdown()
+	defer store.Close()
+
+	mine, _, err := rs.Create(ctx, agent, "dev-a", nil)
+	if err != nil {
+		t.Fatalf("Create dev-a: %v", err)
+	}
+	theirs, _, err := rs.Create(ctx, agent, "dev-b", nil)
+	if err != nil {
+		t.Fatalf("Create dev-b: %v", err)
+	}
+
+	stopped, err := rs.StopByAgent(ctx, agent.ID, "dev-a")
+	if err != nil {
+		t.Fatalf("StopByAgent: %v", err)
+	}
+	if stopped.ID != mine.RuntimeID {
+		t.Errorf("stopped runtime %q, want dev-a's %q", stopped.ID, mine.RuntimeID)
+	}
+	assertProcessRunning(t, theirs)
+	if _, err := store.GetSession(ctx, theirs.ID); err != nil {
+		t.Errorf("dev-b session should survive, got %v", err)
+	}
+	if _, err := rs.StopByAgent(ctx, agent.ID, "dev-a"); err != ErrSessionNotFound {
+		t.Errorf("second stop for dev-a = %v, want ErrSessionNotFound", err)
+	}
+}
+
 // TestCreateDoesNotSupersedeDifferentAgent verifies the supersede logic is scoped
 // to the same agent: a live session for a different agent on the same device is
 // left intact (and so still counts toward the per-device quota).

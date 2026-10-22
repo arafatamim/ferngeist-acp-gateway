@@ -579,13 +579,14 @@ func (rs *RuntimeSession) Restart(ctx context.Context, runtimeID, deviceID strin
 	return sess, attachToken, nil
 }
 
-// StopByAgent closes every session for the agent, stopping each agent process.
-// It returns the newest stopped runtime.
-func (rs *RuntimeSession) StopByAgent(ctx context.Context, agentID string) (runtime.Runtime, error) {
+// StopByAgent closes every session the device holds for the agent, stopping
+// each agent process. Other devices' sessions are left running. It returns the
+// newest stopped runtime.
+func (rs *RuntimeSession) StopByAgent(ctx context.Context, agentID, deviceID string) (runtime.Runtime, error) {
 	rs.mu.Lock()
 	var targets []*Session
 	for _, s := range rs.sessions {
-		if s.AgentID == agentID {
+		if s.AgentID == agentID && s.DeviceID == deviceID {
 			targets = append(targets, s)
 		}
 	}
