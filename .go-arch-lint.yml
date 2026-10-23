@@ -1,0 +1,111 @@
+version: 3
+workdir: .
+
+# Layers, outermost first. Imports point inward/downward only:
+#   entry      cmd/*                       -> composition, clients, OS integration
+#   compose    daemon                      -> anything (wires the graph)
+#   transport  api, adminclient            -> domain, infra (not persistence)
+#   domain     tiered, see deps below      -> lower domain tiers, infra
+#   infra      storage, registry, ...      -> nothing in the project
+# config and logging are cross-cutting and importable everywhere.
+# Nothing may import cmd or daemon.
+
+allow:
+  depOnAnyVendor: true
+
+exclude:
+  - .worktrees
+
+# Rules cover production code; tests wire packages together freely.
+excludeFiles:
+  - "_test\\.go$"
+
+components:
+  # entry
+  cmd-ferngeist: { in: cmd/ferngeist }
+  cmd-mock-agent: { in: cmd/mock-stdio-agent }
+  # compose
+  daemon: { in: internal/daemon }
+  # transport
+  api: { in: internal/api }
+  adminclient: { in: internal/adminclient }
+  # domain
+  catalog: { in: internal/catalog }
+  push: { in: internal/push }
+  acquire: { in: internal/acquire }
+  runtime: { in: internal/runtime }
+  session: { in: internal/session }
+  customagents: { in: internal/customagents }
+  pairing: { in: internal/pairing }
+  workspace: { in: internal/workspace }
+  remote: { in: internal/remote }
+  update: { in: internal/update }
+  # infra
+  storage: { in: internal/storage }
+  registry: { in: internal/registry }
+  discovery: { in: internal/discovery }
+  service: { in: internal/service }
+  # cross-cutting
+  config: { in: internal/config }
+  logging: { in: internal/logging }
+
+commonComponents:
+  - config
+  - logging
+
+deps:
+  # entry: start the daemon, talk to it as a client, manage the OS service.
+  cmd-ferngeist:
+    mayDependOn: [daemon, adminclient, service, update]
+
+  daemon:
+    anyProjectDeps: true
+
+  # transport: reach persistence through domain services, never directly.
+  api:
+    mayDependOn: &transport
+      - catalog
+      - push
+      - acquire
+      - runtime
+      - session
+      - customagents
+      - pairing
+      - workspace
+      - remote
+      - update
+      - registry
+      - discovery
+      - service
+  adminclient:
+    mayDependOn: *transport
+
+  # domain tier 0, shared kernel: the agent catalog and the notification port.
+  catalog:
+    mayDependOn: &infra [storage, registry, discovery, service]
+  push:
+    mayDependOn: *infra
+
+  # domain tier 1: features built on the kernel.
+  acquire:
+    mayDependOn: &kernel [catalog, push, storage, registry, discovery, service]
+  pairing:
+    mayDependOn: *kernel
+  workspace:
+    mayDependOn: *kernel
+  remote:
+    mayDependOn: *kernel
+  update:
+    mayDependOn: *kernel
+
+  # domain tier 2: agent processes, which need acquired binaries.
+  runtime:
+    mayDependOn: [acquire, catalog, push, storage, registry, discovery, service]
+
+  # domain tier 3: things that drive a running agent.
+  session:
+    mayDependOn: &onRuntime [runtime, acquire, catalog, push, storage, registry, discovery, service]
+  customagents:
+    mayDependOn: *onRuntime
+
+  # infra and cmd-mock-agent have no entry: no project imports beyond config/logging.

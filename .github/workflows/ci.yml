@@ -1,7 +1,8 @@
 name: CI
 
 # Runs on every push to main and on all pull requests.
-# Gates merges on vet, the full test suite, and — critically for the
+# Gates merges on lint (golangci-lint, which includes vet), architecture
+# rules, the full test suite, and — critically for the
 # concurrency-heavy session/pump code — a race-detector pass. The race
 # detector requires cgo, so that job runs on Linux where the runner ships
 # a C toolchain; the plain build/test jobs keep cgo disabled to match the
@@ -17,7 +18,7 @@ permissions:
 
 jobs:
   test:
-    name: vet + test
+    name: test
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -28,11 +29,6 @@ jobs:
         with:
           go-version: "1.26"
           cache-dependency-path: go.sum
-
-      - name: Vet
-        env:
-          CGO_ENABLED: "0"
-        run: go vet ./...
 
       - name: Test
         env:
@@ -88,3 +84,41 @@ jobs:
         env:
           CGO_ENABLED: "1"
         run: go test -race -count=1 ./...
+
+  lint:
+    name: golangci-lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.26"
+          cache-dependency-path: go.sum
+
+      # Pinned to match .golangci.yml (v2 schema) and local runs.
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.14.0
+
+  arch:
+    name: go-arch-lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.26"
+          cache-dependency-path: go.sum
+
+      # Enforces the layer rules in .go-arch-lint.yml.
+      - name: go-arch-lint
+        run: |
+          go install github.com/fe3dback/go-arch-lint@v1.19.0
+          go-arch-lint check
