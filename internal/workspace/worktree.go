@@ -415,18 +415,29 @@ func withDefaultBase(ctx context.Context, rec storage.WorktreeRecord, trunks []s
 }
 
 // trunkRefs are the refs a worktree with no recorded base may be measured
-// from, those that resolve, in order: origin's default branch, main, master
-// and the main checkout's branch.
+// from, in order of authority: the local branch carrying origin's default
+// name (a stable trunk — the checkout's branch is transient), the main
+// checkout's branch when that local branch does not exist, then origin's
+// default ref when no local branch carries the name. All of them are local, so
+// ahead/behind answers what still has to land on the local trunk, not what is
+// unpushed. A repo that names none of them gets no base: guessing main or
+// master would measure against a branch the user never chose.
 func trunkRefs(ctx context.Context, top string) []string {
 	var out []string
-	for _, ref := range []string{defaultRefName(ctx, top), "main", "master", baseRefOf(ctx, top, "HEAD")} {
+	add := func(ref string) {
 		if ref == "" || slices.Contains(out, ref) {
-			continue
+			return
 		}
 		if _, ok := commitOf(ctx, top, ref); ok {
 			out = append(out, ref)
 		}
 	}
+	remoteDefault := defaultRefName(ctx, top)
+	if name, ok := strings.CutPrefix(remoteDefault, "origin/"); ok {
+		add(name)
+	}
+	add(baseRefOf(ctx, top, "HEAD"))
+	add(remoteDefault)
 	return out
 }
 

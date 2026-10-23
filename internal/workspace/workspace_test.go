@@ -107,12 +107,7 @@ func TestRunGit(t *testing.T) {
 	if _, err := RunGit(context.Background(), dir, "status", "--porcelain=v2", "--branch"); err == nil {
 		t.Fatal("git status in non-repo should error")
 	}
-	run := func(args ...string) {
-		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v: %s", args, err, out)
-		}
-	}
+	run := func(args ...string) { gitT(t, dir, args...) }
 	run("init", "-q")
 	run("config", "user.email", "t@t")
 	run("config", "user.name", "t")
@@ -225,13 +220,7 @@ func TestDiffEntry(t *testing.T) {
 		t.Skip("git not installed")
 	}
 	dir := t.TempDir()
-	run := func(args ...string) {
-		t.Helper()
-		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v: %s", args, err, out)
-		}
-	}
+	run := func(args ...string) { gitT(t, dir, args...) }
 	run("init", "-q")
 	run("config", "user.email", "t@t")
 	run("config", "user.name", "t")
@@ -293,13 +282,7 @@ func TestStatusScopedToSubdirectory(t *testing.T) {
 		t.Skip("git not installed")
 	}
 	root := t.TempDir()
-	run := func(args ...string) {
-		t.Helper()
-		cmd := exec.Command("git", append([]string{"-C", root}, args...)...)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v: %s", args, err, out)
-		}
-	}
+	run := func(args ...string) { gitT(t, root, args...) }
 	write := func(rel, content string) {
 		t.Helper()
 		path := filepath.Join(root, filepath.FromSlash(rel))

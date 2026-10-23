@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,6 +18,14 @@ import (
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/storage"
 )
 
+// gitT runs git in dir and fails the test on error.
+func gitT(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	if out, err := RunGit(context.Background(), dir, args...); err != nil {
+		t.Fatalf("git %v: %v: %s", args, err, out)
+	}
+}
+
 // initMainRepo builds a git repo with one commit on branch main and reports
 // the commit sha.
 func initMainRepo(t *testing.T) (repo, c1 string) {
@@ -25,13 +34,7 @@ func initMainRepo(t *testing.T) (repo, c1 string) {
 		t.Skip("git not installed")
 	}
 	repo = t.TempDir()
-	run := func(dir string, args ...string) {
-		t.Helper()
-		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v: %s", args, err, out)
-		}
-	}
+	run := func(dir string, args ...string) { gitT(t, dir, args...) }
 	run(repo, "init", "-q")
 	run(repo, "checkout", "-qb", "main")
 	run(repo, "config", "user.email", "t@t")
@@ -65,13 +68,7 @@ func commitFile(t *testing.T, dir, name, content, msg string) {
 	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	run := func(args ...string) {
-		t.Helper()
-		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v: %s", args, err, out)
-		}
-	}
+	run := func(args ...string) { gitT(t, dir, args...) }
 	run("add", name)
 	run("commit", "-qm", msg)
 }
@@ -134,13 +131,7 @@ func TestBaseRefFallsBackToBaseCommit(t *testing.T) {
 	}
 
 	// A worktree whose base branch was deleted falls back too.
-	run := func(args ...string) {
-		t.Helper()
-		cmd := exec.Command("git", append([]string{"-C", repo}, args...)...)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v: %s", args, err, out)
-		}
-	}
+	run := func(args ...string) { gitT(t, repo, args...) }
 	run("branch", "temp-base", "main")
 	rec, err := svc.Create(ctx, CreateRequest{Repo: repo, Base: "temp-base", Branch: "feat/gone"})
 	if err != nil {
@@ -1236,5 +1227,68 @@ func TestListShowsWorktreesMadeOutsideTheGateway(t *testing.T) {
 	}
 	if records, _ := stores().ListWorktrees(ctx); len(records) != 0 {
 		t.Fatalf("acting on it saved records: %+v", records)
+	}
+}
+
+// setRemoteHeadT makes origin/HEAD point at ref, as a clone records it.
+func setRemoteHeadT(t *testing.T, dir, ref string) {
+	t.Helper()
+	gitT(t, dir, "update-ref", "refs/remotes/"+ref, "HEAD")
+	gitT(t, dir, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/"+ref)
+}
+
+// TestTrunkRefs pins the base an unmanaged worktree without a recorded base is
+// measured from: the local branch carrying origin's default name, the main
+// checkout's branch when that branch is missing, origin's ref when no local
+// branch carries the name, and the conventional names with no remote at all.
+func TestTrunkRefs(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, repo string)
+		want  []string
+	}{
+		{
+			name: "the local branch origin names as default wins over the checkout",
+			setup: func(t *testing.T, repo string) {
+				gitT(t, repo, "branch", "master")
+				setRemoteHeadT(t, repo, "origin/main")
+				// The checkout is transient; a feature branch must not decide the base.
+				gitT(t, repo, "checkout", "-qb", "feat/x")
+			},
+			want: []string{"main", "feat/x", "origin/main"},
+		},
+		{
+			name: "the checkout's branch stands in when origin names no local branch",
+			setup: func(t *testing.T, repo string) {
+				gitT(t, repo, "branch", "-m", "develop")
+				setRemoteHeadT(t, repo, "origin/master")
+			},
+			want: []string{"develop", "origin/master"},
+		},
+		{
+			name: "a repo with no remote measures from its checkout",
+			want: []string{"main"},
+		},
+		{
+			name: "a repo that names no trunk gets no base",
+			setup: func(t *testing.T, repo string) {
+				gitT(t, repo, "checkout", "--detach")
+			},
+			want: nil,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			repo, _ := initMainRepo(t)
+			if tc.setup != nil {
+				tc.setup(t, repo)
+			}
+
+			got := trunkRefs(context.Background(), repo)
+
+			if !slices.Equal(got, tc.want) {
+				t.Fatalf("trunkRefs() = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
