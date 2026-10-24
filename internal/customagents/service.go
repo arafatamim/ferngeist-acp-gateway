@@ -152,7 +152,7 @@ func (s *Service) Update(ctx context.Context, id string, in Update) (catalog.Age
 	}
 	existing, err := s.store.GetCustomAgent(ctx, id)
 	if err != nil {
-		return catalog.Agent{}, err
+		return catalog.Agent{}, customAgentStorageError(err)
 	}
 	updated := existing
 	if in.DisplayName != nil {
@@ -207,7 +207,7 @@ func (s *Service) Delete(ctx context.Context, id string) error {
 		}
 	}
 	if err := s.store.DeleteCustomAgent(ctx, id); err != nil {
-		return err
+		return customAgentStorageError(err)
 	}
 	s.catalog.Invalidate()
 	return nil
@@ -286,4 +286,11 @@ func validateCustomAgentFields(displayName, command string, args []string) error
 		}
 	}
 	return nil
+}
+
+func customAgentStorageError(err error) error {
+	if errors.Is(err, storage.ErrNotFound) {
+		return Error{status: http.StatusNotFound, message: "unknown custom agent"}
+	}
+	return err
 }

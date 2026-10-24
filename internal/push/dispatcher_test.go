@@ -25,6 +25,11 @@ func (f *fakeTokenStore) DeleteDevicePushToken(ctx context.Context, deviceID str
 	return f.deleteErr
 }
 
+func (f *fakeTokenStore) SaveDevicePushToken(ctx context.Context, deviceID, token, platform string) error {
+	f.token, f.platform = token, platform
+	return nil
+}
+
 // recordingProvider captures the token it was asked to deliver to and returns a
 // configurable error so dispatcher behavior can be asserted in isolation.
 type recordingProvider struct {

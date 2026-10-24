@@ -24,14 +24,17 @@ import (
 
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/catalog"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/config"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/customagents"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/discovery"
 	gatewaylogging "github.com/arafatamim/ferngeist-acp-gateway/internal/logging"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/pairing"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/push"
 	acpregistry "github.com/arafatamim/ferngeist-acp-gateway/internal/registry"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/remote"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/runtime"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/session"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/storage"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/workspace"
 	"github.com/coder/websocket"
 )
 
@@ -111,7 +114,7 @@ func TestStatusRejectsNonGetMethods(t *testing.T) {
 
 func TestStatusUsesConfiguredGatewayName(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	server := NewServer(Deps{
+	server := newTestServerFromDeps(Deps{
 		Config:    config.Config{ListenAddr: "127.0.0.1:0", GatewayName: "desk-alpha"},
 		Logger:    logger,
 		Catalog:   catalog.New(".", nil),
@@ -135,7 +138,7 @@ func TestStatusUsesConfiguredGatewayName(t *testing.T) {
 
 func TestStatusSurfacesPendingTailscaleAuth(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	server := NewServer(Deps{
+	server := newTestServerFromDeps(Deps{
 		Config:    config.Config{ListenAddr: "127.0.0.1:0"},
 		Logger:    logger,
 		Catalog:   catalog.New(".", nil),
@@ -174,7 +177,7 @@ func TestStatusSurfacesPendingTailscaleAuth(t *testing.T) {
 
 func TestStatusOmitsAuthFieldsWithoutRemoteSetup(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	server := NewServer(Deps{
+	server := newTestServerFromDeps(Deps{
 		Config:    config.Config{ListenAddr: "127.0.0.1:0"},
 		Logger:    logger,
 		Catalog:   catalog.New(".", nil),
@@ -201,7 +204,7 @@ func TestStatusOmitsAuthFieldsWithoutRemoteSetup(t *testing.T) {
 
 func TestStatusIncludesRegistryHealth(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	server := NewServer(Deps{
+	server := newTestServerFromDeps(Deps{
 		Config:    config.Config{ListenAddr: "127.0.0.1:0"},
 		Logger:    logger,
 		Catalog:   catalog.New(".", nil),
@@ -241,7 +244,7 @@ func TestStatusIncludesRegistryHealth(t *testing.T) {
 
 func TestStatusIncludesRemoteConfigurationState(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	server := NewServer(Deps{
+	server := newTestServerFromDeps(Deps{
 		Config:    config.Config{ListenAddr: "127.0.0.1:0", PublicBaseURL: "https://helper.example.com"},
 		Logger:    logger,
 		Catalog:   catalog.New(".", nil),
@@ -281,7 +284,7 @@ func TestStatusIncludesRemoteConfigurationState(t *testing.T) {
 
 func TestStatusIncludesLANRemoteVisibility(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	server := NewServer(Deps{
+	server := newTestServerFromDeps(Deps{
 		Config:    config.Config{ListenAddr: "127.0.0.1:0", EnableLAN: true},
 		Logger:    logger,
 		Catalog:   catalog.New(".", nil),
@@ -318,7 +321,7 @@ func TestStatusIncludesLANRemoteVisibility(t *testing.T) {
 
 func TestStatusClassifiesTailscaleRemoteVisibility(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	server := NewServer(Deps{
+	server := newTestServerFromDeps(Deps{
 		Config:    config.Config{ListenAddr: "127.0.0.1:0", PublicBaseURL: "https://helper.tail123.ts.net"},
 		Logger:    logger,
 		Catalog:   catalog.New(".", nil),
@@ -345,7 +348,7 @@ func TestStatusClassifiesTailscaleRemoteVisibility(t *testing.T) {
 
 func TestAdminPairingStartIncludesPayload(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	server := NewServer(Deps{
+	server := newTestServerFromDeps(Deps{
 		Config:    config.Config{ListenAddr: "127.0.0.1:0", PublicBaseURL: "https://helper.example.com"},
 		Logger:    logger,
 		Catalog:   catalog.New(".", nil),
@@ -382,7 +385,7 @@ func TestAdminPairingStartIncludesPayload(t *testing.T) {
 
 func TestAdminStatusIncludesPairingReachability(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	server := NewServer(Deps{
+	server := newTestServerFromDeps(Deps{
 		Config: config.Config{
 			ListenAddr:      "127.0.0.1:0",
 			AdminListenAddr: "127.0.0.1:5789",
@@ -461,7 +464,7 @@ func TestAdminDevicesListAndRevoke(t *testing.T) {
 
 func TestStatusFlagsInvalidRemoteConfiguration(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	server := NewServer(Deps{
+	server := newTestServerFromDeps(Deps{
 		Config:    config.Config{ListenAddr: "127.0.0.1:0", PublicBaseURL: "://bad-url"},
 		Logger:    logger,
 		Catalog:   catalog.New(".", nil),
@@ -1403,9 +1406,9 @@ func TestDiagnosticsExportIncludesGatewayLogsAndRuntimeLogs(t *testing.T) {
 	logger.Info("diagnostic export ready", slog.String("component", "test"))
 
 	cfg := config.Config{ListenAddr: "127.0.0.1:0", LogDir: filepath.Join(baseDir, "logs"), StateDBPath: filepath.Join(baseDir, "state.db"), GatewayName: "test-gateway", AllowDiagnosticsExport: true}
-	server := NewServer(Deps{
+	server := newTestServerFromDeps(Deps{
 		Config:    cfg,
-		Build:     BuildInfo{Version: "1.2.3", Commit: "abc123", BuiltAt: "2026-03-25T10:00:00Z", GoVersion: "go1.test"},
+		Build:     config.BuildInfo{Version: "1.2.3", Commit: "abc123", BuiltAt: "2026-03-25T10:00:00Z", GoVersion: "go1.test"},
 		Logger:    logger,
 		Catalog:   catalog.New(baseDir, nil),
 		Runtime:   runtime.NewSupervisor(logger, baseDir, nil, nil),
@@ -1694,7 +1697,7 @@ func TestRuntimeRestartWithEnvRequiresElevatedScopeByDefault(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	runtimeSvc := runtime.NewSupervisor(logger, baseDir, nil, nil)
-	server := NewServer(Deps{
+	server := newTestServerFromDeps(Deps{
 		Config:    config.Config{ListenAddr: "127.0.0.1:0"},
 		Logger:    logger,
 		Catalog:   catalog.New(baseDir, nil),
@@ -1803,7 +1806,7 @@ func newConfiguredTestServer(cfg config.Config) *Server {
 	if cfg.ListenAddr == "" {
 		cfg.ListenAddr = "127.0.0.1:0"
 	}
-	return NewServer(Deps{
+	return newTestServerFromDeps(Deps{
 		Config:  cfg,
 		Logger:  logger,
 		Catalog: catalog.New(".", nil),
@@ -1828,7 +1831,7 @@ func newConfiguredTestServerWithBaseDir(baseDir string, cfg config.Config) *Serv
 	if cfg.ListenAddr == "" {
 		cfg.ListenAddr = "127.0.0.1:0"
 	}
-	return NewServer(Deps{
+	return newTestServerFromDeps(Deps{
 		Config:  cfg,
 		Logger:  logger,
 		Catalog: catalog.New(baseDir, nil),
@@ -1846,7 +1849,7 @@ func newConfiguredTestServerWithBaseDir(baseDir string, cfg config.Config) *Serv
 
 func newTestServerWithBaseDirAndRegistry(baseDir string, registrySource catalog.RegistrySource) *Server {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return NewServer(Deps{
+	return newTestServerFromDeps(Deps{
 		Config:    config.Config{ListenAddr: "127.0.0.1:0"},
 		Logger:    logger,
 		Catalog:   catalog.New(baseDir, registrySource),
@@ -1858,15 +1861,20 @@ func newTestServerWithBaseDirAndRegistry(baseDir string, registrySource catalog.
 
 func newTestServerWithStore(baseDir string, store *storage.SQLiteStore) *Server {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return NewServer(Deps{
-		Config:    config.Config{ListenAddr: "127.0.0.1:0"},
-		Logger:    logger,
-		Catalog:   catalog.New(baseDir, nil),
-		Runtime:   runtime.NewSupervisor(logger, baseDir, store, nil),
-		Pairing:   pairing.NewService(logger, store),
-		Discovery: discovery.New(logger),
-		Store:     store,
+	catalogSvc := catalog.New(baseDir, nil)
+	runtimeSvc := runtime.NewSupervisor(logger, baseDir, store, nil)
+	server := newTestServerFromDeps(Deps{
+		Config:       config.Config{ListenAddr: "127.0.0.1:0"},
+		Logger:       logger,
+		Catalog:      catalogSvc,
+		Runtime:      runtimeSvc,
+		Pairing:      pairing.NewService(logger, store),
+		Discovery:    discovery.New(logger),
+		CustomAgents: customagents.New(store, catalogSvc, runtimeSvc.List, logger),
+		Push:         push.NewDispatcher(store, nil, logger),
 	})
+	server.workspaceSvc = testWorkspaceService(server, store)
+	return server
 }
 
 type fakeRegistryStatusProvider struct {
@@ -2778,4 +2786,24 @@ func TestAdminListenerRejectsBrowserRequests(t *testing.T) {
 			}
 		})
 	}
+}
+
+func newTestServerFromDeps(deps Deps) *Server {
+	if deps.CustomAgents == nil {
+		deps.CustomAgents = customagents.New(nil, deps.Catalog, deps.Runtime.List, deps.Logger)
+	}
+	server := NewServer(deps)
+	server.workspaceSvc = testWorkspaceService(server, nil)
+	return server
+}
+
+func testWorkspaceService(server *Server, store *storage.SQLiteStore) *workspace.Service {
+	return workspace.New(func() *storage.SQLiteStore { return store }, server.logger,
+		func() time.Time { return server.now() },
+		func(match func(string) bool) []string {
+			if server.sessionSvc == nil {
+				return nil
+			}
+			return server.sessionSvc.ChatsUsing(match)
+		})
 }

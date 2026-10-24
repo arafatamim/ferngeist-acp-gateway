@@ -14,6 +14,7 @@ import (
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/api"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/catalog"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/config"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/customagents"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/discovery"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/pairing"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/runtime"
@@ -99,14 +100,15 @@ func newTestCustomAgentClient(t *testing.T) *Client {
 		return out
 	})
 
+	runtimeSvc := runtime.NewSupervisor(logger, baseDir, store, nil)
 	server := api.NewServer(api.Deps{
-		Config:    config.Config{ListenAddr: "127.0.0.1:0"},
-		Logger:    logger,
-		Catalog:   catalogSvc,
-		Runtime:   runtime.NewSupervisor(logger, baseDir, store, nil),
-		Pairing:   pairing.NewService(logger, store),
-		Discovery: discovery.New(logger),
-		Store:     store,
+		Config:       config.Config{ListenAddr: "127.0.0.1:0"},
+		Logger:       logger,
+		Catalog:      catalogSvc,
+		Runtime:      runtimeSvc,
+		Pairing:      pairing.NewService(logger, store),
+		Discovery:    discovery.New(logger),
+		CustomAgents: customagents.New(store, catalogSvc, runtimeSvc.List, logger),
 	})
 	adminServer := httptest.NewServer(server.AdminHandler())
 	t.Cleanup(adminServer.Close)

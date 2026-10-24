@@ -13,6 +13,7 @@ import (
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/api"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/catalog"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/config"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/customagents"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/discovery"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/logging"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/pairing"
@@ -50,7 +51,7 @@ var remoteProvision = func(ctx context.Context, cfg config.Config, localAddr str
 
 // Run boots the full gateway daemon and blocks until the context is cancelled or
 // one of the HTTP surfaces exits unexpectedly.
-func Run(ctx context.Context, build api.BuildInfo) error {
+func Run(ctx context.Context, build config.BuildInfo) error {
 	cfg := config.Load()
 	logger, logSvc, err := logging.New(cfg.LogLevel, cfg.LogDir, cfg.LogMaxSize, cfg.LogMaxBackups)
 	if err != nil {
@@ -65,35 +66,14 @@ func Run(ctx context.Context, build api.BuildInfo) error {
 	}
 	defer store.Close()
 
-	// Establish this gateway's stable instance id (generated once, persisted).
-	// Clients receive it at pairing and use it to address the gateway and resolve
-	// its pushes for deep-linking.
-	gatewayID, err := store.EnsureGatewayID(context.Background())
+	cfg, err = prepareState(ctx, store, logger, cfg)
 	if err != nil {
-		return fmt.Errorf("establish gateway id: %w", err)
+		return err
 	}
-	cfg.GatewayID = gatewayID
-
-	// Reconcile sessions orphaned by a previous shutdown.
-	// Any session that was active or disconnected at shutdown is now stale
-	// since its backing process no longer exists.
-	if err := store.ReconcileSessionsOnStartup(context.Background()); err != nil {
-		logger.Warn("failed to reconcile stale sessions on startup", slog.String("error", err.Error()))
-	}
-
-	cfg = ApplyPersistedSettings(logger, store, cfg)
 
 	registryClient := acpregistry.New(cfg.RegistryURL, 6*time.Hour)
 	defer registryClient.Close()
-	catalogSvc := catalog.New(".", registryClient)
-	catalogSvc.SetNpmResolver(catalog.ResolveNpmBinaryNames)
-	// Custom agents live in SQLite; the catalog pulls them on every refresh so
-	// client edits show up without a daemon restart.
-	catalogSvc.SetCustomProvider(customAgentProvider(store, logger))
-	installer := acquire.New(logger, cfg.ManagedBinDir, store)
-	installer.SetJSRuntime(cfg.JSRuntime)
-	installer.PruneNpm() // before any agent launches from an install dir
-	runtimeSvc := gatewayruntime.NewSupervisor(logger, ".", store, installer)
+	catalogSvc, runtimeSvc := newAgentRuntime(cfg, logger, store, registryClient)
 	// Pre-boot the next process of each agent in use, so a connect skips the
 	// agent's startup (see runtime.spareIdleTTL for how long one idles).
 	runtimeSvc.EnableSpares()
@@ -105,7 +85,6 @@ func Run(ctx context.Context, build api.BuildInfo) error {
 		AllowDiagnosticsExport: cfg.AllowDiagnosticsExport,
 		AllowRuntimeRestartEnv: cfg.AllowRuntimeRestartEnv,
 	})
-	tokenSvc := session.NewTokenService(logger)
 	pushSvc, vapidPublicKey, err := newPushService(logger, store)
 	if err != nil {
 		return fmt.Errorf("establish web push keys: %w", err)
@@ -114,61 +93,11 @@ func Run(ctx context.Context, build api.BuildInfo) error {
 
 	access := newRemoteAccess(ctx, &cfg, store, pushSvc, logger)
 	startUpdateNotifier(ctx, cfg, build, pushSvc, store)
-	// The push path only needs the branch behind a chat's cwd, so the session
-	// layer gets that one workspace lookup rather than the whole workspace
-	// service, whose full instance (with its chat callback) the API layer
-	// builds. This accessor-only instance shares the store and its BranchOf is
-	// a read, so the two never contend.
-	worktrees := workspace.New(func() *storage.SQLiteStore { return store }, logger, time.Now, nil)
-	sessionSvc := session.NewRuntimeSession(logger, store, runtimeSvc, tokenSvc, session.Config{
-		MaxDisconnected:    cfg.SessionMaxDisconnected,
-		MaxPerDevice:       cfg.MaxSessionsPerDevice,
-		ProgressInterval:   cfg.ProgressInterval,
-		PushSvc:            pushSvc,
-		BranchOf:           worktrees.BranchOf,
-		GatewayID:          cfg.GatewayID,
-		FrameLogEnabled:    cfg.FrameLogEnabled,
-		FrameLogDir:        cfg.LogDir,
-		FrameLogMaxSize:    cfg.LogMaxSize,
-		FrameLogMaxBackups: cfg.LogMaxBackups,
-	})
-	discoverySvc := discovery.New(logger)
-
-	if cfg.EnableLAN {
-		startDiscovery(cfg, discoverySvc, pairingSvc, logger)
-	}
-	defer discoverySvc.Stop()
-
-	server := api.NewServer(api.Deps{
-		Config:    cfg,
-		Build:     build,
-		Logger:    logger,
-		Catalog:   catalogSvc,
-		Runtime:   runtimeSvc,
-		Pairing:   pairingSvc,
-		Discovery: discoverySvc,
-		Logs:      logSvc,
-		Registry:  registryClient,
-		Store:     store,
-		Session:   sessionSvc,
-	})
-	if access != nil {
-		server.SetRemoteSetup(access.Snapshot)
-		if cfg.TailscaleAuthKey == "" {
-			// Asynchronous: first boot with a human login, or a tailnet that
-			// still needs HTTPS/Funnel enabled. Start owns the retry loop and
-			// hands the live public URL to the status path on success, so
-			// status reports it without a restart.
-			access.Start(ctx, server.SetPublicURL)
-		}
-	}
-
-	logger.Info("starting gateway daemon",
-		slog.String("listen_addr", cfg.ListenAddr),
-		slog.String("admin_listen_addr", cfg.AdminListenAddr),
-		slog.Bool("lan_enabled", cfg.EnableLAN),
-	)
-	return serve(ctx, server, access, sessionSvc, logger)
+	return serveGateway(ctx, api.Deps{
+		Config: cfg, Build: build, Logger: logger, Catalog: catalogSvc,
+		Runtime: runtimeSvc, Pairing: pairingSvc, Logs: logSvc,
+		Registry: registryClient, Push: pushSvc,
+	}, store, access)
 }
 
 // serve runs the API server until ctx is cancelled or the server fails, then
@@ -284,7 +213,7 @@ func newRemoteAccess(ctx context.Context, cfg *config.Config, store *storage.SQL
 // newer version exists. It never applies the update — the user runs
 // `ferngeist-gateway update`. Package-manager builds (apt, pacman, brew) are
 // updated by their package manager, so they never announce it.
-func startUpdateNotifier(ctx context.Context, cfg config.Config, build api.BuildInfo, pushSvc push.PushService, store *storage.SQLiteStore) {
+func startUpdateNotifier(ctx context.Context, cfg config.Config, build config.BuildInfo, pushSvc push.PushService, store *storage.SQLiteStore) {
 	selfUpdating := build.UpdateChannel == "" || build.UpdateChannel == "self"
 	if !cfg.UpdateCheckEnabled || !selfUpdating {
 		return
@@ -319,7 +248,7 @@ func portOf(addr string) (int, error) {
 // provider, signing with this gateway's VAPID key (generated once, persisted).
 // It returns the public key clients subscribe against. Web Push needs no
 // third-party credentials, so delivery is always on.
-func newPushService(logger *slog.Logger, store *storage.SQLiteStore) (push.PushService, string, error) {
+func newPushService(logger *slog.Logger, store *storage.SQLiteStore) (*push.Dispatcher, string, error) {
 	pushLogger := logger.With("component", "push")
 	publicKey, privateKey, err := store.EnsureVAPIDKeys(context.Background(), push.GenerateVAPIDKeys)
 	if err != nil {
@@ -368,4 +297,94 @@ func ApplyPersistedSettings(logger *slog.Logger, store *storage.SQLiteStore, cfg
 		logger.Warn("failed to seed gateway settings", slog.String("error", err.Error()))
 	}
 	return cfg
+}
+
+func prepareState(ctx context.Context, store *storage.SQLiteStore, logger *slog.Logger, cfg config.Config) (config.Config, error) {
+	// Establish this gateway's stable instance id (generated once, persisted).
+	// Clients receive it at pairing and use it to address the gateway and resolve
+	// its pushes for deep-linking.
+	gatewayID, err := store.EnsureGatewayID(ctx)
+	if err != nil {
+		return cfg, fmt.Errorf("establish gateway id: %w", err)
+	}
+	cfg.GatewayID = gatewayID
+
+	// Reconcile sessions orphaned by a previous shutdown.
+	// Any session that was active or disconnected at shutdown is now stale
+	// since its backing process no longer exists.
+	if err := store.ReconcileSessionsOnStartup(ctx); err != nil {
+		logger.Warn("failed to reconcile stale sessions on startup", slog.String("error", err.Error()))
+	}
+
+	return ApplyPersistedSettings(logger, store, cfg), nil
+
+}
+
+func newAgentRuntime(cfg config.Config, logger *slog.Logger, store *storage.SQLiteStore, registryClient *acpregistry.Client) (*catalog.Service, *gatewayruntime.Supervisor) {
+	catalogSvc := catalog.New(".", registryClient)
+	catalogSvc.SetNpmResolver(catalog.ResolveNpmBinaryNames)
+	// Custom agents live in SQLite; the catalog pulls them on every refresh so
+	// client edits show up without a daemon restart.
+	catalogSvc.SetCustomProvider(customAgentProvider(store, logger))
+	installer := acquire.New(logger, cfg.ManagedBinDir, store)
+	installer.SetJSRuntime(cfg.JSRuntime)
+	installer.PruneNpm() // before any agent launches from an install dir
+	runtimeSvc := gatewayruntime.NewSupervisor(logger, ".", store, installer)
+
+	return catalogSvc, runtimeSvc
+}
+
+func composeServer(deps api.Deps, store *storage.SQLiteStore) (*api.Server, *session.RuntimeSession) {
+	cfg, logger := deps.Config, deps.Logger
+	// The push path only needs the branch behind a chat's cwd, so the session
+	// layer gets that one workspace lookup rather than the whole workspace
+	// service, whose full instance (with its chat callback) is composed below.
+	// This accessor-only instance shares the store and its BranchOf is a read,
+	// so the two never contend.
+	worktrees := workspace.New(func() *storage.SQLiteStore { return store }, logger, time.Now, nil)
+	sessionSvc := session.NewRuntimeSession(logger, store, deps.Runtime, session.NewTokenService(logger), session.Config{
+		MaxDisconnected:    cfg.SessionMaxDisconnected,
+		MaxPerDevice:       cfg.MaxSessionsPerDevice,
+		ProgressInterval:   cfg.ProgressInterval,
+		PushSvc:            deps.Push,
+		BranchOf:           worktrees.BranchOf,
+		GatewayID:          cfg.GatewayID,
+		FrameLogEnabled:    cfg.FrameLogEnabled,
+		FrameLogDir:        cfg.LogDir,
+		FrameLogMaxSize:    cfg.LogMaxSize,
+		FrameLogMaxBackups: cfg.LogMaxBackups,
+	})
+
+	deps.Session = sessionSvc
+	deps.CustomAgents = customagents.New(store, deps.Catalog, deps.Runtime.List, logger)
+	deps.Workspace = workspace.New(func() *storage.SQLiteStore { return store }, logger,
+		func() time.Time { return time.Now().UTC() }, sessionSvc.ChatsUsing)
+	return api.NewServer(deps), sessionSvc
+}
+
+func serveGateway(ctx context.Context, deps api.Deps, store *storage.SQLiteStore, access *remote.Access) error {
+	cfg, logger := deps.Config, deps.Logger
+	discoverySvc := discovery.New(logger)
+	if cfg.EnableLAN {
+		startDiscovery(cfg, discoverySvc, deps.Pairing, logger)
+	}
+	defer discoverySvc.Stop()
+	deps.Discovery = discoverySvc
+	server, sessionSvc := composeServer(deps, store)
+	if access != nil {
+		server.SetRemoteSetup(access.Snapshot)
+		if cfg.TailscaleAuthKey == "" {
+			// Asynchronous: first boot with a human login, or a tailnet that
+			// still needs HTTPS/Funnel enabled. Start owns the retry loop and
+			// hands the live public URL to the status path on success, so
+			// status reports it without a restart.
+			access.Start(ctx, server.SetPublicURL)
+		}
+	}
+	logger.Info("starting gateway daemon",
+		slog.String("listen_addr", cfg.ListenAddr),
+		slog.String("admin_listen_addr", cfg.AdminListenAddr),
+		slog.Bool("lan_enabled", cfg.EnableLAN),
+	)
+	return serve(ctx, server, access, sessionSvc, logger)
 }

@@ -2,9 +2,8 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
-	"net/url"
-	"strings"
 
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/push"
 )
@@ -48,53 +47,17 @@ func (s *Server) handleRegisterPushToken(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
-	if body.Subscription != nil {
-		s.registerWebPushSubscription(w, r, credential.DeviceID, *body.Subscription)
-		return
-	}
-	token := strings.TrimSpace(body.Token)
-	if token == "" {
-		http.Error(w, "token is required", http.StatusBadRequest)
-		return
-	}
-	// platform is part of the contract but default it rather than reject: a
-	// well-formed token we can store should never 4xx (the client retries 4xx
-	// indefinitely). Older/other clients that omit it are treated as Android.
-	platform := strings.TrimSpace(body.Platform)
-	if platform == "" {
-		s.logger.Warn("push token registered with empty platform, defaulting to android; client may be outdated",
-			"device_id", credential.DeviceID)
-		platform = "android"
-	}
 
-	if err := s.store.SaveDevicePushToken(r.Context(), credential.DeviceID, token, platform); err != nil {
-		s.logger.Error("failed to save push token", "error", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-
-	w.WriteHeader(http.StatusNoContent)
-}
-
-// registerWebPushSubscription stores a Web Push subscription as the device's
-// token. The endpoint is where the gateway will POST, so it must be https.
-func (s *Server) registerWebPushSubscription(w http.ResponseWriter, r *http.Request, deviceID string, sub push.Subscription) {
-	endpoint, err := url.Parse(sub.Endpoint)
-	if err != nil || endpoint.Scheme != "https" || endpoint.Host == "" {
-		http.Error(w, "subscription.endpoint must be an https URL", http.StatusBadRequest)
-		return
-	}
-	if sub.Keys.P256dh == "" || sub.Keys.Auth == "" {
-		http.Error(w, "subscription.keys.p256dh and subscription.keys.auth are required", http.StatusBadRequest)
-		return
-	}
-	token, err := json.Marshal(sub)
+	err := s.pushSvc.Register(r.Context(), credential.DeviceID, push.Registration{
+		Token: body.Token, Platform: body.Platform, Subscription: body.Subscription,
+	})
 	if err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	if err := s.store.SaveDevicePushToken(r.Context(), deviceID, string(token), push.PlatformWebPush); err != nil {
-		s.logger.Error("failed to save push subscription", "error", err)
+		var invalid push.RegistrationError
+		if errors.As(err, &invalid) {
+			http.Error(w, invalid.Error(), http.StatusBadRequest)
+			return
+		}
+		s.logger.Error("failed to register push token", "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}

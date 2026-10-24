@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/config"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/discovery"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/pairing"
 	acpregistry "github.com/arafatamim/ferngeist-acp-gateway/internal/registry"
@@ -31,7 +32,7 @@ type diagnosticsExportResponse struct {
 type diagnosticsGatewaySnapshot struct {
 	Name            string             `json:"name"`
 	Version         string             `json:"version"`
-	Build           BuildInfo          `json:"build"`
+	Build           config.BuildInfo   `json:"build"`
 	ProtocolVersion string             `json:"protocolVersion"`
 	StartedAt       time.Time          `json:"startedAt"`
 	UptimeSeconds   int64              `json:"uptimeSeconds"`

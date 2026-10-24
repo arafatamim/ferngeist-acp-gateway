@@ -40,9 +40,9 @@ func errStatus(status int, message string) error {
 	return Error{status: status, message: message}
 }
 
-// Service owns the managed-worktree git and filesystem operations. store and
-// now are accessors because the API server rebinds them after construction in
-// tests. chatUsing reports a running chat whose working directory satisfies the
+// Service owns the managed-worktree git and filesystem operations. The store
+// and clock accessors let callers control persistence and time independently.
+// chatUsing reports running chats whose working directories satisfy the
 // predicate; it may be nil.
 type Service struct {
 	store     func() *storage.SQLiteStore

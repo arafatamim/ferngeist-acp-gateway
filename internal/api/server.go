@@ -29,11 +29,11 @@ import (
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/discovery"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/logging"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/pairing"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/push"
 	acpregistry "github.com/arafatamim/ferngeist-acp-gateway/internal/registry"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/remote"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/runtime"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/session"
-	"github.com/arafatamim/ferngeist-acp-gateway/internal/storage"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/workspace"
 )
 
@@ -51,14 +51,14 @@ type Server struct {
 	adminMux    *http.ServeMux // admin routes, before the local-request guard
 	logger      *slog.Logger
 	cfg         config.Config
-	build       BuildInfo        // version/commit info baked at compile time
+	build       config.BuildInfo // version/commit info baked at compile time
 	startedAt   time.Time        // used for uptime calculation
 	now         func() time.Time // injectable clock for testability
 
 	catalog    *catalog.Service
 	runtime    *runtime.Supervisor
 	sessionSvc *session.RuntimeSession
-	store      *storage.SQLiteStore
+	pushSvc    *push.Dispatcher
 	pairing    *pairing.Service
 	discovery  *discovery.Service
 	logs       *logging.Service
@@ -69,8 +69,7 @@ type Server struct {
 	customagentsSvc *customagents.Service
 
 	// workspaceSvc owns the worktree and workspace git/filesystem operations.
-	// Its store and clock accessors read the Server fields live, so test
-	// servers that rebind store or now after NewServer keep working.
+	// It is composed by the daemon with persistence, clock and active chats.
 	workspaceSvc *workspace.Service
 
 	// remoteSetup, when set, returns the daemon's live remote-access
@@ -129,18 +128,6 @@ const (
 	proofHeaderSignature = "X-Ferngeist-Proof-Signature" // ECDSA signature over the proof message
 )
 
-// BuildInfo is injected from the build so status and diagnostics can describe
-// the exact gateway binary that produced a failure report.
-type BuildInfo struct {
-	Version   string `json:"version"`
-	Commit    string `json:"commit,omitempty"`
-	BuiltAt   string `json:"builtAt,omitempty"`
-	GoVersion string `json:"goVersion,omitempty"`
-	// UpdateChannel is the install channel baked in at build time ("", "self",
-	// "apt", "pacman", "brew"). Not exposed over the API.
-	UpdateChannel string `json:"-"`
-}
-
 // errorResponse is the standard JSON error envelope returned on API errors.
 type errorResponse struct {
 	Error string `json:"error"`
@@ -159,7 +146,7 @@ func (s *Server) customAgents() *customagents.Service {
 type statusResponse struct {
 	Name              string             `json:"name"`
 	Version           string             `json:"version"`
-	Build             BuildInfo          `json:"build"`
+	Build             config.BuildInfo   `json:"build"`
 	ProtocolVersion   string             `json:"protocolVersion"`
 	StartedAt         time.Time          `json:"startedAt"`
 	ServerTime        time.Time          `json:"serverTime"` // lets clients offset proof timestamps by their clock skew
@@ -211,17 +198,19 @@ type registryStatusProvider interface {
 
 // Deps is the set of configuration and subsystems NewServer wires together.
 type Deps struct {
-	Config    config.Config
-	Build     BuildInfo
-	Logger    *slog.Logger
-	Catalog   *catalog.Service
-	Runtime   *runtime.Supervisor
-	Pairing   *pairing.Service
-	Discovery *discovery.Service
-	Logs      *logging.Service
-	Registry  registryStatusProvider
-	Store     *storage.SQLiteStore
-	Session   *session.RuntimeSession
+	Config       config.Config
+	Build        config.BuildInfo
+	Logger       *slog.Logger
+	Catalog      *catalog.Service
+	Runtime      *runtime.Supervisor
+	Pairing      *pairing.Service
+	Discovery    *discovery.Service
+	Logs         *logging.Service
+	Registry     registryStatusProvider
+	CustomAgents *customagents.Service
+	Workspace    *workspace.Service
+	Session      *session.RuntimeSession
+	Push         *push.Dispatcher
 }
 
 // NewServer wires the gateway's control plane and ACP bridge into one HTTP
@@ -230,84 +219,27 @@ type Deps struct {
 func NewServer(deps Deps) *Server {
 	cfg := normalizeSecurityConfig(deps.Config)
 	server := &Server{
-		logger:      deps.Logger.With("component", "api"),
-		cfg:         cfg,
-		build:       normalizeBuildInfo(deps.Build),
-		startedAt:   time.Now().UTC(),
-		now:         func() time.Time { return time.Now().UTC() },
-		catalog:     deps.Catalog,
-		runtime:     deps.Runtime,
-		pairing:     deps.Pairing,
-		discovery:   deps.Discovery,
-		logs:        deps.Logs,
-		registry:    deps.Registry,
-		rateLimiter: newPairingRateLimiter(cfg),
-		attempts:    newPairingAttemptTracker(cfg),
-		proofNonces: newProofNonceTracker(),
-		store:       deps.Store,
-		sessionSvc:  deps.Session,
+		logger:          deps.Logger.With("component", "api"),
+		cfg:             cfg,
+		build:           normalizeBuildInfo(deps.Build),
+		startedAt:       time.Now().UTC(),
+		now:             func() time.Time { return time.Now().UTC() },
+		catalog:         deps.Catalog,
+		runtime:         deps.Runtime,
+		pairing:         deps.Pairing,
+		discovery:       deps.Discovery,
+		logs:            deps.Logs,
+		registry:        deps.Registry,
+		rateLimiter:     newPairingRateLimiter(cfg),
+		attempts:        newPairingAttemptTracker(cfg),
+		proofNonces:     newProofNonceTracker(),
+		customagentsSvc: deps.CustomAgents,
+		workspaceSvc:    deps.Workspace,
+		sessionSvc:      deps.Session,
+		pushSvc:         deps.Push,
 	}
-	server.customagentsSvc = customagents.New(deps.Store, deps.Catalog, deps.Runtime.List, server.logger)
-	server.workspaceSvc = workspace.New(
-		func() *storage.SQLiteStore { return server.store },
-		server.logger,
-		func() time.Time { return server.now() },
-		func(match func(cwd string) bool) []string {
-			if server.sessionSvc == nil {
-				return nil
-			}
-			return server.sessionSvc.ChatsUsing(match)
-		},
-	)
 
-	mux := http.NewServeMux()
-	adminMux := http.NewServeMux()
-	mux.HandleFunc("/healthz", server.handleHealth)
-	mux.HandleFunc("/v1/status", server.handleStatus)
-	mux.HandleFunc("/v1/agents", server.handleAgents)
-	mux.HandleFunc("GET /v1/diagnostics/summary", server.handleDiagnosticsSummary)
-	mux.HandleFunc("GET /v1/diagnostics/export", server.handleDiagnosticsExport)
-	mux.HandleFunc("POST /v1/auth/refresh", server.handleAuthRefresh)
-	mux.HandleFunc("/v1/pair/start", server.handlePairStart)
-	mux.HandleFunc("/v1/pair/complete", server.handlePairComplete)
-	mux.HandleFunc("GET /v1/pair/status/{challengeId}", server.handlePairStatus)
-	mux.HandleFunc("/v1/runtimes", server.handleRuntimes)
-	mux.HandleFunc("GET /v1/runtimes/{runtimeId}/logs", server.handleRuntimeLogs)
-	mux.HandleFunc("POST /v1/agents/custom", server.requireScope(pairing.ScopeControl, server.handleCustomAgentCreate))
-	mux.HandleFunc("PUT /v1/agents/custom/{id}", server.requireScope(pairing.ScopeControl, server.handleCustomAgentUpdate))
-	mux.HandleFunc("DELETE /v1/agents/custom/{id}", server.requireScope(pairing.ScopeControl, server.handleCustomAgentDelete))
-	mux.HandleFunc("POST /v1/agents/{agentId}/connect", server.handleAgentConnect)
-	mux.HandleFunc("POST /v1/agents/{agentId}/stop", server.handleAgentStop)
-	mux.HandleFunc("POST /v1/runtimes/{runtimeId}/restart", server.handleRuntimeRestart)
-	mux.HandleFunc("GET /v1/runtimes/{runtimeId}/files", server.handleWorkspaceFile)
-	mux.HandleFunc("GET /v1/runtimes/{runtimeId}/files/list", server.handleWorkspaceFileList)
-	mux.HandleFunc("GET /v1/runtimes/{runtimeId}/git/refs", server.handleWorkspaceGitRefs)
-	mux.HandleFunc("GET /v1/runtimes/{runtimeId}/git/status", server.handleWorkspaceGitStatus)
-	mux.HandleFunc("GET /v1/runtimes/{runtimeId}/git/diff", server.handleWorkspaceGitDiff)
-	mux.HandleFunc("GET /v1/runtimes/{runtimeId}/git/log", server.handleWorkspaceGitLog)
-	mux.HandleFunc("GET /v1/runtimes/{runtimeId}/git/commits/{sha}", server.handleWorkspaceGitCommit)
-	mux.HandleFunc("POST /v1/worktrees", server.handleWorktreeCreate)
-	mux.HandleFunc("GET /v1/worktrees", server.handleWorktreeList)
-	mux.HandleFunc("GET /v1/worktrees/refs", server.handleWorktreeRefs)
-	mux.HandleFunc("GET /v1/worktrees/{worktreeId}", server.handleWorktreeGet)
-	mux.HandleFunc("DELETE /v1/worktrees/{worktreeId}", server.handleWorktreeDelete)
-	mux.HandleFunc("POST /v1/worktrees/{worktreeId}/rebase", server.handleWorktreeRebase)
-	mux.HandleFunc("POST /v1/worktrees/{worktreeId}/merge", server.handleWorktreeMerge)
-	mux.HandleFunc("POST /v1/worktrees/{worktreeId}/push", server.handleWorktreePush)
-	mux.HandleFunc("POST /v1/paths/missing", server.handlePathsMissing)
-	server.registerSessionRoutes(mux)
-	mux.HandleFunc("POST /v1/devices/push-token", server.handleRegisterPushToken)
-	mux.HandleFunc("GET /v1/devices/push-config", server.handlePushConfig)
-	adminMux.HandleFunc("GET /admin/v1/status", server.handleAdminStatus)
-	adminMux.HandleFunc("POST /admin/v1/pairings/start", server.handleAdminPairingStart)
-	adminMux.HandleFunc("GET /admin/v1/pairings/{challengeId}", server.handleAdminPairingStatus)
-	adminMux.HandleFunc("DELETE /admin/v1/pairings/{challengeId}", server.handleAdminPairingCancel)
-	adminMux.HandleFunc("GET /admin/v1/devices", server.handleAdminDevices)
-	adminMux.HandleFunc("DELETE /admin/v1/devices/{deviceId}", server.handleAdminDeviceRevoke)
-	adminMux.HandleFunc("GET /admin/v1/agents", server.handleAdminCustomAgentList)
-	adminMux.HandleFunc("POST /admin/v1/agents/custom", server.handleCustomAgentCreate)
-	adminMux.HandleFunc("PUT /admin/v1/agents/custom/{id}", server.handleCustomAgentUpdate)
-	adminMux.HandleFunc("DELETE /admin/v1/agents/custom/{id}", server.handleCustomAgentDelete)
+	mux, adminMux := server.routes()
 
 	adminAddr := strings.TrimSpace(cfg.AdminListenAddr)
 	if adminAddr == "" {
@@ -333,6 +265,59 @@ func NewServer(deps Deps) *Server {
 	}
 
 	return server
+}
+
+func (s *Server) routes() (*http.ServeMux, *http.ServeMux) {
+	mux := http.NewServeMux()
+	adminMux := http.NewServeMux()
+	mux.HandleFunc("/healthz", s.handleHealth)
+	mux.HandleFunc("/v1/status", s.handleStatus)
+	mux.HandleFunc("/v1/agents", s.handleAgents)
+	mux.HandleFunc("GET /v1/diagnostics/summary", s.handleDiagnosticsSummary)
+	mux.HandleFunc("GET /v1/diagnostics/export", s.handleDiagnosticsExport)
+	mux.HandleFunc("POST /v1/auth/refresh", s.handleAuthRefresh)
+	mux.HandleFunc("/v1/pair/start", s.handlePairStart)
+	mux.HandleFunc("/v1/pair/complete", s.handlePairComplete)
+	mux.HandleFunc("GET /v1/pair/status/{challengeId}", s.handlePairStatus)
+	mux.HandleFunc("/v1/runtimes", s.handleRuntimes)
+	mux.HandleFunc("GET /v1/runtimes/{runtimeId}/logs", s.handleRuntimeLogs)
+	mux.HandleFunc("POST /v1/agents/custom", s.requireScope(pairing.ScopeControl, s.handleCustomAgentCreate))
+	mux.HandleFunc("PUT /v1/agents/custom/{id}", s.requireScope(pairing.ScopeControl, s.handleCustomAgentUpdate))
+	mux.HandleFunc("DELETE /v1/agents/custom/{id}", s.requireScope(pairing.ScopeControl, s.handleCustomAgentDelete))
+	mux.HandleFunc("POST /v1/agents/{agentId}/connect", s.handleAgentConnect)
+	mux.HandleFunc("POST /v1/agents/{agentId}/stop", s.handleAgentStop)
+	mux.HandleFunc("POST /v1/runtimes/{runtimeId}/restart", s.handleRuntimeRestart)
+	mux.HandleFunc("GET /v1/runtimes/{runtimeId}/files", s.handleWorkspaceFile)
+	mux.HandleFunc("GET /v1/runtimes/{runtimeId}/files/list", s.handleWorkspaceFileList)
+	mux.HandleFunc("GET /v1/runtimes/{runtimeId}/git/refs", s.handleWorkspaceGitRefs)
+	mux.HandleFunc("GET /v1/runtimes/{runtimeId}/git/status", s.handleWorkspaceGitStatus)
+	mux.HandleFunc("GET /v1/runtimes/{runtimeId}/git/diff", s.handleWorkspaceGitDiff)
+	mux.HandleFunc("GET /v1/runtimes/{runtimeId}/git/log", s.handleWorkspaceGitLog)
+	mux.HandleFunc("GET /v1/runtimes/{runtimeId}/git/commits/{sha}", s.handleWorkspaceGitCommit)
+	mux.HandleFunc("POST /v1/worktrees", s.handleWorktreeCreate)
+	mux.HandleFunc("GET /v1/worktrees", s.handleWorktreeList)
+	mux.HandleFunc("GET /v1/worktrees/refs", s.handleWorktreeRefs)
+	mux.HandleFunc("GET /v1/worktrees/{worktreeId}", s.handleWorktreeGet)
+	mux.HandleFunc("DELETE /v1/worktrees/{worktreeId}", s.handleWorktreeDelete)
+	mux.HandleFunc("POST /v1/worktrees/{worktreeId}/rebase", s.handleWorktreeRebase)
+	mux.HandleFunc("POST /v1/worktrees/{worktreeId}/merge", s.handleWorktreeMerge)
+	mux.HandleFunc("POST /v1/worktrees/{worktreeId}/push", s.handleWorktreePush)
+	mux.HandleFunc("POST /v1/paths/missing", s.handlePathsMissing)
+	s.registerSessionRoutes(mux)
+	mux.HandleFunc("POST /v1/devices/push-token", s.handleRegisterPushToken)
+	mux.HandleFunc("GET /v1/devices/push-config", s.handlePushConfig)
+	adminMux.HandleFunc("GET /admin/v1/status", s.handleAdminStatus)
+	adminMux.HandleFunc("POST /admin/v1/pairings/start", s.handleAdminPairingStart)
+	adminMux.HandleFunc("GET /admin/v1/pairings/{challengeId}", s.handleAdminPairingStatus)
+	adminMux.HandleFunc("DELETE /admin/v1/pairings/{challengeId}", s.handleAdminPairingCancel)
+	adminMux.HandleFunc("GET /admin/v1/devices", s.handleAdminDevices)
+	adminMux.HandleFunc("DELETE /admin/v1/devices/{deviceId}", s.handleAdminDeviceRevoke)
+	adminMux.HandleFunc("GET /admin/v1/agents", s.handleAdminCustomAgentList)
+	adminMux.HandleFunc("POST /admin/v1/agents/custom", s.handleCustomAgentCreate)
+	adminMux.HandleFunc("PUT /admin/v1/agents/custom/{id}", s.handleCustomAgentUpdate)
+	adminMux.HandleFunc("DELETE /admin/v1/agents/custom/{id}", s.handleCustomAgentDelete)
+
+	return mux, adminMux
 }
 
 // normalizeSecurityConfig applies safe security defaults based on whether the
@@ -737,7 +722,7 @@ func isPrivateHostname(host string) bool {
 	return false
 }
 
-func normalizeBuildInfo(build BuildInfo) BuildInfo {
+func normalizeBuildInfo(build config.BuildInfo) config.BuildInfo {
 	if strings.TrimSpace(build.Version) == "" {
 		build.Version = "dev"
 	}

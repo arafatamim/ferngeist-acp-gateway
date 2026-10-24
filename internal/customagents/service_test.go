@@ -93,3 +93,13 @@ func TestCreateThenListServesCustomAgent(t *testing.T) {
 		t.Fatalf("listed.Detected = true for a missing binary")
 	}
 }
+
+// Missing records must be translated before they reach a transport.
+func TestUpdateMissingAgentReturnsServiceError(t *testing.T) {
+	svc := newTestService(t)
+	_, err := svc.Update(context.Background(), "custom-missing", Update{})
+	var opErr Error
+	if !errors.As(err, &opErr) || opErr.StatusCode() != http.StatusNotFound {
+		t.Fatalf("update missing agent = %v, want 404 service Error", err)
+	}
+}

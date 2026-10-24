@@ -254,7 +254,7 @@ func TestRun_shuts_down_on_context_cancellation(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- Run(ctx, api.BuildInfo{Version: "test"})
+		errCh <- Run(ctx, config.BuildInfo{Version: "test"})
 	}()
 
 	time.Sleep(100 * time.Millisecond)
@@ -287,7 +287,7 @@ func TestRun_shuts_down_cleanly_with_lan_enabled(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- Run(ctx, api.BuildInfo{Version: "test"})
+		errCh <- Run(ctx, config.BuildInfo{Version: "test"})
 	}()
 
 	time.Sleep(200 * time.Millisecond)
@@ -317,7 +317,7 @@ func TestRun_returns_error_when_server_listen_fails(t *testing.T) {
 	t.Setenv("FERNGEIST_GATEWAY_UPDATE_CHECK_ENABLED", "0")
 
 	ctx := context.Background()
-	err := Run(ctx, api.BuildInfo{Version: "test"})
+	err := Run(ctx, config.BuildInfo{Version: "test"})
 	if err == nil {
 		t.Fatal("expected error from Run when listen fails")
 	}
@@ -343,7 +343,7 @@ func TestRun_returns_error_when_state_db_unavailable(t *testing.T) {
 	t.Setenv("FERNGEIST_GATEWAY_UPDATE_CHECK_ENABLED", "0")
 
 	ctx := context.Background()
-	err := Run(ctx, api.BuildInfo{Version: "test"})
+	err := Run(ctx, config.BuildInfo{Version: "test"})
 	if err == nil {
 		t.Fatal("expected error from Run when state DB is a directory")
 	}
@@ -382,7 +382,7 @@ func TestRun_surfaces_pending_tailscale_auth_in_status(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- Run(ctx, api.BuildInfo{Version: "test"})
+		errCh <- Run(ctx, config.BuildInfo{Version: "test"})
 	}()
 
 	// Poll the admin API status until auth-required surfaces.
@@ -454,7 +454,7 @@ func TestRun_retries_remote_provisioning_until_success(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- Run(ctx, api.BuildInfo{Version: "test"})
+		errCh <- Run(ctx, config.BuildInfo{Version: "test"})
 	}()
 
 	select {
@@ -514,7 +514,7 @@ func TestRun_provisions_remote_access_and_closes(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- Run(ctx, api.BuildInfo{Version: "test"})
+		errCh <- Run(ctx, config.BuildInfo{Version: "test"})
 	}()
 
 	select {

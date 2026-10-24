@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/adminclient"
-	"github.com/arafatamim/ferngeist-acp-gateway/internal/api"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/config"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/daemon"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/service"
@@ -360,7 +359,7 @@ func runDaemon(enableLAN bool, listenAddr string, publicBaseURL string, remote b
 	defer stop()
 	ctx, replaced := watchBinary(ctx, daemonBinaryPath(), 10*time.Second)
 
-	err := daemon.Run(ctx, api.BuildInfo{
+	err := daemon.Run(ctx, config.BuildInfo{
 		Version:       buildVersion,
 		Commit:        buildCommit,
 		BuiltAt:       buildTime,

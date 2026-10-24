@@ -8,7 +8,6 @@ import (
 
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/catalog"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/customagents"
-	"github.com/arafatamim/ferngeist-acp-gateway/internal/storage"
 )
 
 // The custom-agent write policy (and its bounds) lives in customagents; the API
@@ -105,8 +104,6 @@ func writeCustomAgentError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.As(err, &serviceError):
 		writeError(w, serviceError.StatusCode(), serviceError.Error())
-	case errors.Is(err, storage.ErrNotFound):
-		writeError(w, http.StatusNotFound, "unknown custom agent")
 	case errors.Is(err, catalog.ErrAgentNotFound):
 		writeError(w, http.StatusNotFound, err.Error())
 	default:

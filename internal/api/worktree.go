@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/pairing"
-	"github.com/arafatamim/ferngeist-acp-gateway/internal/storage"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/workspace"
 )
 
@@ -44,12 +43,8 @@ type worktreeCreateRequest struct {
 	Branch string `json:"branch"`
 }
 
-func toWorktreeResponse(r storage.WorktreeRecord) worktreeResponse {
-	return worktreeResponse{ID: r.ID, Repo: r.Repo, Path: r.Path, Branch: r.Branch, BaseCommit: r.BaseCommit, CreatedAt: r.CreatedAt}
-}
-
 func toWorktreeStatusResponse(status workspace.WorktreeStatus) worktreeResponse {
-	resp := toWorktreeResponse(status.WorktreeRecord)
+	resp := worktreeResponse{ID: status.ID, Repo: status.Repo, Path: status.Path, Branch: status.Branch, BaseCommit: status.BaseCommit, CreatedAt: status.CreatedAt}
 	resp.Ahead = status.Ahead
 	resp.Behind = status.Behind
 	resp.Dirty = status.Dirty
@@ -80,7 +75,7 @@ func (s *Server) handleWorktreeCreate(w http.ResponseWriter, r *http.Request) {
 		writeWorkspaceError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, toWorktreeResponse(rec))
+	writeJSON(w, http.StatusOK, worktreeResponse{ID: rec.ID, Repo: rec.Repo, Path: rec.Path, Branch: rec.Branch, BaseCommit: rec.BaseCommit, CreatedAt: rec.CreatedAt})
 }
 
 // GET /v1/worktrees?repo=<absolute path, optional>

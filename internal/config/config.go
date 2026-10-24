@@ -31,6 +31,18 @@ const (
 	defaultUpdateCheckInterval    = 24 * time.Hour
 )
 
+// BuildInfo is injected from the build so status and diagnostics can describe
+// the exact gateway binary that produced a failure report.
+type BuildInfo struct {
+	Version   string `json:"version"`
+	Commit    string `json:"commit,omitempty"`
+	BuiltAt   string `json:"builtAt,omitempty"`
+	GoVersion string `json:"goVersion,omitempty"`
+	// UpdateChannel is the install channel baked in at build time ("", "self",
+	// "apt", "pacman", "brew"). Not exposed over the API.
+	UpdateChannel string `json:"-"`
+}
+
 // Config is the daemon's effective runtime configuration after environment
 // variables and persisted settings have been merged.
 type Config struct {
