@@ -906,34 +906,8 @@ func TestCreateCleansUpAfterAKilledWorktreeAdd(t *testing.T) {
 	}
 }
 
-// adoptCase is one row of the adoption table: the worktree the setup carves
-// out of the repo, where the request points, and what must come back.
-type adoptCase struct {
-	name string
-	// wtArgs is what the setup appends to `git worktree add` (after that,
-	// before the path and "main"): "-b feat/…" branches the checkout,
-	// "--detach" makes a detached one; nil carves out no worktree.
-	wtArgs  []string
-	wtFiles []edit // files written into the fresh worktree, uncommitted
-	// repo, path select where the request points, resolved by the runner:
-	// "repo", "worktree", "plain", "missing", "relative".
-	repo, path string
-	reqBranch  string
-	// wantStatus 0 expects the adoption to succeed; anything else expects
-	// that refusal and the worktree left untouched.
-	wantStatus int
-	branch     string // the adopted record's branch
-	repoIsMain bool   // the adopted record must name the main checkout as repo
-	keep       []edit // files a refusal must leave with their content
-	// after checks side state a refusal must leave; it keeps the scenarios
-	// whose extra assertions rode the hand-rolled tests.
-	after func(t *testing.T, svc *Service, ctx context.Context, repo, wt string)
-}
-
-// TestAdoptInputValidation covers every adoption refusal and the success
-// shapes its refusal tests carried. The table carries each scenario's
-// state, request and expected outcome; the runner checks the aftermath.
-
+// Adoption no longer needs a separate validation table: worktrees made outside
+// the gateway are discovered and operated on directly, without adoption.
 func TestCreateFromRemoteBranchAndPR(t *testing.T) {
 	repo, c1 := initMainRepo(t)
 	addBareOrigin(t, repo)

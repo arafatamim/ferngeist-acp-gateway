@@ -828,16 +828,6 @@ func fallbackScopes(scopes []string, fallback []string) []string {
 
 const credentialHashPrefix = "sha256:"
 
-func credentialMatchesToken(credential Credential, token string) bool {
-	if token == "" {
-		return false
-	}
-	if credential.TokenHash != "" {
-		return credential.TokenHash == hashCredentialToken(token)
-	}
-	return credential.Token == token
-}
-
 func hashCredentialToken(token string) string {
 	digest := sha256.Sum256([]byte(token))
 	return credentialHashPrefix + base64.RawURLEncoding.EncodeToString(digest[:])

@@ -77,10 +77,7 @@ func (p *WebPushProvider) Send(ctx context.Context, token string, n Notification
 		// Not a subscription we can ever deliver to; evict rather than retry.
 		return ErrTokenUnregistered
 	}
-	payload, err := json.Marshal(Payload{
-		Title: n.Title, Body: n.Body, Category: n.Category,
-		ServerID: n.ServerID, SessionID: n.SessionID, Cwd: n.Cwd, Branch: n.Branch,
-	})
+	payload, err := json.Marshal(Payload(n))
 	if err != nil {
 		return fmt.Errorf("marshal web push payload: %w", err)
 	}

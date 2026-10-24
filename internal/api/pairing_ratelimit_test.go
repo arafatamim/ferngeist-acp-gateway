@@ -62,8 +62,10 @@ func TestStaleCompleteBucketsAreSwept(t *testing.T) {
 func TestEvictedBucketComesBackFull(t *testing.T) {
 	l := newPairingRateLimiter(testRateLimiterConfig())
 	t0 := time.Now().UTC()
-	if !l.allow("10.0.0.1", true, t0) || !l.allow("10.0.0.1", true, t0) {
-		t.Fatal("burst of 2 should be allowed")
+	for i := 0; i < 2; i++ {
+		if !l.allow("10.0.0.1", true, t0) {
+			t.Fatalf("burst request %d should be allowed", i+1)
+		}
 	}
 	if l.allow("10.0.0.1", true, t0) {
 		t.Fatal("third immediate request should be rate-limited")

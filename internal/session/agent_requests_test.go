@@ -31,7 +31,11 @@ func wsPair(t *testing.T) (server, client *websocket.Conn) {
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
-	t.Cleanup(func() { client.CloseNow() })
+	t.Cleanup(func() {
+		if err := client.CloseNow(); err != nil {
+			t.Errorf("close client websocket: %v", err)
+		}
+	})
 	return <-serverCh, client
 }
 
