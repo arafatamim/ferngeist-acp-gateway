@@ -35,6 +35,7 @@ components:
   acquire: { in: internal/acquire }
   runtime: { in: internal/runtime }
   session: { in: internal/session }
+  projects: { in: internal/projects }
   customagents: { in: internal/customagents }
   pairing: { in: internal/pairing }
   workspace: { in: internal/workspace }
@@ -69,6 +70,7 @@ deps:
       - acquire
       - runtime
       - session
+      - projects
       - customagents
       - pairing
       - workspace
@@ -107,5 +109,7 @@ deps:
     mayDependOn: &onRuntime [runtime, acquire, catalog, push, storage, registry, discovery, service]
   customagents:
     mayDependOn: *onRuntime
+  projects:
+    mayDependOn: [runtime, workspace, acquire, catalog, push, storage, registry, discovery, service]
 
   # infra and cmd-mock-agent have no entry: no project imports beyond config/logging.

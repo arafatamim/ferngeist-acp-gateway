@@ -58,9 +58,30 @@ not be coupled. Full release notes live in GitHub Releases.
   also returns an empty array when no files differ. No protocol version bump:
   this restores the documented array contract.
   (2026-10-25)
+- `[additive]` An `ok` projects agent line carries the agent's
+  `sessionCapabilities` verbatim from its initialize answer. (2026-10-24)
+- `[additive]` `GET /v1/projects` accepts optional `repos`, a URL-encoded JSON
+  array of up to 256 absolute snapshot repo paths, to confirm missing folders
+  after a daemon restart even when the agent cannot list. (2026-10-24)
+- `[additive]` A projects agent line may carry `launchAvailable: false` only
+  when the agent or its executable is confirmed unavailable. Omitted means
+  unknown; listing, authentication and transient errors do not disable launch.
+  (2026-10-24)
+- `[additive]` The final projects `checkouts` line may carry `missingRepos`, a
+  list of previously observed repo paths confirmed absent, for pruning retained
+  client snapshots when an agent cannot list. Omission means `[]`. (2026-10-24)
 - `[additive]` Each `GET /v1/sessions` entry carries `acpSessionIds`: the ACP
   sessions its runtime has opened, loaded or resumed (`[]` when none or when the
   runtime is gone), so a client can find the live gateway session behind a chat.
+  (2026-10-24)
+- `[additive]` `GET /v1/projects?agents=<id,id,…>` lists the ACP chats
+  (`session/list`) of the named agents, grouped by the git repo and linked
+  worktree of each chat's `cwd`, streamed as `application/x-ndjson` with one
+  line per agent as it finishes, then a `checkouts` line with each repo's branch
+  and linked worktrees. Repos are resolved per listing and folder existence is
+  checked even for cached agent answers: confirmed-missing `cwd`/repo folders
+  are omitted from chats and checkouts, while permission errors and canceled
+  requests never imply deletion. A `404` means the gateway predates it.
   (2026-10-24)
 - `[semantic]` `POST /v1/agents/{agentId}/stop` stops the agent only for the
   calling device: it closes the sessions that device holds for the agent and

@@ -29,6 +29,7 @@ import (
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/discovery"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/logging"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/pairing"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/projects"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/push"
 	acpregistry "github.com/arafatamim/ferngeist-acp-gateway/internal/registry"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/remote"
@@ -58,6 +59,7 @@ type Server struct {
 	catalog    *catalog.Service
 	runtime    *runtime.Supervisor
 	sessionSvc *session.RuntimeSession
+	projects   *projects.Lister
 	pushSvc    *push.Dispatcher
 	pairing    *pairing.Service
 	discovery  *discovery.Service
@@ -210,6 +212,7 @@ type Deps struct {
 	CustomAgents *customagents.Service
 	Workspace    *workspace.Service
 	Session      *session.RuntimeSession
+	Projects     *projects.Lister
 	Push         *push.Dispatcher
 }
 
@@ -236,6 +239,7 @@ func NewServer(deps Deps) *Server {
 		customagentsSvc: deps.CustomAgents,
 		workspaceSvc:    deps.Workspace,
 		sessionSvc:      deps.Session,
+		projects:        deps.Projects,
 		pushSvc:         deps.Push,
 	}
 
@@ -304,6 +308,7 @@ func (s *Server) routes() (*http.ServeMux, *http.ServeMux) {
 	mux.HandleFunc("POST /v1/worktrees/{worktreeId}/push", s.handleWorktreePush)
 	mux.HandleFunc("POST /v1/paths/missing", s.handlePathsMissing)
 	s.registerSessionRoutes(mux)
+	mux.HandleFunc("GET /v1/projects", s.handleProjects)
 	mux.HandleFunc("POST /v1/devices/push-token", s.handleRegisterPushToken)
 	mux.HandleFunc("GET /v1/devices/push-config", s.handlePushConfig)
 	adminMux.HandleFunc("GET /admin/v1/status", s.handleAdminStatus)
@@ -376,9 +381,14 @@ func (s *Server) ListenAndServe() error {
 	return firstErr
 }
 
-// Shutdown stops both HTTP servers.
+// Shutdown stops both HTTP servers, then the project lister's warm agents.
 func (s *Server) Shutdown(ctx context.Context) error {
-	return errors.Join(s.httpServer.Shutdown(ctx), s.adminServer.Shutdown(ctx))
+	err := errors.Join(s.httpServer.Shutdown(ctx), s.adminServer.Shutdown(ctx))
+	// After the drain, so no listing parks a process once its pool is stopped.
+	if s.projects != nil {
+		s.projects.Close()
+	}
+	return err
 }
 
 // Handler returns the public API handler.

@@ -17,6 +17,7 @@ import (
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/discovery"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/logging"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/pairing"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/projects"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/push"
 	acpregistry "github.com/arafatamim/ferngeist-acp-gateway/internal/registry"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/remote"
@@ -359,6 +360,7 @@ func composeServer(deps api.Deps, store *storage.SQLiteStore) (*api.Server, *ses
 	deps.CustomAgents = customagents.New(store, deps.Catalog, deps.Runtime.List, logger)
 	deps.Workspace = workspace.New(func() *storage.SQLiteStore { return store }, logger,
 		func() time.Time { return time.Now().UTC() }, sessionSvc.ChatsUsing)
+	deps.Projects = projects.New(deps.Catalog, deps.Runtime, deps.Workspace)
 	return api.NewServer(deps), sessionSvc
 }
 

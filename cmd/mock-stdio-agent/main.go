@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -117,12 +118,7 @@ func dispatch(w *bufio.Writer, req rpcRequest, logger *slog.Logger) {
 					"http": false,
 					"sse":  false,
 				},
-				"sessionCapabilities": map[string]any{
-					"list":   map[string]any{},
-					"resume": map[string]any{},
-					"fork":   map[string]any{},
-					"close":  map[string]any{}, // advertises session/close support for gateway integration tests
-				},
+				"sessionCapabilities": sessionCapabilities(),
 			},
 			"agentInfo":   agentInfo,
 			"authMethods": []any{},
@@ -144,22 +140,7 @@ func dispatch(w *bufio.Writer, req rpcRequest, logger *slog.Logger) {
 	case "session/cancel":
 		writeResult(w, req, nil)
 	case "session/list":
-		writeResult(w, req, map[string]any{
-			"sessions": []any{
-				map[string]any{
-					"sessionId": "mock_sess_1",
-					"cwd":       "/home/user/project",
-					"title":     "Mock session for review",
-					"updatedAt": "2025-12-01T12:00:00Z",
-				},
-				map[string]any{
-					"sessionId": bulkSessionID,
-					"cwd":       "/home/user/bulk",
-					"title":     "Synthetic bulk transcript (perf test)",
-					"updatedAt": "2025-12-01T12:00:00Z",
-				},
-			},
-		})
+		handleList(w, req)
 	case "session/load":
 		var params struct {
 			SessionID string `json:"sessionId"`
@@ -340,6 +321,65 @@ func callLLM(prompt []struct {
 		return ""
 	}
 	return strings.TrimSpace(completion.Choices[0].Message.Content)
+}
+
+// sessionCapabilities advertises session/list unless FERNGEIST_MOCK_LIST=none,
+// and session/delete when FERNGEIST_MOCK_DELETE=1.
+func sessionCapabilities() map[string]any {
+	caps := map[string]any{
+		"list":   map[string]any{},
+		"resume": map[string]any{},
+		"fork":   map[string]any{},
+		"close":  map[string]any{}, // advertises session/close support for gateway integration tests
+	}
+	if os.Getenv("FERNGEIST_MOCK_LIST") == "none" {
+		delete(caps, "list")
+	}
+	if os.Getenv("FERNGEIST_MOCK_DELETE") == "1" {
+		caps["delete"] = map[string]any{}
+	}
+	return caps
+}
+
+// handleList answers session/list. FERNGEIST_MOCK_LIST=auth answers with the
+// ACP auth-required error, and =paged splits the sessions over two pages.
+func handleList(w *bufio.Writer, req rpcRequest) {
+	mode := os.Getenv("FERNGEIST_MOCK_LIST")
+	if mode == "auth" {
+		writeError(w, req, -32000, "Authentication required")
+		return
+	}
+	listRoot := os.Getenv("FERNGEIST_MOCK_LIST_ROOT")
+	if listRoot == "" {
+		listRoot = "/home/user"
+	}
+	sessions := []any{
+		map[string]any{
+			"sessionId": "mock_sess_1",
+			"cwd":       filepath.Join(listRoot, "project"),
+			"title":     "Mock session for review",
+			"updatedAt": "2025-12-01T12:00:00Z",
+		},
+		map[string]any{
+			"sessionId": bulkSessionID,
+			"cwd":       filepath.Join(listRoot, "bulk"),
+			"title":     "Synthetic bulk transcript (perf test)",
+			"updatedAt": "2025-12-01T12:00:00Z",
+		},
+	}
+	if mode != "paged" {
+		writeResult(w, req, map[string]any{"sessions": sessions})
+		return
+	}
+	var params struct {
+		Cursor *string `json:"cursor"`
+	}
+	_ = json.Unmarshal(req.Params, &params) // a malformed request lists from the start
+	if params.Cursor == nil {
+		writeResult(w, req, map[string]any{"sessions": sessions[:1], "nextCursor": "2"})
+		return
+	}
+	writeResult(w, req, map[string]any{"sessions": sessions[1:]})
 }
 
 func writeResult(w *bufio.Writer, req rpcRequest, result any) {

@@ -908,6 +908,68 @@ clean. Worktrees outlive the chats that use them: they are removed only on an ex
     - `401` — invalid or missing device credential
     - `503` — session service not available
 
+### Projects
+
+- `GET /v1/projects?agents=<id,id,…>`
+  - Lists the chats of the named agents (ACP `session/list`) for the
+    project-first home. Only the named agents are listed; repeated IDs are
+    listed once, and more than 64 IDs is a `400`. Optional `repos` is a
+    URL-encoded JSON array of at most 256 absolute snapshot repo paths (not a
+    comma-separated list). Those paths are checked even after a daemon restart
+    or agent failure, so the client can prune retained data. Relative paths,
+    embedded NULs and malformed arrays are `400`.
+  - Authenticated with the device credential (bearer token), like `GET /v1/sessions`.
+  - Each agent is started on the daemon's own environment, outside the
+    device-owned session lifecycle: the process is not a runtime and never
+    counts against `MaxSessionsPerDevice`. The gateway never calls
+    `authenticate`. At most 4 agents are listed at once across all requests,
+    each within 10 s and 5 `session/list` pages. A listed agent's process stays
+    warm for 3 min, each agent's line is cached for 10 s for every device, and
+    concurrent requests share one in-flight listing per agent. Repo resolution is
+    scoped to each listing, including cached agent answers. Chats whose cwd or
+    repo folder is confirmed absent are omitted; filesystem permission errors
+    do not count as absence.
+  - Response: `200`, `application/x-ndjson`, one JSON object per line, each
+    flushed as that agent finishes (fast agents land first), then one
+    `checkouts` line:
+    ```json
+    {"type":"agent","agentId":"claude","status":"ok","error":null,
+     "chats":[{"sessionId":"…","title":"…","cwd":"…","updatedAt":"…",
+               "repo":"/h/t/Dev/Ferngeist","worktree":"/h/t/Dev/Ferngeist/.worktrees/email"}]}
+    {"type":"agent","agentId":"codex","status":"authRequired","error":"Authentication required","chats":[]}
+    {"type":"checkouts","repos":[{"repo":"/h/t/Dev/Ferngeist","branch":"main",
+      "worktrees":[{"id":"wt_1","path":"/h/t/Dev/Ferngeist/.worktrees/email","branch":"email","ahead":2,"dirty":true}]}]}
+    ```
+  - `status`: `ok`; `unsupported` (the agent does not advertise
+    `sessionCapabilities.list`); `authRequired` (the agent answered `-32000`);
+    `failed` (unknown agent, launch failure, timeout or crash). `error` is
+    `null` only for `ok`. Optional `launchAvailable: false` confirms that the
+    agent is absent from the catalog or its executable is unavailable without
+    automatic installation. Its absence means unknown, not unavailable; generic
+    failure, authentication and unsupported listing must not disable chatting.
+    `ok` lines also carry `sessionCapabilities`, the agent's own initialize
+    answer passed through verbatim (unstable entries such as `delete`
+    included), so clients can gate session actions without connecting first.
+  - `repo` is the checkout owning the git common dir of the `realpath` of
+    `cwd`, or that path itself outside git. `worktree` is the linked
+    worktree's top level, `null` in the main checkout. `title` and
+    `updatedAt` are `null` when the agent omits them.
+  - `checkouts` covers every git repo the chats name plus every repo the
+    gateway knows with linked worktrees. `branch` is `null` on a detached
+    HEAD; worktree `id` is what the `/v1/worktrees/{worktreeId}` routes take,
+    and `ahead`/`dirty` are `null` when git cannot answer. A stream cut before
+    it carries no checkouts. The final line may include `missingRepos: ["/old/repo"]`:
+    repo folders previously observed or supplied in `repos` and now confirmed absent.
+    Clients remove those repos from retained agent snapshots too, including an
+    agent whose latest listing failed. Omitted `missingRepos` means `[]`;
+    omission from `repos` alone never confirms deletion. Permission errors and
+    canceled requests do not produce confirmed removals.
+  - Error responses:
+    - `400` — more than 64 agent IDs, or an invalid/oversized `repos` array
+    - `401` — invalid or missing device credential
+    - `404` — the gateway predates this endpoint
+    - `503` — project listing not available
+
 ### Push notification registration
 
 Pushes are delivered over **Web Push** (RFC 8030), encrypted end to end
