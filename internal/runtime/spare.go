@@ -69,7 +69,7 @@ func (s *Supervisor) claimSpare(agent catalog.Agent) *Process {
 	}
 	go func() {
 		defer s.sparesWG.Done()
-		s.discardSpare(sp.proc)
+		s.Discard(sp.proc)
 	}()
 	return nil
 }
@@ -97,7 +97,7 @@ func (s *Supervisor) refillSpare(agent catalog.Agent) {
 			}
 			s.mu.Unlock()
 			if proc != nil {
-				s.discardSpare(proc)
+				s.Discard(proc)
 			}
 			return
 		}
@@ -112,15 +112,16 @@ func (s *Supervisor) refillSpare(agent catalog.Agent) {
 			s.sparesWG.Add(1)
 			s.mu.Unlock()
 			defer s.sparesWG.Done()
-			s.discardSpare(proc)
+			s.Discard(proc)
 		})
 		s.mu.Unlock()
 	}()
 }
 
-// discardSpare stops a spare that was never claimed and drops its log ring
-// once stderr has drained, so it leaves nothing behind.
-func (s *Supervisor) discardSpare(proc *Process) {
+// Discard stops a process that was never registered (an unclaimed spare, or
+// one from Spawn) and drops its log ring once stderr has drained, so it leaves
+// nothing behind.
+func (s *Supervisor) Discard(proc *Process) {
 	_ = proc.Stop(2 * time.Second)
 	select {
 	case <-proc.logsDone:
@@ -142,7 +143,7 @@ func (s *Supervisor) Close() {
 	for _, sp := range spares {
 		if sp.proc != nil {
 			sp.timer.Stop()
-			s.discardSpare(sp.proc)
+			s.Discard(sp.proc)
 		}
 	}
 	s.sparesWG.Wait()

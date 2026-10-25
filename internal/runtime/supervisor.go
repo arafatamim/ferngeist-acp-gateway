@@ -324,6 +324,17 @@ func (s *Supervisor) Launch(agent catalog.Agent, envOverrides map[string]string)
 	return proc, nil
 }
 
+// Spawn starts a fresh process of agent on the daemon environment that is never
+// tracked as a runtime and never claims or refills a spare, for short-lived
+// callers outside the session lifecycle. The caller stops it with Discard.
+func (s *Supervisor) Spawn(agent catalog.Agent) (*Process, error) {
+	prepared, err := s.prepareAgent(agent)
+	if err != nil {
+		return nil, err
+	}
+	return s.spawn(prepared, nil)
+}
+
 // prepareAgent applies auto-acquisition and validates launch prerequisites,
 // returning the agent ready to launch.
 func (s *Supervisor) prepareAgent(agent catalog.Agent) (catalog.Agent, error) {
