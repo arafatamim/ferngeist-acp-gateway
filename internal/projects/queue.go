@@ -33,6 +33,7 @@ func (l *Lister) agentLine(ctx context.Context, id string) AgentLine {
 	if call == nil {
 		workCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 		call = &listingCall{done: make(chan struct{}), cancel: cancel}
+		l.startMaintenanceLocked()
 		l.pending[id] = call
 		l.listings.Go(func() { l.runListing(workCtx, id, call) })
 	}

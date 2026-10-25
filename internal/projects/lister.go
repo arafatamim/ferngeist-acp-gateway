@@ -81,10 +81,12 @@ type Lister struct {
 	pending   map[string]*listingCall
 	listings  sync.WaitGroup
 
-	mu     sync.Mutex
-	cached map[string]cachedLine
-	warm   map[string]*agentConn
-	closed bool
+	mu                sync.Mutex
+	cached            map[string]cachedLine
+	warm              map[string]*agentConn
+	closed            bool
+	maintenanceCancel context.CancelFunc
+	maintenanceDone   chan struct{}
 	// Known roots carry no resolution result: every request rechecks them, including
 	// when an agent fails and the client must retain its previous snapshot.
 	knownRepos map[string]struct{}
@@ -309,6 +311,9 @@ func (l *Lister) discardLocked(agent *agentConn) {
 func (l *Lister) Close() {
 	l.mu.Lock()
 	l.closed = true
+	if l.maintenanceCancel != nil {
+		l.maintenanceCancel()
+	}
 	for _, call := range l.pending {
 		call.cancel()
 	}
@@ -318,6 +323,9 @@ func (l *Lister) Close() {
 		l.discardLocked(agent)
 	}
 	l.mu.Unlock()
+	if l.maintenanceDone != nil {
+		<-l.maintenanceDone
+	}
 	l.listings.Wait()
 	l.stopping.Wait()
 }
