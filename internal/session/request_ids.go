@@ -213,6 +213,21 @@ func (r *requestIDs) promptRunning(sessionID string) bool {
 	return false
 }
 
+// runningPrompts returns distinct ACP sessions whose prompts await replies.
+func (r *requestIDs) runningPrompts() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	seen := make(map[string]bool)
+	var sessions []string
+	for _, req := range r.pending {
+		if req.promptSession != "" && !seen[req.promptSession] {
+			seen[req.promptSession] = true
+			sessions = append(sessions, req.promptSession)
+		}
+	}
+	return sessions
+}
+
 func (r *requestIDs) hasAgentRequests() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()

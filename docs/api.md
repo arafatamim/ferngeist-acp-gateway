@@ -935,7 +935,7 @@ clean. Worktrees outlive the chats that use them: they are removed only on an ex
     ```json
     {"type":"agent","agentId":"claude","status":"ok","error":null,
      "chats":[{"sessionId":"…","title":"…","cwd":"…","updatedAt":"…",
-               "repo":"/h/t/Dev/Ferngeist","worktree":"/h/t/Dev/Ferngeist/.worktrees/email"}]}
+               "repo":"/h/t/Dev/Ferngeist","worktree":"/h/t/Dev/Ferngeist/.worktrees/email"}],"running":["…"]}
     {"type":"agent","agentId":"codex","status":"authRequired","error":"Authentication required","chats":[]}
     {"type":"checkouts","repos":[{"repo":"/h/t/Dev/Ferngeist","branch":"main",
       "worktrees":[{"id":"wt_1","path":"/h/t/Dev/Ferngeist/.worktrees/email","branch":"email","ahead":2,"dirty":true}]}]}
@@ -954,6 +954,14 @@ clean. Worktrees outlive the chats that use them: they are removed only on an ex
     `cwd`, or that path itself outside git. `worktree` is the linked
     worktree's top level, `null` in the main checkout. `title` and
     `updatedAt` are `null` when the agent omits them.
+  - Each agent line may carry `running`, a sorted, distinct array of ACP session
+    IDs with a `session/prompt` awaiting its reply in any gateway session for
+    that agent, across all paired devices. Omitted when empty; success, error
+    and cancellation replies remove IDs, and detaching a client preserves them.
+    This state is read for each request, independently of the 10 s listing
+    cache and regardless of the line's `status`, including `unsupported` lines
+    with no listed chats. Running IDs need not appear in `chats`. Turns run
+    outside the gateway (for example, in an agent's CLI) are not visible.
   - `checkouts` covers every git repo the chats name plus every repo the
     gateway knows with linked worktrees. `branch` is `null` on a detached
     HEAD; worktree `id` is what the `/v1/worktrees/{worktreeId}` routes take,

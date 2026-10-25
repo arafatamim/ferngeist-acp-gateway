@@ -508,3 +508,8 @@ func (p *StdioPump) LastStdoutAt() time.Time {
 	defer p.lastStdoutMu.Unlock()
 	return p.lastStdoutAt
 }
+
+// RunningPrompts returns the ACP sessions whose prompts await replies, even while detached.
+func (p *StdioPump) RunningPrompts() []string {
+	return p.reqIDs.runningPrompts()
+}

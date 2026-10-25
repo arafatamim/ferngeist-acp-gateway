@@ -2,6 +2,7 @@ package api
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -185,6 +186,107 @@ func TestProjectsRejectsInvalidSnapshotRoots(t *testing.T) {
 		server.Handler().ServeHTTP(rec, req)
 		if rec.Code != http.StatusBadRequest {
 			t.Errorf("repos=%s: status %d, want 400", raw, rec.Code)
+		}
+	}
+}
+
+func TestProjectsReportsFreshRunningTurnsFromAnotherDevice(t *testing.T) {
+	for _, tc := range []struct {
+		name, mode, status string
+		chats              int
+	}{
+		{"listed", "", "ok", 2},
+		{"unsupported", "none", "unsupported", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("FERNGEIST_MOCK_LIST", tc.mode)
+			checkProjectRunningTurns(t, tc.status, tc.chats)
+		})
+	}
+}
+
+func checkProjectRunningTurns(t *testing.T, status string, chats int) {
+	t.Helper()
+	release := make(chan struct{})
+	llm := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(llm.Close)
+	t.Setenv("FERNGEIST_MOCK_LLM_ENDPOINT", llm.URL)
+	server, token, _ := projectListingServer(t)
+	rs := attachTestSessionService(t, server)
+	t.Cleanup(func() { close(release) })
+	ctx := context.Background()
+	agent, err := server.catalog.Get("mock-acp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess, _, err := rs.Create(ctx, agent, "another-device", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pump, err := rs.GetPump(sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Prime the listing cache before turns start, including a chat absent from the listing.
+	assertProjectRunning(t, server, token, status, chats, nil)
+	for _, frame := range []string{
+		`{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":{"sessionId":"unlisted","prompt":[]}}`,
+		`{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"sessionId":"mock_sess_1","prompt":[]}}`,
+	} {
+		if err := pump.WriteToAgent([]byte(frame)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	assertProjectRunning(t, server, token, status, chats, []string{"mock_sess_1", "unlisted"})
+	if err := rs.Close(ctx, sess.ID, "another-device"); err != nil {
+		t.Fatal(err)
+	}
+	assertProjectRunning(t, server, token, status, chats, nil)
+}
+
+func assertProjectRunning(t *testing.T, server *Server, token, status string, chats int, want []string) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/v1/projects?agents=mock-acp", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("projects status = %d: %s", rec.Code, rec.Body.String())
+	}
+	var line struct {
+		Status  string          `json:"status"`
+		Running json.RawMessage `json:"running"`
+		Chats   []struct {
+			Running json.RawMessage `json:"running"`
+		} `json:"chats"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&line); err != nil {
+		t.Fatal(err)
+	}
+	if line.Status != status || len(line.Chats) != chats {
+		t.Fatalf("agent line = %+v", line)
+	}
+	var got []string
+	if len(line.Running) > 0 {
+		if err := json.Unmarshal(line.Running, &got); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("running = %s, want %v", line.Running, want)
+	}
+	if len(want) == 0 && line.Running != nil {
+		t.Errorf("empty running must be omitted, got %s", line.Running)
+	}
+	for _, chat := range line.Chats {
+		if chat.Running != nil {
+			t.Errorf("chat must not carry running, got %s", chat.Running)
 		}
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -380,5 +381,37 @@ func TestReadStdoutFrameDoesNotCopyTheDiscardedTail(t *testing.T) {
 	}
 	if allocs > 16 {
 		t.Fatalf("allocs per run = %g, want <= 16; discarded tail is being copied", allocs)
+	}
+}
+
+func TestRunningPromptsTracksRepliesAcrossDetach(t *testing.T) {
+	for _, outcome := range []string{`"result":{"stopReason":"end_turn"}`, `"result":{"stopReason":"cancelled"}`, `"error":{"code":-1,"message":"failed"}`} {
+		t.Run(outcome, func(t *testing.T) {
+			p := newRecoveryPump()
+			gen := p.Attach()
+			p.prepareOutbound(parseClientFrame([]byte(`{"id":0,"method":"session/load","params":{"sessionId":"idle"}}`)))
+			if got := p.RunningPrompts(); len(got) != 0 {
+				t.Fatalf("before prompt = %v", got)
+			}
+			first := p.prepareOutbound(parseClientFrame([]byte(`{"id":1,"method":"session/prompt","params":{"sessionId":"active"}}`)))
+			second := p.prepareOutbound(parseClientFrame([]byte(`{"id":2,"method":"session/prompt","params":{"sessionId":"active"}}`)))
+			p.prepareOutbound(parseClientFrame([]byte(`{"id":3,"method":"session/prompt","params":{"sessionId":"other"}}`)))
+			if !p.Detach(gen) {
+				t.Fatal("detach rejected")
+			}
+			got := p.RunningPrompts()
+			slices.Sort(got)
+			if !slices.Equal(got, []string{"active", "other"}) {
+				t.Fatalf("after detach = %v", got)
+			}
+			p.handleStdoutLine(fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,%s}`, agentIDOf(t, first), outcome))
+			if got := p.RunningPrompts(); len(got) != 2 {
+				t.Fatalf("one prompt remains for active: %v", got)
+			}
+			p.handleStdoutLine(fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,%s}`, agentIDOf(t, second), outcome))
+			if got := p.RunningPrompts(); !slices.Equal(got, []string{"other"}) {
+				t.Fatalf("after reply = %v", got)
+			}
+		})
 	}
 }

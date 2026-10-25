@@ -58,6 +58,11 @@ not be coupled. Full release notes live in GitHub Releases.
   also returns an empty array when no files differ. No protocol version bump:
   this restores the documented array contract.
   (2026-10-25)
+- `[additive]` `GET /v1/projects` agent lines gain `running`, a sorted, distinct
+  array of ACP session IDs with pending prompts across paired devices and
+  client detach. Omitted when empty and read afresh for every status, even for
+  cached listings or chats absent from the listing. CLI-run turns outside the
+  gateway are not visible. (2026-10-25)
 - `[additive]` An `ok` projects agent line carries the agent's
   `sessionCapabilities` verbatim from its initialize answer. (2026-10-24)
 - `[additive]` `GET /v1/projects` accepts optional `repos`, a URL-encoded JSON

@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -728,6 +729,25 @@ func (rs *RuntimeSession) awaitExit(sess *Session) {
 	case <-time.After(5 * time.Second):
 		rs.logger.Warn("timed out waiting for process exit to be recorded", "runtime_id", sess.RuntimeID)
 	}
+}
+
+// RunningTurns returns sorted, distinct ACP session IDs with pending prompts for agentID across all devices.
+func (rs *RuntimeSession) RunningTurns(agentID string) []string {
+	// Snapshot pumps so the registry lock is released before taking their locks.
+	rs.mu.Lock()
+	var pumps []*StdioPump
+	for _, sess := range rs.sessions {
+		if sess.AgentID == agentID && sess.pump != nil {
+			pumps = append(pumps, sess.pump)
+		}
+	}
+	rs.mu.Unlock()
+	var running []string
+	for _, pump := range pumps {
+		running = append(running, pump.RunningPrompts()...)
+	}
+	sort.Strings(running)
+	return slices.Compact(running)
 }
 
 // ListByDevice returns summaries of all sessions owned by a device.

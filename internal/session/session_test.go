@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -2342,5 +2343,28 @@ func TestReapSparesSessionAwaitingClient(t *testing.T) {
 	rs.reapExpired(time.Hour)
 	if _, err := rs.GetSessionStatus(sess.ID); err != ErrSessionNotFound {
 		t.Fatalf("answered session not reaped: %v", err)
+	}
+}
+
+func TestRunningTurnsIncludesAllDevicesAndOnlyTheNamedAgent(t *testing.T) {
+	rs := &RuntimeSession{sessions: make(map[string]*Session)}
+	for _, entry := range []struct{ device, agent, chat string }{
+		{"phone", "agent", "chat-a"},
+		{"tablet", "agent", "chat-b"},
+		{"phone", "other-agent", "chat-c"},
+		{"laptop", "agent", "chat-a"},
+	} {
+		p := newRecoveryPump()
+		p.prepareOutbound(parseClientFrame([]byte(fmt.Sprintf(`{"id":1,"method":"session/prompt","params":{"sessionId":%q}}`, entry.chat))))
+		rs.sessions[entry.device+"/"+entry.chat] = &Session{DeviceID: entry.device, AgentID: entry.agent, pump: p}
+	}
+	rs.sessions["idle"] = &Session{AgentID: "agent", pump: newRecoveryPump()}
+	rs.sessions["no-pump"] = &Session{AgentID: "agent"}
+	got := rs.RunningTurns("agent")
+	if !slices.Equal(got, []string{"chat-a", "chat-b"}) {
+		t.Fatalf("running turns = %v", got)
+	}
+	if got := rs.RunningTurns("missing"); len(got) != 0 {
+		t.Fatalf("unknown agent = %v", got)
 	}
 }
