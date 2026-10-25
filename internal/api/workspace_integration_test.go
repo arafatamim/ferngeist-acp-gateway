@@ -95,6 +95,36 @@ func newWorkspaceEnv(t *testing.T, proj string) *workspaceEnv {
 	return env
 }
 
+func TestWorkspaceGitStatusCleanTreeReturnsEmptyArray(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	proj := t.TempDir()
+	runGitCLI(t, proj, "init", "-q", "-b", "main")
+	runGitCLI(t, proj, "config", "user.email", "t@t")
+	runGitCLI(t, proj, "config", "user.name", "t")
+	runGitCLI(t, proj, "config", "commit.gpgSign", "false")
+	runGitCLI(t, proj, "commit", "--allow-empty", "-qm", "init")
+	env := newWorkspaceEnv(t, proj)
+	for _, query := range []string{"", "?compare=main"} {
+		t.Run(query, func(t *testing.T) {
+			rec := env.do(t, "/v1/runtimes/"+env.h.runtimeID+"/git/status"+query)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+			}
+			var body struct {
+				Changed json.RawMessage `json:"changed"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+				t.Fatal(err)
+			}
+			if string(body.Changed) != "[]" {
+				t.Fatalf("changed = %s, want []", body.Changed)
+			}
+		})
+	}
+}
+
 // TestWorkspaceEndpoints_EndToEnd drives a real resilient session, captures the
 // runtime's project cwd from a session/new frame, and asserts the file, git
 // status, and git diff endpoints return the expected data for a temp git repo.

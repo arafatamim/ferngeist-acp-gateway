@@ -53,6 +53,11 @@ not be coupled. Full release notes live in GitHub Releases.
 ## History
 
 - Unreleased:
+- `[semantic]` `GET /v1/runtimes/{id}/git/status` returns `changed: []`
+  for a clean tree, correcting the previous `null` response. Compare mode
+  also returns an empty array when no files differ. No protocol version bump:
+  this restores the documented array contract.
+  (2026-10-25)
 - `[semantic]` `POST /v1/agents/{agentId}/stop` stops the agent only for the
   calling device: it closes the sessions that device holds for the agent and
   leaves other paired devices' sessions and agent processes running. It returns

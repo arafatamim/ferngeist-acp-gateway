@@ -431,6 +431,8 @@ opened or loaded on this runtime returns `404`.
 - `GET /v1/runtimes/{runtimeId}/git/status`
   - Returns branch, ahead/behind counts, and changed files (with per-file line
     counts) for the runtime's project directory.
+  - `changed` is always an array: `[]` when no files differ, including in
+    compare mode.
   - Requires `read` scope.
   - Response:
     ```json

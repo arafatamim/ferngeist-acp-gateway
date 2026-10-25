@@ -112,7 +112,7 @@ type ChangedFile struct {
 // runs with core.quotePath=false), so spaces inside a path parse correctly.
 // Returns as many entries as it can parse.
 func ParseGitStatus(out string) []ChangedFile {
-	var files []ChangedFile
+	files := []ChangedFile{}
 	for _, line := range strings.Split(out, "\n") {
 		if len(line) < 2 {
 			continue
