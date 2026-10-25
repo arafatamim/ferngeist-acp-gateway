@@ -101,10 +101,11 @@ type cachedLine struct {
 
 // agentConn is an initialized agent that advertises session/list.
 type agentConn struct {
-	proc  *runtime.Process
-	conn  *acp.Connection
-	caps  json.RawMessage
-	timer *time.Timer
+	proc     *runtime.Process
+	conn     *acp.Connection
+	caps     json.RawMessage
+	timer    *time.Timer
+	lastUsed time.Time
 }
 
 // initReply is the part of initialize the lister reads, kept raw: the SDK's
@@ -284,6 +285,7 @@ func (l *Lister) keepWarm(id string, agent *agentConn) {
 		l.discardLocked(agent)
 		return
 	}
+	agent.lastUsed = time.Now()
 	agent.timer = time.AfterFunc(warmTTL, func() {
 		l.mu.Lock()
 		defer l.mu.Unlock()
