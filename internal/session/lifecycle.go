@@ -736,14 +736,29 @@ func (rs *RuntimeSession) ListByDevice(ctx context.Context, deviceID string) ([]
 	if err != nil {
 		return nil, err
 	}
+	// Snapshot the pumps first so rs.mu is never held while taking a pump's lock.
+	pumps := make(map[string]*StdioPump, len(records))
+	rs.mu.Lock()
+	for _, rec := range records {
+		if sess, ok := rs.sessions[rec.SessionID]; ok {
+			pumps[rec.SessionID] = sess.pump
+		}
+	}
+	rs.mu.Unlock()
 	summaries := make([]SessionSummary, 0, len(records))
 	for _, rec := range records {
+		acpIDs := []string{}
+		if pump := pumps[rec.SessionID]; pump != nil {
+			acpIDs = append(acpIDs, pump.AcpSessionsWithCwd(func(string) bool { return true })...)
+			sort.Strings(acpIDs)
+		}
 		summaries = append(summaries, SessionSummary{
-			SessionID: rec.SessionID,
-			RuntimeID: rec.RuntimeID,
-			AgentID:   rec.AgentID,
-			Status:    rec.Status,
-			CreatedAt: rec.CreatedAt,
+			SessionID:     rec.SessionID,
+			RuntimeID:     rec.RuntimeID,
+			AgentID:       rec.AgentID,
+			Status:        rec.Status,
+			CreatedAt:     rec.CreatedAt,
+			AcpSessionIDs: acpIDs,
 		})
 	}
 	return summaries, nil

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -729,6 +730,40 @@ func TestListByDevice(t *testing.T) {
 	}
 	if len(summaries) != 2 {
 		t.Errorf("expected 2 sessions, got %d", len(summaries))
+	}
+}
+
+func TestListByDeviceReportsEachRuntimesAcpSessionIDs(t *testing.T) {
+	rs, store, agent, _, ctx := setupTest(t, Config{})
+	defer rs.Shutdown()
+	defer store.Close()
+
+	loaded, _, err := rs.Create(ctx, agent, "dev-acp", nil)
+	if err != nil {
+		t.Fatalf("Create 1: %v", err)
+	}
+	if _, _, err := rs.Create(ctx, agent, "dev-acp", nil); err != nil {
+		t.Fatalf("Create 2: %v", err)
+	}
+	for _, sid := range []string{"ses_b", "ses_a"} {
+		frame := `{"jsonrpc":"2.0","id":"` + sid + `","method":"session/load","params":{"sessionId":"` + sid + `","cwd":"/proj"}}`
+		if err := loaded.pump.WriteToAgent([]byte(frame)); err != nil {
+			t.Fatalf("WriteToAgent: %v", err)
+		}
+	}
+
+	summaries, err := rs.ListByDevice(ctx, "dev-acp")
+	if err != nil {
+		t.Fatalf("ListByDevice: %v", err)
+	}
+	for _, s := range summaries {
+		want := []string{}
+		if s.SessionID == loaded.ID {
+			want = []string{"ses_a", "ses_b"}
+		}
+		if !slices.Equal(s.AcpSessionIDs, want) || s.AcpSessionIDs == nil {
+			t.Errorf("session %s acpSessionIds = %#v, want %#v", s.SessionID, s.AcpSessionIDs, want)
+		}
 	}
 }
 

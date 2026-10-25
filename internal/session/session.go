@@ -69,6 +69,9 @@ type SessionSummary struct {
 	AgentID   string    `json:"agentId"`
 	Status    string    `json:"status"`
 	CreatedAt time.Time `json:"createdAt"`
+	// AcpSessionIDs are the ACP sessions this session's runtime has opened or
+	// loaded, so a client can find the live session behind a chat.
+	AcpSessionIDs []string `json:"acpSessionIds"`
 }
 
 // Config holds session-level tunables from the daemon configuration.

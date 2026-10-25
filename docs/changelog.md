@@ -58,6 +58,10 @@ not be coupled. Full release notes live in GitHub Releases.
   also returns an empty array when no files differ. No protocol version bump:
   this restores the documented array contract.
   (2026-10-25)
+- `[additive]` Each `GET /v1/sessions` entry carries `acpSessionIds`: the ACP
+  sessions its runtime has opened, loaded or resumed (`[]` when none or when the
+  runtime is gone), so a client can find the live gateway session behind a chat.
+  (2026-10-24)
 - `[semantic]` `POST /v1/agents/{agentId}/stop` stops the agent only for the
   calling device: it closes the sessions that device holds for the agent and
   leaves other paired devices' sessions and agent processes running. It returns

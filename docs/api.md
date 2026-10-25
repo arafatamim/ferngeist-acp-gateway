@@ -887,12 +887,17 @@ clean. Worktrees outlive the chats that use them: they are removed only on an ex
           "runtimeId": "string",
           "agentId": "string",
           "status": "active",
-          "createdAt": "2026-05-22T10:00:00Z"
+          "createdAt": "2026-05-22T10:00:00Z",
+          "acpSessionIds": ["ses_abc"]
         }
       ]
     }
     ```
   - Status values: `active`, `disconnected`, `closing`, `failed`
+  - `acpSessionIds` lists, sorted, the ACP sessions the session's runtime has
+    opened (`session/new`), loaded or resumed, so a client can reattach to the
+    gateway session behind a chat. It is `[]` before any is opened and for a
+    session whose runtime is no longer live.
 
 - `DELETE /v1/sessions/{sessionId}`
   - Closes a gateway session. Stops the agent process it owns and deletes all session data.
