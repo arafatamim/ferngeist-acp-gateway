@@ -163,3 +163,14 @@ func TestListResolvesCachedChatAgainWhenCheckoutChanges(t *testing.T) {
 		t.Fatalf("new checkout: got %+v, want repo %s", line.Chats, root)
 	}
 }
+
+func connectListing(t *testing.T, lister *Lister) *agentConn {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	agent, err := lister.connect(ctx, "mock-acp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return agent
+}

@@ -16,8 +16,6 @@ import (
 
 	acp "github.com/coder/acp-go-sdk"
 
-	"golang.org/x/sync/singleflight"
-
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/catalog"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/runtime"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/workspace"
@@ -80,7 +78,8 @@ type Lister struct {
 	runtime   *runtime.Supervisor
 	workspace *workspace.Service
 	slots     chan struct{}
-	flights   singleflight.Group
+	pending   map[string]*listingCall
+	listings  sync.WaitGroup
 
 	mu     sync.Mutex
 	cached map[string]cachedLine
@@ -128,6 +127,7 @@ func New(catalog *catalog.Service, rt *runtime.Supervisor, ws *workspace.Service
 		runtime:    rt,
 		workspace:  ws,
 		slots:      make(chan struct{}, maxConcurrentAgents),
+		pending:    map[string]*listingCall{},
 		cached:     map[string]cachedLine{},
 		warm:       map[string]*agentConn{},
 		knownRepos: map[string]struct{}{},
@@ -178,36 +178,9 @@ func (l *Lister) placeChats(ctx context.Context, repos *repoCache, line AgentLin
 	return line
 }
 
-// agentLine answers from the cache, else joins the agent's one in-flight
-// listing, so concurrent devices start it once.
-func (l *Lister) agentLine(ctx context.Context, id string) AgentLine {
-	l.mu.Lock()
-	cached, ok := l.cached[id]
-	l.mu.Unlock()
-	if ok && time.Since(cached.at) < cacheTTL {
-		return cached.line
-	}
-	flight := l.flights.DoChan(id, func() (any, error) {
-		// Other requests may be waiting on it, so this client leaving must not cancel it.
-		line := l.listAgent(context.WithoutCancel(ctx), id)
-		l.mu.Lock()
-		l.cached[id] = cachedLine{line: line, at: time.Now()}
-		l.mu.Unlock()
-		return line, nil
-	})
-	select {
-	case res := <-flight:
-		return res.Val.(AgentLine)
-	case <-ctx.Done():
-		return AgentLine{Type: "agent", AgentID: id, Chats: []Chat{}}.failed(StatusFailed, ctx.Err())
-	}
-}
-
 // listAgent lists one agent's chats on its warm process or a fresh one, and
 // keeps the process warm only after a full listing.
 func (l *Lister) listAgent(ctx context.Context, id string) AgentLine {
-	l.slots <- struct{}{}
-	defer func() { <-l.slots }()
 	line := AgentLine{Type: "agent", AgentID: id, Status: StatusOK, Chats: []Chat{}}
 	agentCtx, cancel := context.WithTimeout(ctx, agentTimeout)
 	defer cancel()
@@ -331,17 +304,21 @@ func (l *Lister) discardLocked(agent *agentConn) {
 	l.stopping.Go(func() { l.runtime.Discard(agent.proc) })
 }
 
-// Close stops every warm process and waits for each discard. It runs after the
-// HTTP server drained, so no listing parks a process afterwards.
+// Close cancels outstanding listings, stops every warm process and waits for
+// each discard. It runs after the HTTP server drained.
 func (l *Lister) Close() {
 	l.mu.Lock()
 	l.closed = true
+	for _, call := range l.pending {
+		call.cancel()
+	}
 	for id, agent := range l.warm {
 		agent.timer.Stop()
 		delete(l.warm, id)
 		l.discardLocked(agent)
 	}
 	l.mu.Unlock()
+	l.listings.Wait()
 	l.stopping.Wait()
 }
 
