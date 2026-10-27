@@ -1,0 +1,45 @@
+SVG viewBoxes are square and fit the artwork without stretching.
+
+command-code.svg: https://github.com/CommandCodeAI/command-code/blob/630bbf418f62bcdea627e57e6dca60151452355b/.github/commandcode/symbols/symbol.svg
+Recolored monochrome. No explicit redistribution license found. Command Code's terms reserve trademark use; permission is unverified.
+
+oh-my-pi.svg: https://github.com/can1357/oh-my-pi/blob/7523a2d7c64ca17cd9a7d9eae5dc9cf89e1419ff/assets/icon.svg
+Recolored monochrome. Repository license: THIRD_PARTY_NOTICES.txt. Trademark rights are separate.
+
+deepseek-harness.svg: https://github.com/deepseek-ai/deepseek-harness/blob/22ddee3792402c3e70ec5f86a63c3e3e895a2f60/apps/web/public/favicon.svg
+Recolored monochrome. Repository license: THIRD_PARTY_NOTICES.txt. DeepSeek's terms reserve logo and trademark use; permission is unverified.
+
+codewhale.svg: https://github.com/codewhale-hq/Codewhale/blob/fead51eeea0fb6038ea3e30923751b1a1c765b25/brand/mark.svg
+Recolored monochrome. Repository license: THIRD_PARTY_NOTICES.txt; trademark rights are separate.
+
+kiro.svg: https://github.com/leapmux/leapmux/blob/b751310628b6f6e7ab118c40a74feea981c1319b/icons/agents/kiro.svg
+Recolored monochrome. Third-party asset; original artwork provenance and redistribution permission unverified.
+
+letta.svg: https://www.letta.com/ (symbol paths extracted from the inline wordmark)
+Letta's terms and Letta Code's license reserve logo use; permission is unverified.
+
+mimo-code.svg: https://github.com/leapmux/leapmux/blob/b751310628b6f6e7ab118c40a74feea981c1319b/icons/agents/mimo-code.svg
+Recolored monochrome. Third-party asset; original artwork provenance and redistribution permission unverified.
+
+muse-code.svg: https://github.com/leapmux/leapmux/blob/b751310628b6f6e7ab118c40a74feea981c1319b/icons/agents/muse-code.svg
+Recolored monochrome. Third-party asset; official provenance and redistribution permission unverified.
+
+reasonix.svg: https://github.com/esengine/DeepSeek-Reasonix/blob/806f584b5e179ff3cd919fd0bc948f9f6412a684/docs/logo.svg
+Monochrome static mark derived from the animated wordmark. Repository license: THIRD_PARTY_NOTICES.txt; trademark rights are separate.
+
+zcode.svg: https://github.com/leapmux/leapmux/blob/b751310628b6f6e7ab118c40a74feea981c1319b/icons/agents/zcode.svg
+Recolored monochrome. Third-party asset; original artwork provenance and redistribution permission unverified.
+
+aider.svg: https://github.com/Aider-AI/aider/blob/main/aider/website/assets/logo.svg
+Wordmark converted from the embedded Glass TTY VT220 font's vector outlines, without tracing, and recolored monochrome. Font: https://github.com/svofski/glasstty (Unlicense). Aider's repository license: THIRD_PARTY_NOTICES.txt; trademark rights are separate.
+
+hermes.svg: https://github.com/NousResearch/hermes-agent/blob/main/website/static/img/favicon.svg
+Background removed and artwork recolored monochrome. Repository license: THIRD_PARTY_NOTICES.txt; trademark rights are separate.
+
+openclaw.svg: https://github.com/openclaw/openclaw/blob/main/docs/assets/pixel-lobster.svg
+Recolored monochrome with transparent eyes. Repository license: THIRD_PARTY_NOTICES.txt; trademark rights are separate.
+
+openhands.svg: https://asvg.app/assets/svg/openhands/openhands-symbol-monochrome.svg
+Third-party vector; original artwork provenance and redistribution permission unverified.
+
+default.svg: Original generic agent icon.

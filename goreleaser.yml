@@ -135,6 +135,7 @@ archives:
     files:
       - README.md
       - LICENSE
+      - THIRD_PARTY_NOTICES.txt
       - src: packaging/ferngeist-gateway.1
         dst: share/man/man1/ferngeist-gateway.1
       - src: packaging/ferngeist-gateway-env.1
@@ -153,6 +154,7 @@ archives:
     files:
       - README.md
       - LICENSE
+      - THIRD_PARTY_NOTICES.txt
       - src: packaging/ferngeist-gateway.1
         dst: share/man/man1/ferngeist-gateway.1
       - src: packaging/ferngeist-gateway-env.1
@@ -230,6 +232,8 @@ nfpms:
     contents:
       - src: ./README.md
         dst: /usr/share/doc/ferngeist-gateway/README.md
+      - src: ./THIRD_PARTY_NOTICES.txt
+        dst: /usr/share/doc/ferngeist-gateway/THIRD_PARTY_NOTICES.txt
       - src: ./packaging/ferngeist-gateway.1
         dst: /usr/share/man/man1/ferngeist-gateway.1
       - src: ./packaging/ferngeist-gateway-env.1
@@ -257,6 +261,8 @@ nfpms:
     contents:
       - src: ./README.md
         dst: /usr/share/doc/ferngeist-gateway/README.md
+      - src: ./THIRD_PARTY_NOTICES.txt
+        dst: /usr/share/doc/ferngeist-gateway/THIRD_PARTY_NOTICES.txt
       - src: ./packaging/ferngeist-gateway.1
         dst: /usr/share/man/man1/ferngeist-gateway.1
       - src: ./packaging/ferngeist-gateway-env.1

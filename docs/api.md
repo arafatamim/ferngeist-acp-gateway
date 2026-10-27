@@ -73,11 +73,12 @@ Base path: `/v1`
       (see `424` below).
     - `registry` — provenance block for registry-sourced agents: `name`, `version`,
       `repository`, `website`, `icon`, `validationStatus`, and distribution/install
-      details. `icon` is the agent's logo URL as published by the ACP registry
-      (omitted when the registry entry has none). It appears only for
-      `source: "registry"`; embedded and custom agents have no icon — clients
-      should fall back to a neutral glyph. The URL is forwarded verbatim from the
-      registry, not re-derived, and is always an SVG.
+      details. `registry.icon` is the SVG URL forwarded verbatim from the ACP
+      registry, and is omitted when no registry icon exists.
+    - `icon` — optional bundled monochrome SVG as a base64 data URL. Clients
+      should prefer `registry.icon`, then decode `icon`, then use a neutral
+      glyph. When no registry icon exists, the gateway supplies a known agent's
+      logo or a generic agent icon.
 
 ### Pairing
 

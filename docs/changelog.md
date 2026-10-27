@@ -53,6 +53,10 @@ not be coupled. Full release notes live in GitHub Releases.
 ## History
 
 - Unreleased:
+- `[additive]` Agent catalog entries may include a top-level `icon` containing a
+  bundled monochrome SVG data URL when no ACP registry icon is available. Known
+  agents get their logo; others get a generic agent icon. Clients can use it after
+  `registry.icon` and before their neutral glyph. (2026-10-27)
 - `[semantic]` `GET /v1/runtimes/{id}/git/status` returns `changed: []`
   for a clean tree, correcting the previous `null` response. Compare mode
   also returns an empty array when no files differ. No protocol version bump:

@@ -36,6 +36,7 @@ type Agent struct {
 	ID              string          `json:"id"`
 	Source          string          `json:"source"` // "embedded" | "registry" | "custom"
 	DisplayName     string          `json:"displayName"`
+	Icon            string          `json:"icon,omitempty"`
 	Protocol        string          `json:"protocol"`
 	PlatformSupport []string        `json:"platformSupport,omitempty"`
 	Detection       DetectionConfig `json:"detection"`
@@ -455,6 +456,12 @@ func (s *Service) refreshLocked() {
 			if !replaced {
 				visible = append(visible, agent)
 			}
+		}
+	}
+
+	for i := range visible {
+		if visible[i].Icon == "" && visible[i].Registry.Icon == "" {
+			visible[i].Icon = bundledLogo(visible[i].ID)
 		}
 	}
 
