@@ -49,13 +49,12 @@ var errListUnsupported = errors.New("agent does not support session/list")
 
 // AgentLine is one agent's result, written as one line of GET /v1/projects.
 type AgentLine struct {
-	Type            string   `json:"type"`
-	AgentID         string   `json:"agentId"`
-	Status          string   `json:"status"`
-	Error           *string  `json:"error"`
-	Chats           []Chat   `json:"chats"`
-	Running         []string `json:"running,omitempty"`
-	LaunchAvailable *bool    `json:"launchAvailable,omitempty"`
+	Type            string  `json:"type"`
+	AgentID         string  `json:"agentId"`
+	Status          string  `json:"status"`
+	Error           *string `json:"error"`
+	Chats           []Chat  `json:"chats"`
+	LaunchAvailable *bool   `json:"launchAvailable,omitempty"`
 	// SessionCapabilities is the agent's own initialize answer, passed through
 	// untouched so clients see unstable ones the SDK does not model; ok lines only.
 	SessionCapabilities json.RawMessage `json:"sessionCapabilities,omitempty"`

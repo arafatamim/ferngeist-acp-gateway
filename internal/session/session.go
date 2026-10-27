@@ -26,6 +26,7 @@ import (
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/push"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/runtime"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/storage"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/turns"
 )
 
 const (
@@ -132,6 +133,10 @@ type RuntimeSession struct {
 
 	frameLog *frameLogManager // raw ACP frame logs; nil when disabled
 
+	// outcomes keeps finished prompt outcomes for GET /v1/turns; they outlive
+	// the session and process that produced them.
+	outcomes *turns.Store
+
 	cancelReaper context.CancelFunc // shuts down the reaper goroutine on Close
 }
 
@@ -183,6 +188,7 @@ func NewRuntimeSession(logger *slog.Logger, store *storage.SQLiteStore, runtimeS
 		sessions:   make(map[string]*Session),
 		launching:  make(map[string]int),
 		frameLog:   frameLog,
+		outcomes:   turns.NewStore(),
 	}
 	if cfg.MaxDisconnected <= 0 {
 		rs.cfg.MaxDisconnected = defaultMaxDisconnected

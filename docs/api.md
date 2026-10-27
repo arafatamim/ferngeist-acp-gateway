@@ -936,7 +936,7 @@ clean. Worktrees outlive the chats that use them: they are removed only on an ex
     ```json
     {"type":"agent","agentId":"claude","status":"ok","error":null,
      "chats":[{"sessionId":"…","title":"…","cwd":"…","updatedAt":"…",
-               "repo":"/h/t/Dev/Ferngeist","worktree":"/h/t/Dev/Ferngeist/.worktrees/email"}],"running":["…"]}
+               "repo":"/h/t/Dev/Ferngeist","worktree":"/h/t/Dev/Ferngeist/.worktrees/email"}]}
     {"type":"agent","agentId":"codex","status":"authRequired","error":"Authentication required","chats":[]}
     {"type":"checkouts","repos":[{"repo":"/h/t/Dev/Ferngeist","branch":"main",
       "worktrees":[{"id":"wt_1","path":"/h/t/Dev/Ferngeist/.worktrees/email","branch":"email","ahead":2,"dirty":true}]}]}
@@ -955,14 +955,6 @@ clean. Worktrees outlive the chats that use them: they are removed only on an ex
     `cwd`, or that path itself outside git. `worktree` is the linked
     worktree's top level, `null` in the main checkout. `title` and
     `updatedAt` are `null` when the agent omits them.
-  - Each agent line may carry `running`, a sorted, distinct array of ACP session
-    IDs with a `session/prompt` awaiting its reply in any gateway session for
-    that agent, across all paired devices. Omitted when empty; success, error
-    and cancellation replies remove IDs, and detaching a client preserves them.
-    This state is read for each request, independently of the 10 s listing
-    cache and regardless of the line's `status`, including `unsupported` lines
-    with no listed chats. Running IDs need not appear in `chats`. Turns run
-    outside the gateway (for example, in an agent's CLI) are not visible.
   - `checkouts` covers every git repo the chats name plus every repo the
     gateway knows with linked worktrees. `branch` is `null` on a detached
     HEAD; worktree `id` is what the `/v1/worktrees/{worktreeId}` routes take,
@@ -978,6 +970,64 @@ clean. Worktrees outlive the chats that use them: they are removed only on an ex
     - `401` — invalid or missing device credential
     - `404` — the gateway predates this endpoint
     - `503` — project listing not available
+
+### Turns
+
+- `GET /v1/turns`
+  - Reports the prompt turns the gateway knows about, across every agent and
+    every paired device: running turns and the agent's requests for human
+    input, then how finished turns ended. Served from memory; it never starts
+    an agent or waits on a listing, so clients can poll it.
+  - Requires `read` scope. Device-wide like `GET /v1/projects`: any paired
+    device with `read` sees every device's turns, including that another
+    device's chat awaits approval. No device IDs, prompt content, request
+    payloads or error messages are included.
+  - Response: `200`
+    ```json
+    {"gatewayStartedAt":"…","observedAt":"…","turns":[
+      {"agentId":"claude","sessionId":"ses_a","gatewaySessionId":"gs_1","runtimeId":"rt_1",
+       "state":"running","attention":["permission"],"startedAt":"…","changedAt":"…"},
+      {"agentId":"claude","sessionId":"ses_b","gatewaySessionId":"gs_2","runtimeId":"rt_2",
+       "state":"failed","attention":[],"startedAt":"…","changedAt":"…","stopReason":"refusal"}]}
+    ```
+  - `gatewayStartedAt` is the daemon start time also served by `/v1/status`.
+    Outcomes live in memory only: when it changes, discard every status held
+    for this gateway. `observedAt` is the one instant the snapshot was taken
+    (UTC). `turns` is `[]` when none is known.
+  - One entry per `(agentId, gatewaySessionId, sessionId)`: `sessionId` is the
+    ACP session, `gatewaySessionId` the gateway session that ran the prompt. The
+    same chat on two gateway sessions is two entries. A running prompt hides the
+    previous outcome of its entry. Sorted by `agentId`, `sessionId`,
+    `gatewaySessionId`.
+  - `state`:
+    - `running` — a `session/prompt` awaits its reply, whether or not a client
+      is attached.
+    - `succeeded` — the reply's `stopReason` is `end_turn`.
+    - `failed` — an error reply (including the gateway's rewrite of an empty
+      success), a `max_tokens`, `max_turn_requests` or `refusal` stop reason,
+      or the agent process crashing mid-turn.
+    - `cancelled` — a `cancelled` stop reason, or the turn's gateway session
+      closed, stopped, restarted or reaped mid-turn.
+    - `unknown` — a reply without a stop reason or with one the gateway does
+      not know. Never treat it as success.
+  - `attention` is sorted and distinct, non-empty only while `running`:
+    `permission` for an unanswered `session/request_permission`, `elicitation`
+    for an unanswered `elicitation/create` naming the chat by `sessionId` or
+    tied by `requestId` to its running prompt. An answer, or the turn ending,
+    clears it; detaching does not.
+  - `stopReason` appears only when the agent sent one. `changedAt` is when the
+    entry's state last changed: the prompt starting for `running`, the turn
+    ending otherwise. Attention changes do not move it. All times are UTC.
+  - Retention: the latest outcome per entry, up to 4096 daemon-wide; past that
+    the least recently changed is dropped. No expiry: judge staleness by
+    `changedAt`. An entry that is absent or was dropped is unknown, never
+    success. Turns run outside the gateway (an agent's own CLI) are not visible.
+  - Delivery is pull-only; pushes remain hints to refresh.
+  - Error responses:
+    - `401` — invalid or missing device credential
+    - `403` — missing `read` scope
+    - `404` — the gateway predates this endpoint
+    - `503` — session service not available
 
 ### Push notification registration
 

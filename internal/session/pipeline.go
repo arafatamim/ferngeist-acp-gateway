@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"time"
 
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/turns"
 	"github.com/coder/acp-go-sdk"
 	"github.com/coder/websocket"
 )
@@ -83,7 +84,7 @@ type frame struct {
 // handleStdoutLine processes one complete agent stdout frame. The frame is
 // parsed once and passed through a fixed ordered list of stages:
 //
-//	request ids → ACP state → load recovery → notifications → forward
+//	request ids → ACP state → turn outcome → load recovery → notifications → forward
 //
 // Every stage reads the same parse, so no two stages can disagree about what
 // the frame is, and each stage is a plain function call rather than a hook.
@@ -108,6 +109,7 @@ func (p *StdioPump) handleStdoutLine(line string) {
 	f.origin, f.isReply = p.reqIDs.peek(f.probe)
 
 	p.observeACPState(f)
+	p.recordOutcome(f)
 	p.applyLoadRecovery(f)
 	p.notifyFrame(f)
 	p.forward(f)
@@ -131,6 +133,24 @@ func (p *StdioPump) observeACPState(f *frame) {
 	if rp, ok := parseFrameProbe(f.raw); ok {
 		f.probe, f.ok = rp, true
 	}
+}
+
+// recordOutcome is the turn-outcome stage: a reply to a session/prompt, from
+// any connection generation, reports how the turn ended. It runs after the
+// ACP-state stage so a swallowed failure is judged as the error it became.
+func (p *StdioPump) recordOutcome(f *frame) {
+	if p.onTurnFinished == nil || !f.isReply || f.origin.promptSession == "" {
+		return
+	}
+	var reason acp.StopReason
+	if f.probe.Result != nil {
+		reason = f.probe.Result.StopReason
+	}
+	st := p.turnStatus(f.origin.promptSession, f.origin.startedAt, turns.Outcome(f.probe.Error != nil, reason))
+	if f.probe.Error == nil {
+		st.StopReason = reason
+	}
+	p.onTurnFinished(st)
 }
 
 // applyLoadRecovery is the load-recovery stage: it buffers conversation history

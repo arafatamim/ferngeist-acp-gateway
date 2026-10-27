@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -20,6 +21,7 @@ import (
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/push"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/runtime"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/storage"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/turns"
 	"github.com/coder/websocket"
 )
 
@@ -2346,25 +2348,105 @@ func TestReapSparesSessionAwaitingClient(t *testing.T) {
 	}
 }
 
-func TestRunningTurnsIncludesAllDevicesAndOnlyTheNamedAgent(t *testing.T) {
-	rs := &RuntimeSession{sessions: make(map[string]*Session)}
-	for _, entry := range []struct{ device, agent, chat string }{
-		{"phone", "agent", "chat-a"},
-		{"tablet", "agent", "chat-b"},
-		{"phone", "other-agent", "chat-c"},
-		{"laptop", "agent", "chat-a"},
+// registerPrompt makes a prompt for acpID pending on sess without writing it to
+// the agent, so the turn stays running until teardown ends it.
+func registerPrompt(sess *Session, acpID string) string {
+	frame := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":{"sessionId":%q,"prompt":[]}}`, acpID)
+	return string(sess.pump.reqIDs.outbound(0, parseClientFrame([]byte(frame))))
+}
+
+func turnStates(snap TurnSnapshot) map[string]string {
+	got := map[string]string{}
+	for _, st := range snap.Turns {
+		got[st.GatewaySessionID+"/"+st.SessionID] = st.State
+	}
+	return got
+}
+
+// A crash fails the turns still running, and the outcome outlives the session
+// the crash reclaimed. The crash push is unchanged.
+func TestCrashFailsPendingTurnsBeyondTheSession(t *testing.T) {
+	rs, agent, pushSvc := setupPushTest(t)
+	sess, _, err := rs.Create(context.Background(), agent, "dev-crash", nil)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	registerPrompt(sess, "ses_crash")
+	if got := turnStates(rs.TurnSnapshot()); got[sess.ID+"/ses_crash"] != turns.StateRunning {
+		t.Fatalf("before crash = %v", got)
+	}
+	_ = sess.proc.Cmd.Process.Kill()
+	waitForPushCount(t, pushSvc, 1)
+	if pushSvc.last().Category != push.CategoryAgentCrash {
+		t.Fatalf("push = %+v", pushSvc.last())
+	}
+	if _, err := rs.GetSessionStatus(sess.ID); err != ErrSessionNotFound {
+		t.Fatalf("crashed session not reclaimed: %v", err)
+	}
+	snap := rs.TurnSnapshot()
+	if got := turnStates(snap); !maps.Equal(got, map[string]string{sess.ID + "/ses_crash": turns.StateFailed}) {
+		t.Fatalf("after crash = %v", got)
+	}
+	if snap.Turns[0].AgentID != agent.ID || snap.Turns[0].RuntimeID != sess.RuntimeID {
+		t.Fatalf("outcome = %+v", snap.Turns[0])
+	}
+}
+
+// Every intentional teardown cancels the device's running turns, keeps an
+// outcome its agent already reported, and leaves another device's turn running.
+func TestTeardownCancelsPendingTurnsOnlyForThatSession(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		teardown func(ctx context.Context, rs *RuntimeSession, agent catalog.Agent, mine *Session) error
+	}{
+		{"close", func(ctx context.Context, rs *RuntimeSession, _ catalog.Agent, mine *Session) error {
+			return rs.Close(ctx, mine.ID, "dev-a")
+		}},
+		{"stop", func(ctx context.Context, rs *RuntimeSession, agent catalog.Agent, _ *Session) error {
+			_, err := rs.StopByAgent(ctx, agent.ID, "dev-a")
+			return err
+		}},
+		{"restart", func(ctx context.Context, rs *RuntimeSession, agent catalog.Agent, mine *Session) error {
+			_, _, err := rs.Restart(ctx, mine.RuntimeID, "dev-a", agent, nil)
+			return err
+		}},
+		{"reaper", func(_ context.Context, rs *RuntimeSession, _ catalog.Agent, _ *Session) error {
+			rs.reapExpired(0)
+			return nil
+		}},
 	} {
-		p := newRecoveryPump()
-		p.prepareOutbound(parseClientFrame([]byte(fmt.Sprintf(`{"id":1,"method":"session/prompt","params":{"sessionId":%q}}`, entry.chat))))
-		rs.sessions[entry.device+"/"+entry.chat] = &Session{DeviceID: entry.device, AgentID: entry.agent, pump: p}
-	}
-	rs.sessions["idle"] = &Session{AgentID: "agent", pump: newRecoveryPump()}
-	rs.sessions["no-pump"] = &Session{AgentID: "agent"}
-	got := rs.RunningTurns("agent")
-	if !slices.Equal(got, []string{"chat-a", "chat-b"}) {
-		t.Fatalf("running turns = %v", got)
-	}
-	if got := rs.RunningTurns("missing"); len(got) != 0 {
-		t.Fatalf("unknown agent = %v", got)
+		t.Run(tc.name, func(t *testing.T) {
+			rs, store, agent, _, ctx := setupTest(t, Config{})
+			defer rs.Shutdown()
+			defer store.Close()
+			mine, _, err := rs.Create(ctx, agent, "dev-a", nil)
+			if err != nil {
+				t.Fatalf("Create dev-a: %v", err)
+			}
+			theirs, token, err := rs.Create(ctx, agent, "dev-b", nil)
+			if err != nil {
+				t.Fatalf("Create dev-b: %v", err)
+			}
+			// Attached, so the reaper spares it.
+			if _, _, err := rs.AttachClient(ctx, theirs.ID, token); err != nil {
+				t.Fatalf("AttachClient: %v", err)
+			}
+			done := registerPrompt(mine, "done")
+			mine.pump.handleStdoutLine(fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"result":{"stopReason":"end_turn"}}`, agentIDOf(t, []byte(done))))
+			registerPrompt(mine, "running")
+			registerPrompt(theirs, "theirs")
+
+			if err := tc.teardown(ctx, rs, agent, mine); err != nil {
+				t.Fatalf("teardown: %v", err)
+			}
+			want := map[string]string{
+				mine.ID + "/done":     turns.StateSucceeded,
+				mine.ID + "/running":  turns.StateCancelled,
+				theirs.ID + "/theirs": turns.StateRunning,
+			}
+			if got := turnStates(rs.TurnSnapshot()); !maps.Equal(got, want) {
+				t.Fatalf("turns = %v, want %v", got, want)
+			}
+		})
 	}
 }

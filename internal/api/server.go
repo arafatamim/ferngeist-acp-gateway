@@ -277,6 +277,7 @@ func (s *Server) routes() (*http.ServeMux, *http.ServeMux) {
 	mux.HandleFunc("/healthz", s.handleHealth)
 	mux.HandleFunc("/v1/status", s.handleStatus)
 	mux.HandleFunc("/v1/agents", s.handleAgents)
+	mux.HandleFunc("GET /v1/turns", s.handleTurns)
 	mux.HandleFunc("GET /v1/diagnostics/summary", s.handleDiagnosticsSummary)
 	mux.HandleFunc("GET /v1/diagnostics/export", s.handleDiagnosticsExport)
 	mux.HandleFunc("POST /v1/auth/refresh", s.handleAuthRefresh)

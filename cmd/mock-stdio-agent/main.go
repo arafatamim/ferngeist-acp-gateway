@@ -96,6 +96,8 @@ func main() {
 
 func dispatch(w *bufio.Writer, req rpcRequest, logger *slog.Logger) {
 	switch req.Method {
+	case "":
+		// A client's answer to one of the mock's own requests; nothing waits on it.
 	case "initialize":
 		agentInfo := map[string]any{
 			"name":    "mock-acp",
@@ -239,7 +241,9 @@ func handlePrompt(w *bufio.Writer, req rpcRequest, logger *slog.Logger) {
 	if len(req.Params) > 0 {
 		_ = json.Unmarshal(req.Params, &params)
 	}
-
+	if os.Getenv("FERNGEIST_MOCK_PERMISSION") == "1" && params.SessionID != "" {
+		requestPermission(w, params.SessionID, logger)
+	}
 	reply := callLLM(params.Prompt, logger)
 	if reply == "" {
 		reply = cannedResponse
@@ -259,6 +263,26 @@ func handlePrompt(w *bufio.Writer, req rpcRequest, logger *slog.Logger) {
 	}
 
 	writeResult(w, req, map[string]any{"stopReason": "end_turn"})
+}
+
+// requestPermission asks the client to approve a tool call before the model
+// call (FERNGEIST_MOCK_PERMISSION=1), flushed at once so the request is visible
+// while the turn runs. The mock does not wait for the answer.
+func requestPermission(w *bufio.Writer, sessionID string, logger *slog.Logger) {
+	data, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      "perm-" + sessionID,
+		"method":  "session/request_permission",
+		"params": map[string]any{
+			"sessionId": sessionID,
+			"toolCall":  map[string]any{"toolCallId": "mock_call"},
+			"options":   []any{map[string]any{"optionId": "allow", "name": "Allow", "kind": "allow_once"}},
+		},
+	})
+	fmt.Fprintln(w, string(data))
+	if err := w.Flush(); err != nil {
+		logger.Error("flush error", slog.String("error", err.Error()))
+	}
 }
 
 func callLLM(prompt []struct {

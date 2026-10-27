@@ -12,6 +12,7 @@ Its main job is to expose ACP agents through a unified WebSocket API. It discove
 - `internal/pairing` — pairing flow and device credentials
 - `internal/runtime` — agent process launching, the per-runtime log ring buffer, and persisted failure records. The supervisor does not own the process: `Launch` hands the caller a `*exec.Cmd` plus its pipes, the caller reports the exit back with `RecordExit`, and there is no automatic restart.
 - `internal/session` — resilient session domain: session lifecycle, the stdio pump, agent process ownership (a session owns the `*exec.Cmd` it launched), attach tokens, and inbound diagnostics
+- `internal/turns` — the `GET /v1/turns` wire shape, the outcome classification of a finished prompt reply, and the daemon-wide in-memory store of finished outcomes (no project imports)
 - `internal/catalog` — supported agent discovery and validation
 - `internal/registry` — ACP registry fetch and cache
 - `internal/storage` — SQLite persistence (sessions, pairings, runtimes, push tokens, gateway identity, inbound diagnostics)
@@ -46,6 +47,7 @@ Every connection creates a persistent gateway session with:
 > daemon shutdown.
 - **Push notifications** — when the pump detects a notable event (turn complete, permission request, agent error, or live progress) — or the runtime crashes — it emits a platform-neutral notification through the push dispatcher, which delivers it over Web Push to the subscription the device registered. Pushes fire **regardless of whether a client is attached**: the gateway can't tell whether the app is foregrounded or backgrounded (only whether a socket is attached, a poor proxy), so the client decides — it suppresses the notification for a chat already on screen and posts it otherwise, including when the push wakes a killed app. The client reconnects and calls `session/load` on the agent for context restoration.
 - **Inbound diagnostics** — client-to-agent frames are logged asynchronously to SQLite via a buffered channel (non-blocking, dropped on overflow with counter).
+- **Turn status** — `GET /v1/turns` reads running prompts and the human input they wait on from each pump's pending requests at snapshot time; only finished outcomes are stored, in `internal/turns`, so they outlive the session and process. A prompt reply records its outcome (after the swallowed-failure rewrite), a crash records `failed` and a close, stop, restart or reap records `cancelled` for prompts still running. The store is memory-only; a daemon restart clears it.
 - **ACP session/close** — before stopping the runtime on session close, the gateway sends a `session/close` JSON-RPC request to the agent if it advertised `sessionCapabilities.close` during initialize. The mock agent supports this for testing.
 
 The pump buffers each ACP session's `session/update` history (bounded, 8 MiB, trimmed from the oldest end to a turn boundary) so a reconnect can be restored. On WebSocket disconnect:
@@ -66,7 +68,7 @@ The pump buffers each ACP session's `session/update` history (bounded, 8 MiB, tr
 ### Session close ordering
 
 1. Mark session status `closing` in SQLite
-2. Stop the stdio pump (context cancellation)
+2. Stop the stdio pump (context cancellation), recording prompts still running as `cancelled`
 3. Remove the session from the in-memory registry so the exit watcher reclaims nothing
 4. If the agent advertised `sessionCapabilities.close`, send `{"jsonrpc":"2.0","method":"session/close",...}` to stdin
 5. Stop the agent process the session owns, marking the exit intentional (2-second graceful timeout, then kill)

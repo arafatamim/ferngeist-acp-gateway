@@ -9,7 +9,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -18,6 +17,7 @@ import (
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/push"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/runtime"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/storage"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/turns"
 	"github.com/coder/acp-go-sdk"
 	"github.com/coder/websocket"
 )
@@ -105,6 +105,7 @@ func (rs *RuntimeSession) create(ctx context.Context, agent catalog.Agent, devic
 		logger:             rs.logger,
 		appendLog:          rs.runtimeSvc.AppendLog,
 		onPushNotification: onPushNotification,
+		onTurnFinished:     rs.outcomes.Record,
 		ProgressInterval:   rs.cfg.ProgressInterval,
 		frameLog:           rs.frameLog,
 		loadRecovery:       newLoadRecovery(rs.logger),
@@ -265,7 +266,9 @@ func (rs *RuntimeSession) handleProcessExit(sess *Session, intentional bool) {
 		if crashed {
 			// A crashed session is dead and unrecoverable — its agent process is
 			// gone. Reclaim it fully so it cannot linger as a "failed" record. The
-			// crash push below still fires so the client is notified.
+			// crash push below still fires so the client is notified. Its unfinished
+			// turns failed with it; the outcomes outlive the session.
+			s.pump.finishPendingTurns(turns.StateFailed)
 			if s.cancelPump != nil {
 				s.cancelPump()
 			}
@@ -651,9 +654,11 @@ func (rs *RuntimeSession) closeSession(ctx context.Context, sess *Session) error
 	}
 
 	// Step 2: stop the stdout drain loop so no new frames enter the buffer.
+	// Prompts still running were cancelled by this close.
 	if sess.cancelPump != nil {
 		sess.cancelPump()
 	}
+	sess.pump.finishPendingTurns(turns.StateCancelled)
 
 	// Step 3: drop the session from the registry before the agent I/O below.
 	rs.mu.Lock()
@@ -731,23 +736,30 @@ func (rs *RuntimeSession) awaitExit(sess *Session) {
 	}
 }
 
-// RunningTurns returns sorted, distinct ACP session IDs with pending prompts for agentID across all devices.
-func (rs *RuntimeSession) RunningTurns(agentID string) []string {
+// TurnSnapshot is every known turn, running or finished, at one instant.
+type TurnSnapshot struct {
+	ObservedAt time.Time      `json:"observedAt"`
+	Turns      []turns.Status `json:"turns"`
+}
+
+// TurnSnapshot returns the running turns of every live session, across all
+// devices, merged over the outcomes of finished ones.
+func (rs *RuntimeSession) TurnSnapshot() TurnSnapshot {
 	// Snapshot pumps so the registry lock is released before taking their locks.
 	rs.mu.Lock()
-	var pumps []*StdioPump
+	pumps := make([]*StdioPump, 0, len(rs.sessions))
 	for _, sess := range rs.sessions {
-		if sess.AgentID == agentID && sess.pump != nil {
+		if sess.pump != nil {
 			pumps = append(pumps, sess.pump)
 		}
 	}
 	rs.mu.Unlock()
-	var running []string
+	observedAt := time.Now().UTC()
+	var live []turns.Status
 	for _, pump := range pumps {
-		running = append(running, pump.RunningPrompts()...)
+		live = append(live, pump.LiveTurns()...)
 	}
-	sort.Strings(running)
-	return slices.Compact(running)
+	return TurnSnapshot{ObservedAt: observedAt, Turns: rs.outcomes.Snapshot(live)}
 }
 
 // ListByDevice returns summaries of all sessions owned by a device.

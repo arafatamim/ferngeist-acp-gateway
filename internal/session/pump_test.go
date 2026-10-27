@@ -384,13 +384,13 @@ func TestReadStdoutFrameDoesNotCopyTheDiscardedTail(t *testing.T) {
 	}
 }
 
-func TestRunningPromptsTracksRepliesAcrossDetach(t *testing.T) {
+func TestLiveTurnsTrackRepliesAcrossDetach(t *testing.T) {
 	for _, outcome := range []string{`"result":{"stopReason":"end_turn"}`, `"result":{"stopReason":"cancelled"}`, `"error":{"code":-1,"message":"failed"}`} {
 		t.Run(outcome, func(t *testing.T) {
 			p := newRecoveryPump()
 			gen := p.Attach()
 			p.prepareOutbound(parseClientFrame([]byte(`{"id":0,"method":"session/load","params":{"sessionId":"idle"}}`)))
-			if got := p.RunningPrompts(); len(got) != 0 {
+			if got := liveSessions(p); len(got) != 0 {
 				t.Fatalf("before prompt = %v", got)
 			}
 			first := p.prepareOutbound(parseClientFrame([]byte(`{"id":1,"method":"session/prompt","params":{"sessionId":"active"}}`)))
@@ -399,19 +399,27 @@ func TestRunningPromptsTracksRepliesAcrossDetach(t *testing.T) {
 			if !p.Detach(gen) {
 				t.Fatal("detach rejected")
 			}
-			got := p.RunningPrompts()
-			slices.Sort(got)
-			if !slices.Equal(got, []string{"active", "other"}) {
+			if got := liveSessions(p); !slices.Equal(got, []string{"active", "other"}) {
 				t.Fatalf("after detach = %v", got)
 			}
 			p.handleStdoutLine(fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,%s}`, agentIDOf(t, first), outcome))
-			if got := p.RunningPrompts(); len(got) != 2 {
+			if got := liveSessions(p); len(got) != 2 {
 				t.Fatalf("one prompt remains for active: %v", got)
 			}
 			p.handleStdoutLine(fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,%s}`, agentIDOf(t, second), outcome))
-			if got := p.RunningPrompts(); !slices.Equal(got, []string{"other"}) {
+			if got := liveSessions(p); !slices.Equal(got, []string{"other"}) {
 				t.Fatalf("after reply = %v", got)
 			}
 		})
 	}
+}
+
+// liveSessions returns the sorted ACP sessions p reports as running.
+func liveSessions(p *StdioPump) []string {
+	var ids []string
+	for _, st := range p.LiveTurns() {
+		ids = append(ids, st.SessionID)
+	}
+	slices.Sort(ids)
+	return ids
 }

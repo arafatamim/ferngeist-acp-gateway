@@ -104,8 +104,8 @@ cap. Where PSI is unavailable, including other operating systems, the existing
 three-minute warm-process expiry still applies. The polling interval limits
 sampling and discard work; it is not calibrated against real-agent workloads.
 
-The package measurement excludes authentication, HTTP transport, the final
-`checkouts` line, and device running-turn decoration. Measure the full endpoint
+The package measurement excludes authentication, HTTP transport and the final
+`checkouts` line. Measure the full endpoint
 separately with a real loopback HTTP listener and eight paired test credentials:
 
 ```bash

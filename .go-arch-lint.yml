@@ -41,6 +41,7 @@ components:
   workspace: { in: internal/workspace }
   remote: { in: internal/remote }
   update: { in: internal/update }
+  turns: { in: internal/turns }
   # infra
   storage: { in: internal/storage }
   registry: { in: internal/registry }
@@ -79,6 +80,7 @@ deps:
       - registry
       - discovery
       - service
+      - turns
   adminclient:
     mayDependOn: *transport
 
@@ -106,9 +108,9 @@ deps:
 
   # domain tier 3: things that drive a running agent.
   session:
-    mayDependOn: &onRuntime [runtime, acquire, catalog, push, storage, registry, discovery, service]
+    mayDependOn: [turns, runtime, acquire, catalog, push, storage, registry, discovery, service]
   customagents:
-    mayDependOn: *onRuntime
+    mayDependOn: [runtime, acquire, catalog, push, storage, registry, discovery, service]
   projects:
     mayDependOn: [runtime, workspace, acquire, catalog, push, storage, registry, discovery, service]
 

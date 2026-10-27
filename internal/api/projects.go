@@ -55,9 +55,6 @@ func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 		_ = rc.Flush()
 	}
 	s.projects.List(r.Context(), agentIDs, func(line projects.AgentLine) {
-		if s.sessionSvc != nil {
-			line.Running = s.sessionSvc.RunningTurns(line.AgentID)
-		}
 		for _, chat := range line.Chats {
 			repos = append(repos, chat.Repo)
 		}

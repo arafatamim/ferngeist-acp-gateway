@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/runtime"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/turns"
 	"github.com/coder/websocket"
 )
 
@@ -114,6 +115,9 @@ type StdioPump struct {
 
 	// onPushNotification receives notable events; nil disables pushes.
 	onPushNotification func(PushEvent)
+
+	// onTurnFinished receives each finished prompt's outcome; nil drops them.
+	onTurnFinished func(turns.Status)
 
 	// ProgressInterval is the minimum time between progress pushes.
 	// 0 means push every changed summary with no throttle.
@@ -342,7 +346,13 @@ func (p *StdioPump) WriteToAgent(payload []byte) error {
 	if p.frameLog != nil {
 		p.frameLog.append(p.agentID, p.runtimeID, p.sessionID, "in", payload)
 	}
-	return p.writeToAgent(payload)
+	if err := p.writeToAgent(payload); err != nil {
+		if f.Method != "" && f.ID != nil {
+			p.reqIDs.discard(f.ID)
+		}
+		return err
+	}
+	return nil
 }
 
 // WriteSessionClose sends the agent a session/close request during session
@@ -509,7 +519,39 @@ func (p *StdioPump) LastStdoutAt() time.Time {
 	return p.lastStdoutAt
 }
 
-// RunningPrompts returns the ACP sessions whose prompts await replies, even while detached.
-func (p *StdioPump) RunningPrompts() []string {
-	return p.reqIDs.runningPrompts()
+// LiveTurns returns a running status for each ACP session whose prompt awaits
+// its reply, even while detached.
+func (p *StdioPump) LiveTurns() []turns.Status {
+	live := p.reqIDs.liveTurns()
+	out := make([]turns.Status, 0, len(live))
+	for _, t := range live {
+		st := p.turnStatus(t.sessionID, t.startedAt, turns.StateRunning)
+		// A running turn changed when its prompt started; attention is current.
+		st.Attention, st.ChangedAt = t.attention, st.StartedAt
+		out = append(out, st)
+	}
+	return out
+}
+
+// finishPendingTurns records state as the outcome of every prompt still
+// awaiting its reply; teardown calls it, since those replies will never come.
+func (p *StdioPump) finishPendingTurns(state string) {
+	if p.onTurnFinished == nil {
+		return
+	}
+	for _, origin := range p.reqIDs.takePrompts() {
+		p.onTurnFinished(p.turnStatus(origin.promptSession, origin.startedAt, state))
+	}
+}
+
+func (p *StdioPump) turnStatus(acpSessionID string, startedAt time.Time, state string) turns.Status {
+	return turns.Status{
+		AgentID:          p.agentID,
+		SessionID:        acpSessionID,
+		GatewaySessionID: p.sessionID,
+		RuntimeID:        p.runtimeID,
+		State:            state,
+		StartedAt:        startedAt.UTC(),
+		ChangedAt:        time.Now().UTC(),
+	}
 }

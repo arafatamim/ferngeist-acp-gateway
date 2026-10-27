@@ -5,12 +5,18 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/push"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/runtime"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/turns"
+	"github.com/coder/acp-go-sdk"
 	"github.com/coder/websocket"
 )
 
@@ -335,5 +341,176 @@ func TestSwallowedFailurePushesOnceAndCancelIsSilent(t *testing.T) {
 	prompt("cancelled")
 	if len(*events) != 1 {
 		t.Fatalf("cancelled turn pushed: %+v", *events)
+	}
+}
+
+func outcomeCollector(p *StdioPump) *[]turns.Status {
+	var got []turns.Status
+	p.onTurnFinished = func(st turns.Status) { got = append(got, st) }
+	return &got
+}
+
+// sendPrompt sends a client prompt for sessionID through the outbound path and
+// returns the agent-side id its reply carries.
+func sendPrompt(t *testing.T, p *StdioPump, clientID int, sessionID string) string {
+	t.Helper()
+	frame := fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"session/prompt","params":{"sessionId":%q,"prompt":[]}}`, clientID, sessionID)
+	return agentIDOf(t, p.prepareOutbound(parseClientFrame([]byte(frame))))
+}
+
+func agentReply(id, body string) string {
+	return fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,%s}`, id, body)
+}
+
+// A prompt's reply records how its turn ended, judged after the swallowed-
+// failure rewrite: an empty end_turn is a failure, never a success.
+func TestPromptRepliesRecordTheirOutcome(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		content bool
+		reply   string
+		state   string
+		reason  acp.StopReason
+	}{
+		{"success", true, `"result":{"stopReason":"end_turn"}`, turns.StateSucceeded, acp.StopReasonEndTurn},
+		{"swallowed failure", false, `"result":{"stopReason":"end_turn"}`, turns.StateFailed, ""},
+		{"cancelled", false, `"result":{"stopReason":"cancelled"}`, turns.StateCancelled, acp.StopReasonCancelled},
+		{"refusal", false, `"result":{"stopReason":"refusal"}`, turns.StateFailed, acp.StopReasonRefusal},
+		{"error", false, `"error":{"code":-1,"message":"boom"}`, turns.StateFailed, ""},
+		{"no stop reason", false, `"result":{}`, turns.StateUnknown, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newPump()
+			p.agentID, p.sessionID, p.runtimeID = "agent", "gs", "rt"
+			got := outcomeCollector(p)
+			id := sendPrompt(t, p, 1, "ses_a")
+			if tc.content {
+				p.handleStdoutLine(`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"ses_a","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hi"}}}}`)
+			}
+			p.handleStdoutLine(agentReply(id, tc.reply))
+			if len(*got) != 1 {
+				t.Fatalf("outcomes = %+v, want one", *got)
+			}
+			st := (*got)[0]
+			if st.State != tc.state || st.StopReason != tc.reason || st.AgentID != "agent" || st.SessionID != "ses_a" ||
+				st.GatewaySessionID != "gs" || st.RuntimeID != "rt" || st.StartedAt.IsZero() {
+				t.Fatalf("outcome = %+v, want state %q reason %q", st, tc.state, tc.reason)
+			}
+		})
+	}
+}
+
+// Replies to anything but a prompt, and cancelling a prompt, record nothing:
+// only the prompt's own reply ends its turn.
+func TestOnlyPromptRepliesRecordOutcomes(t *testing.T) {
+	p := newPump()
+	got := outcomeCollector(p)
+	for i, method := range []string{"initialize", "session/load", "session/list", "session/set_mode"} {
+		id := agentIDOf(t, p.prepareOutbound(parseClientFrame([]byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":%q,"params":{"sessionId":"ses_a"}}`, i+10, method)))))
+		p.handleStdoutLine(agentReply(id, `"result":{"stopReason":"end_turn"}`))
+	}
+	sendPrompt(t, p, 1, "ses_a")
+	p.prepareOutbound(parseClientFrame([]byte(`{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"ses_a"}}`)))
+	p.prepareOutbound(parseClientFrame([]byte(`{"jsonrpc":"2.0","method":"$/cancel_request","params":{"requestId":1}}`)))
+	p.handleStdoutLine(agentReply("999", `"result":{"stopReason":"end_turn"}`))
+	if len(*got) != 0 {
+		t.Fatalf("outcomes = %+v, want none", *got)
+	}
+}
+
+// A superseded connection's prompt still records its own outcome, but arriving
+// after a newer turn's outcome it does not replace it, and the reconnect replay
+// of the newer turn's result leaves the outcome in place.
+func TestSupersededPromptReplyNeverClobbersANewerOutcome(t *testing.T) {
+	p := newPump()
+	store := turns.NewStore()
+	var recorded []string
+	p.onTurnFinished = func(st turns.Status) {
+		recorded = append(recorded, st.State)
+		store.Record(st)
+	}
+	p.Attach()
+	older := sendPrompt(t, p, 1, "ses_a")
+	p.Attach()
+	newer := sendPrompt(t, p, 1, "ses_a")
+	p.handleStdoutLine(agentReply(newer, `"result":{"stopReason":"refusal"}`))
+	p.handleStdoutLine(agentReply(older, `"result":{"stopReason":"cancelled"}`))
+	if !slices.Equal(recorded, []string{turns.StateFailed, turns.StateCancelled}) {
+		t.Fatalf("recorded = %v", recorded)
+	}
+
+	gen, c := connect(t, p)
+	loadAndReply(t, p, gen, "ses_a")
+	if got := readFrames(t, p, c, 2); !strings.Contains(got[0], "turn_result") {
+		t.Fatalf("reconnect frames = %q, want the kept turn result first", got)
+	}
+	got := store.Snapshot(nil)
+	if len(got) != 1 || got[0].State != turns.StateFailed || got[0].StopReason != acp.StopReasonRefusal {
+		t.Fatalf("stored = %+v, want the newer refusal", got)
+	}
+}
+
+// A prompt that never reached the agent is not left looking like it runs.
+func TestFailedPromptWriteLeavesNoRunningTurn(t *testing.T) {
+	p := newPump()
+	r, w := io.Pipe()
+	_ = r.Close() // every write now fails
+	p.proc = &runtime.Process{Stdin: w}
+	if err := p.WriteToAgent([]byte(`{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":{"sessionId":"ses_a","prompt":[]}}`)); err == nil {
+		t.Fatal("write to a closed stdin succeeded")
+	}
+	if got := liveSessions(p); len(got) != 0 {
+		t.Fatalf("running after failed write = %v", got)
+	}
+}
+
+// Live turns report the human input their agent waits on, per chat on a shared
+// runtime: answered one by one, kept across reconnects, gone with the turn.
+func TestLiveTurnsReportAttention(t *testing.T) {
+	p := newPump()
+	gen := p.Attach()
+	promptA := sendPrompt(t, p, 1, "ses_a")
+	sendPrompt(t, p, 2, "ses_b")
+	auth := agentIDOf(t, p.prepareOutbound(parseClientFrame([]byte(`{"jsonrpc":"2.0","id":3,"method":"authenticate","params":{"methodId":"x"}}`))))
+	for _, line := range []string{
+		permissionRequest, // id 7, ses_a
+		fmt.Sprintf(`{"jsonrpc":"2.0","id":"e1","method":"elicitation/create","params":{"requestId":%s,"mode":"form","message":"?","requestedSchema":{}}}`, promptA),
+		`{"jsonrpc":"2.0","id":"e2","method":"elicitation/create","params":{"sessionId":"ses_b","mode":"url","elicitationId":"x","url":"https://example.com","message":"sign in"}}`,
+		fmt.Sprintf(`{"jsonrpc":"2.0","id":"e3","method":"elicitation/create","params":{"requestId":%s,"mode":"form","message":"key?","requestedSchema":{}}}`, auth),
+		`{"jsonrpc":"2.0","id":"r1","method":"fs/read_text_file","params":{"sessionId":"ses_b","path":"/x"}}`,
+	} {
+		p.handleStdoutLine(line)
+	}
+	assertAttention(t, p, map[string]string{"ses_a": "elicitation,permission", "ses_b": "elicitation"})
+
+	if !p.Detach(gen) {
+		t.Fatal("detach rejected")
+	}
+	p.Attach()
+	assertAttention(t, p, map[string]string{"ses_a": "elicitation,permission", "ses_b": "elicitation"})
+
+	answer := func(id string) {
+		p.prepareOutbound(parseClientFrame([]byte(`{"jsonrpc":"2.0","id":` + id + `,"result":{}}`)))
+	}
+	answer("7")
+	assertAttention(t, p, map[string]string{"ses_a": "elicitation", "ses_b": "elicitation"})
+	// The agent reuses the answered id for a request on the other chat.
+	p.handleStdoutLine(`{"jsonrpc":"2.0","id":7,"method":"session/request_permission","params":{"sessionId":"ses_b","options":[]}}`)
+	answer(`"e2"`)
+	assertAttention(t, p, map[string]string{"ses_a": "elicitation", "ses_b": "permission"})
+
+	p.handleStdoutLine(agentReply(promptA, `"result":{"stopReason":"cancelled"}`))
+	sendPrompt(t, p, 4, "ses_a")
+	assertAttention(t, p, map[string]string{"ses_a": "", "ses_b": "permission"})
+}
+
+func assertAttention(t *testing.T, p *StdioPump, want map[string]string) {
+	t.Helper()
+	got := map[string]string{}
+	for _, st := range p.LiveTurns() {
+		got[st.SessionID] = strings.Join(st.Attention, ",")
+	}
+	if !maps.Equal(got, want) {
+		t.Fatalf("attention = %v, want %v", got, want)
 	}
 }

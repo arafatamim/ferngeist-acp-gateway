@@ -2,9 +2,12 @@ package session
 
 import (
 	"encoding/json"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/turns"
 )
 
 // turnEndedMethod tells a client that a prompt sent by an earlier connection has
@@ -46,6 +49,11 @@ type agentRequest struct {
 	sessionID string
 	// The connection generation the frame was last written to; 0 if never.
 	deliveredGen int64
+	// attention is the human input the request waits on (turns.Attention*),
+	// "" for the rest; attentionSession is the chat it belongs to, resolved
+	// through the pending prompt for a request-scoped elicitation.
+	attention        string
+	attentionSession string
 }
 
 type pendingRequest struct {
@@ -167,11 +175,30 @@ func (r *requestIDs) trackAgentRequest(probe frameProbe, line string, deliveredG
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.setAttentionLocked(&req, probe)
 	r.dropAgentRequestLocked(req.key)
 	if len(r.agentReqs) >= maxPendingAgentRequests {
 		r.agentReqs = r.agentReqs[1:]
 	}
 	r.agentReqs = append(r.agentReqs, req)
+}
+
+// setAttentionLocked marks a request that waits on a human. An elicitation
+// counts only when it names its chat or is tied to a pending prompt; one tied
+// to anything else (authenticate) belongs to no turn.
+func (r *requestIDs) setAttentionLocked(req *agentRequest, probe frameProbe) {
+	switch probe.Method {
+	case "session/request_permission":
+		req.attention, req.attentionSession = turns.AttentionPermission, req.sessionID
+	case elicitationMethod:
+		req.attentionSession = req.sessionID
+		if req.attentionSession == "" && probe.Params != nil && probe.Params.RequestID != nil {
+			req.attentionSession = r.pending[responseIDKey(probe.Params.RequestID)].promptSession
+		}
+		if req.attentionSession != "" {
+			req.attention = turns.AttentionElicitation
+		}
+	}
 }
 
 // answerAgentRequest forgets the agent request a client response (result or
@@ -194,7 +221,7 @@ func (r *requestIDs) dropAgentRequestLocked(key string) {
 func (r *requestIDs) dropSessionAgentRequestsLocked(sessionID string) {
 	kept := r.agentReqs[:0]
 	for _, req := range r.agentReqs {
-		if req.sessionID != sessionID {
+		if req.sessionID != sessionID && req.attentionSession != sessionID {
 			kept = append(kept, req)
 		}
 	}
@@ -213,19 +240,81 @@ func (r *requestIDs) promptRunning(sessionID string) bool {
 	return false
 }
 
-// runningPrompts returns distinct ACP sessions whose prompts await replies.
-func (r *requestIDs) runningPrompts() []string {
+// liveTurn is one ACP session whose prompt awaits its reply.
+type liveTurn struct {
+	sessionID string
+	startedAt time.Time
+	attention []string // sorted, distinct; never nil
+}
+
+// liveTurns returns every ACP session with a pending prompt, the latest prompt
+// per session, with the human input its agent requests wait on.
+func (r *requestIDs) liveTurns() []liveTurn {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	seen := make(map[string]bool)
-	var sessions []string
+	bySession := make(map[string]*liveTurn)
+	var order []string
 	for _, req := range r.pending {
-		if req.promptSession != "" && !seen[req.promptSession] {
-			seen[req.promptSession] = true
-			sessions = append(sessions, req.promptSession)
+		if req.promptSession == "" {
+			continue
+		}
+		t, ok := bySession[req.promptSession]
+		if !ok {
+			t = &liveTurn{sessionID: req.promptSession, attention: []string{}}
+			bySession[req.promptSession] = t
+			order = append(order, req.promptSession)
+		}
+		t.startedAt = maxTime(t.startedAt, req.startedAt)
+	}
+	for _, req := range r.agentReqs {
+		if t, ok := bySession[req.attentionSession]; ok && req.attention != "" {
+			t.attention = append(t.attention, req.attention)
 		}
 	}
-	return sessions
+	out := make([]liveTurn, 0, len(order))
+	for _, id := range order {
+		t := bySession[id]
+		slices.Sort(t.attention)
+		t.attention = slices.Compact(t.attention)
+		out = append(out, *t)
+	}
+	return out
+}
+
+func maxTime(a, b time.Time) time.Time {
+	if b.After(a) {
+		return b
+	}
+	return a
+}
+
+// takePrompts forgets every pending prompt and returns them, so a session
+// being torn down records each one's outcome exactly once: a reply arriving
+// after this no longer correlates.
+func (r *requestIDs) takePrompts() []pendingRequest {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var prompts []pendingRequest
+	for id, req := range r.pending {
+		if req.promptSession != "" {
+			prompts = append(prompts, req)
+			delete(r.pending, id)
+			delete(r.byOwner, req.owner)
+		}
+	}
+	return prompts
+}
+
+// discard forgets a translated request that never reached the agent, so a
+// failed stdin write leaves no prompt looking like it runs.
+func (r *requestIDs) discard(agentID json.RawMessage) {
+	key := responseIDKey(agentID)
+	r.mu.Lock()
+	if origin, ok := r.pending[key]; ok {
+		delete(r.pending, key)
+		delete(r.byOwner, origin.owner)
+	}
+	r.mu.Unlock()
 }
 
 func (r *requestIDs) hasAgentRequests() bool {
