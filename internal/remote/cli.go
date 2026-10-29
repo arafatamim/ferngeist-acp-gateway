@@ -11,8 +11,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os/exec"
+	"strconv"
+
 	"strings"
+	"tailscale.com/ipn"
 )
 
 // Runner executes external commands. Inject a fake in tests.
@@ -69,12 +73,76 @@ func (c *CLI) FunnelURL(ctx context.Context) (string, error) {
 	return "https://" + strings.TrimSuffix(st.Self.DNSName, "."), nil
 }
 
-// EnableFunnel starts a background funnel for the given port. First-run
+// EnableRemote starts background Funnel or Serve for the given port. First-run
 // consent (HTTPS + funnel node attribute) requires an interactive run, so on
 // failure the error tells the operator how to do it once.
-func (c *CLI) EnableFunnel(ctx context.Context, port int) error {
-	if _, err := c.runner.Run(ctx, "tailscale", "funnel", "--bg", fmt.Sprintf("%d", port)); err != nil {
-		return fmt.Errorf("tailscale funnel --bg %d failed (run `tailscale funnel %d` once in a terminal to consent): %w", port, port, err)
+func (c *CLI) EnableRemote(ctx context.Context, port int, private bool) error {
+	lock, err := openCLILock()
+	if err != nil {
+		return fmt.Errorf("open Tailscale provisioning lock: %w", err)
+	}
+	defer func() { _ = lock.Close() }() // Closing releases the OS lock even after command failure.
+	if err := lockCLIFile(lock); err != nil {
+		return fmt.Errorf("another gateway may be provisioning the host Tailscale endpoint; retry: %w", err)
+	}
+
+	out, err := c.runner.Run(ctx, "tailscale", "serve", "status", "--json")
+	if err != nil {
+		return fmt.Errorf("read tailscale serve config: %w", err)
+	}
+	var cfg ipn.ServeConfig
+	if err := json.Unmarshal(out, &cfg); err != nil {
+		return fmt.Errorf("parse tailscale serve config: %w", err)
+	}
+	if conflictingEndpoint(&cfg, port) {
+		return errors.New("tailscale HTTPS endpoint is already in use; use mode=tsnet with a separate gateway state database")
+	}
+	command := "funnel"
+	if private {
+		command = "serve"
+	}
+	if _, err := c.runner.Run(ctx, "tailscale", command, "--bg", strconv.Itoa(port)); err != nil {
+		return fmt.Errorf("tailscale %s --bg %d failed (run tailscale %s %d once in a terminal to consent): %w", command, port, command, port, err)
 	}
 	return nil
+}
+
+// conflictingEndpoint protects other services on the host's shared HTTPS port.
+// A matching loopback root proxy is safe to reconfigure on gateway restart.
+func conflictingEndpoint(cfg *ipn.ServeConfig, port int) bool {
+	matched := false
+	for host, web := range cfg.Web {
+		if !strings.HasSuffix(string(host), ":443") {
+			continue
+		}
+		if web == nil || len(web.Handlers) != 1 {
+			return true
+		}
+		handler := web.Handlers["/"]
+		if handler == nil {
+			return true
+		}
+		target, err := url.Parse(handler.Proxy)
+		if err != nil || target.Scheme != "http" || target.Port() != strconv.Itoa(port) {
+			return true
+		}
+		host := target.Hostname()
+		if host != "127.0.0.1" && host != "localhost" && host != "::1" {
+			return true
+		}
+		if (target.Path != "" && target.Path != "/") || target.RawQuery != "" || target.User != nil || target.Fragment != "" {
+			return true
+		}
+		matched = true
+	}
+	tcp := cfg.TCP[443]
+	if tcp != nil && (!matched || !tcp.HTTPS || tcp.TCPForward != "") {
+		return true
+	}
+	for _, foreground := range cfg.Foreground {
+		if foreground != nil && (foreground.TCP[443] != nil || conflictingEndpoint(foreground, port)) {
+			return true
+		}
+	}
+	return false
 }

@@ -150,7 +150,7 @@ func (p *Provisioner) Provision(ctx context.Context, cfg config.Config, localAdd
 			// An existing, signed-in app is the smoothest path: drive it, and
 			// read the address it already knows. (Embedding here would add a
 			// second node to the user's tailnet — avoid that.)
-			if err := p.cli.EnableFunnel(ctx, port); err != nil {
+			if err := p.cli.EnableRemote(ctx, port, cfg.TailscalePrivate); err != nil {
 				return nil, err
 			}
 			url, err := p.waitForURL(ctx)

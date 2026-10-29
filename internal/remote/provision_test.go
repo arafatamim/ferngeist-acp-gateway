@@ -129,7 +129,7 @@ func TestProvisionDisabled(t *testing.T) {
 }
 
 func TestProvisionCLIMode(t *testing.T) {
-	r := &fakeRunner{responses: map[string]string{"version": "v1.80.0", "status": statusJSON}}
+	r := &fakeRunner{responses: map[string]string{"version": "v1.80.0", "status": statusJSON, "serve": "{}"}}
 	p := NewProvisioner(NewCLI(r), nil)
 	res, err := p.Provision(context.Background(), config.Config{TailscaleMode: "cli"}, "", 5788)
 	if err != nil {
@@ -144,7 +144,7 @@ func TestProvisionCLIMode(t *testing.T) {
 }
 
 func TestProvisionAutoPrefersCLI(t *testing.T) {
-	r := &fakeRunner{responses: map[string]string{"version": "v1.80.0", "status": statusJSON}}
+	r := &fakeRunner{responses: map[string]string{"version": "v1.80.0", "status": statusJSON, "serve": "{}"}}
 	p := NewProvisioner(NewCLI(r), nil)
 	res, err := p.Provision(context.Background(), config.Config{TailscaleMode: "auto"}, "", 5788)
 	if err != nil || res.Mode != "cli" {
