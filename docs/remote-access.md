@@ -167,3 +167,24 @@ ferngeist-gateway daemon install --public-url https://xxxx.ngrok.io
 - For local development, LAN mode is usually enough.
 - The admin API stays bound to localhost — it is never exposed through the
   remote access path.
+
+### Multiple gateways
+
+Use a separate state database and listen/admin ports for each gateway instance.
+The host Tailscale CLI has one default HTTPS endpoint: provisioning refuses to
+replace an existing service on that endpoint. For independent endpoints on the
+same machine, use `FERNGEIST_GATEWAY_TAILSCALE_MODE=tsnet` with a distinct
+`FERNGEIST_GATEWAY_TAILSCALE_HOSTNAME` per gateway.
+
+Embedded node state lives beside its database at `<database-path>.tsnet`.
+Older installations used a shared sibling `tsnet` directory. When exactly one
+gateway database exists beside it, the gateway automatically moves that directory
+to `<database-path>.tsnet`, preserving the node identity and address. Unrelated
+files and SQLite databases do not affect this check.
+
+If several gateway databases could own the old state, provisioning stops rather
+than assigning the identity to the wrong gateway. With the owning gateway stopped,
+move its old directory to `<owning-database-path>.tsnet` before restarting.
+Do not copy node state between machines.
+
+Pairing QR codes use the current provisioned URL as soon as remote setup finishes.

@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -150,20 +149,13 @@ func (p *Provisioner) Provision(ctx context.Context, cfg config.Config, localAdd
 			// An existing, signed-in app is the smoothest path: drive it, and
 			// read the address it already knows. (Embedding here would add a
 			// second node to the user's tailnet — avoid that.)
-			if err := p.cli.EnableRemote(ctx, port, cfg.TailscalePrivate); err != nil {
-				return nil, err
-			}
-			url, err := p.waitForURL(ctx)
-			if err != nil {
-				return nil, err
-			}
-			return &Result{Mode: "cli", URL: url, Close: func() error { return nil }}, nil
+			return p.provisionCLI(ctx, cfg, port)
+		}
+		// Explicit cli mode: never silently switch providers.
+		if mode == "cli" && !found {
+			return nil, errors.New("tailscale CLI not found; install it or use mode=tsnet")
 		}
 		if mode == "cli" {
-			// Explicit cli mode: never silently switch providers.
-			if !found {
-				return nil, errors.New("tailscale CLI not found; install it or use mode=tsnet")
-			}
 			return nil, errors.New("tailscale is installed but not logged in; run `tailscale up` or set FERNGEIST_GATEWAY_TAILSCALE_AUTH_KEY")
 		}
 		// auto: the app is absent, or present but signed out. A signed-out app
@@ -172,8 +164,27 @@ func (p *Provisioner) Provision(ctx context.Context, cfg config.Config, localAdd
 		// first-time login itself.
 	}
 
+	return p.provisionEmbedded(ctx, cfg, localAddr)
+}
+
+func (p *Provisioner) provisionCLI(ctx context.Context, cfg config.Config, port int) (*Result, error) {
+	if err := p.cli.EnableRemote(ctx, port, cfg.TailscalePrivate); err != nil {
+		return nil, err
+	}
+	url, err := p.waitForURL(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &Result{Mode: "cli", URL: url, Close: func() error { return nil }}, nil
+}
+
+func (p *Provisioner) provisionEmbedded(ctx context.Context, cfg config.Config, localAddr string) (*Result, error) {
 	// tsnet (explicit or auto fallback)
-	node := p.factory(cfg.TailscaleHostname, cfg.TailscaleAuthKey, filepath.Join(filepath.Dir(cfg.StateDBPath), "tsnet"), cfg.TailscalePrivate)
+	stateDir, err := embeddedStateDir(ctx, cfg.StateDBPath)
+	if err != nil {
+		return nil, err
+	}
+	node := p.factory(cfg.TailscaleHostname, cfg.TailscaleAuthKey, stateDir, cfg.TailscalePrivate)
 	if node == nil {
 		return nil, errNilTSNet
 	}
@@ -199,8 +210,13 @@ func (p *Provisioner) Provision(ctx context.Context, cfg config.Config, localAdd
 		_ = node.Close()
 		return nil, err
 	}
+	return proxyEmbedded(node, ln, pubURL, localAddr)
+}
+
+func proxyEmbedded(node *TSNet, ln net.Listener, pubURL, localAddr string) (*Result, error) {
 	target, err := url.Parse("http://" + localAddr)
 	if err != nil {
+		_ = node.Close() // The started node owns the listener and must not survive a failed proxy setup.
 		return nil, fmt.Errorf("parse local origin: %w", err)
 	}
 	srv := &http.Server{Handler: httputil.NewSingleHostReverseProxy(target)}

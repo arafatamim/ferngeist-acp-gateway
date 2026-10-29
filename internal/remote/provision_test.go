@@ -2,13 +2,17 @@ package remote
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/config"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/storage"
 
 	"tailscale.com/ipn/ipnstate"
 )
@@ -266,5 +270,142 @@ func TestFunnelSetupHintUnrelated(t *testing.T) {
 func TestFunnelSetupHintNil(t *testing.T) {
 	if hint := FunnelSetupHint(nil); hint != "" {
 		t.Fatalf("hint = %q, want empty for nil", hint)
+	}
+}
+
+func TestEmbeddedGatewaysUseDistinctStateDirectories(t *testing.T) {
+	var dirs []string
+	p := NewProvisioner(nil, func(_, _, dir string, _ bool) *TSNet {
+		dirs = append(dirs, dir)
+		return nil
+	})
+	root := t.TempDir()
+	for _, name := range []string{"a.db", "b.db"} {
+		_, err := p.Provision(context.Background(), config.Config{
+			TailscaleMode: "tsnet", StateDBPath: filepath.Join(root, name),
+		}, "127.0.0.1:5788", 5788)
+		if !errors.Is(err, errNilTSNet) {
+			t.Fatal(err)
+		}
+	}
+	if dirs[0] == dirs[1] {
+		t.Fatal("independent databases share embedded node state")
+	}
+}
+
+func TestLegacyEmbeddedStateWithMultipleDatabasesRequiresExplicitOwner(t *testing.T) {
+	for _, kind := range []string{"current", "pre-identity", "symlink"} {
+		t.Run(kind, func(t *testing.T) {
+			root := t.TempDir()
+			legacy := filepath.Join(root, "tsnet")
+			if err := os.Mkdir(legacy, 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(legacy, "tailscaled.state"), []byte("installed identity"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			p := NewProvisioner(nil, func(_, _, _ string, _ bool) *TSNet { return nil })
+			db := filepath.Join(root, "b.db")
+			migrationPeer(t, root, kind)
+			migrationDatabase(t, db)
+			_, err := p.Provision(context.Background(), config.Config{TailscaleMode: "tsnet", StateDBPath: db}, "", 5788)
+			if err == nil || errors.Is(err, errNilTSNet) {
+				t.Fatal("ambiguous legacy identity was adopted by a new database")
+			}
+			data, err := os.ReadFile(filepath.Join(legacy, "tailscaled.state"))
+			if err != nil || string(data) != "installed identity" {
+				t.Fatalf("legacy identity changed: %v", err)
+			}
+			if err := os.Rename(legacy, db+".tsnet"); err != nil {
+				t.Fatal(err)
+			}
+			_, err = p.Provision(context.Background(), config.Config{TailscaleMode: "tsnet", StateDBPath: db}, "", 5788)
+			if !errors.Is(err, errNilTSNet) {
+				t.Fatalf("explicit migration rejected: %v", err)
+			}
+		})
+	}
+}
+
+func migrationDatabase(t *testing.T, path string) {
+	t.Helper()
+	store, err := storage.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLegacyEmbeddedStateMigratesWithoutChangingIdentity(t *testing.T) {
+	root := t.TempDir()
+	db := filepath.Join(root, "gateway state.custom")
+	migrationDatabase(t, db)
+	// Unrelated SQLite databases and ordinary files are not possible owners.
+	other, err := sql.Open("sqlite", filepath.Join(root, "unrelated.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := other.Exec("CREATE TABLE unrelated (value TEXT)"); err != nil {
+		t.Fatal(err)
+	}
+	if err := other.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "notes"), []byte("local files"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	legacy := filepath.Join(root, "tsnet")
+	if err := os.MkdirAll(filepath.Join(legacy, "nested"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	stateFile := filepath.Join("nested", "tailscaled.state")
+	if err := os.WriteFile(filepath.Join(legacy, stateFile), []byte("installed identity"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	p := NewProvisioner(nil, func(_, _, _ string, _ bool) *TSNet { return nil })
+	for range 2 {
+		_, err := p.Provision(context.Background(), config.Config{TailscaleMode: "tsnet", StateDBPath: db}, "", 5788)
+		if !errors.Is(err, errNilTSNet) {
+			t.Fatalf("automatic upgrade or restart failed: %v", err)
+		}
+		data, err := os.ReadFile(filepath.Join(db+".tsnet", stateFile))
+		if err != nil || string(data) != "installed identity" {
+			t.Fatalf("identity changed: %v", err)
+		}
+	}
+	if _, err := os.Stat(legacy); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("old directory remains: %v", err)
+	}
+}
+
+func migrationPeer(t *testing.T, root, kind string) {
+	t.Helper()
+	path := filepath.Join(root, "a.db")
+	if kind == "symlink" {
+		target := filepath.Join(t.TempDir(), "actual.db")
+		migrationDatabase(t, target)
+		if err := os.Symlink(target, path); err != nil {
+			if runtime.GOOS == "windows" {
+				t.Skipf("symlinks require Windows developer mode: %v", err)
+			}
+			t.Fatal(err)
+		}
+		return
+	}
+	migrationDatabase(t, path)
+	if kind != "pre-identity" {
+		return
+	}
+	old, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := old.Exec("DROP TABLE gateway_identity"); err != nil {
+		t.Fatal(err)
+	}
+	if err := old.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
