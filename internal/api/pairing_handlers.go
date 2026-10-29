@@ -314,7 +314,7 @@ func buildPairingPayload(target pairingTarget, challengeID, code string) string 
 //  4. Error if listen address is loopback (user must use --lan flag)
 //  5. First available LAN interface IPv4/IPv6 address
 func (s *Server) pairingTarget() (pairingTarget, error) {
-	publicBaseURL := strings.TrimSpace(s.cfg.PublicBaseURL)
+	publicBaseURL := s.publicBaseURL()
 	if publicBaseURL != "" {
 		parsed, err := url.Parse(publicBaseURL)
 		if err != nil || parsed.Scheme == "" || parsed.Host == "" {

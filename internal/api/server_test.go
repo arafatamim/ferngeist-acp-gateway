@@ -2807,3 +2807,24 @@ func testWorkspaceService(server *Server, store *storage.SQLiteStore) *workspace
 			return server.sessionSvc.ChatsUsing(match)
 		})
 }
+
+func TestPairingUsesLiveTunnelURL(t *testing.T) {
+	for _, bootURL := range []string{"", "https://gateway-a.tail.ts.net"} {
+		t.Run(bootURL, func(t *testing.T) {
+			server := newTestServer()
+			server.cfg.ListenAddr = "127.0.0.1:5788"
+			server.cfg.EnableLAN = false
+			server.cfg.PublicBaseURL = bootURL
+			server.SetPublicURL("https://gateway-b.tail.ts.net")
+			recorder := httptest.NewRecorder()
+			server.AdminHandler().ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/admin/v1/pairings/start", nil))
+			var response adminPairingResponse
+			if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+				t.Fatal(err)
+			}
+			if recorder.Code != http.StatusOK || response.Host != "gateway-b.tail.ts.net" {
+				t.Fatalf("status=%d pairing host=%q; want 200 and live gateway-b endpoint", recorder.Code, response.Host)
+			}
+		})
+	}
+}
