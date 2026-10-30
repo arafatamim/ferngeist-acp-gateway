@@ -28,6 +28,10 @@ ferngeist-gateway-*-arm64*
 # IDE / tool artifacts
 .commandcode/
 .opencode/
+.claude/
+
+# Ignore agent plans to avoid cluttering up the workspace
+docs/superpowers/
 
 # Build / coverage output
 daemon_cov

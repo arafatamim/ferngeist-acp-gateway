@@ -169,6 +169,9 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Install apt tooling
+        run: sudo apt-get update && sudo apt-get install -y apt-utils
+
       # The debs are built by the release job's goreleaser step. Upload them
       # as a workflow artifact so this job doesn't race the release upload.
       - name: Download .deb artifacts

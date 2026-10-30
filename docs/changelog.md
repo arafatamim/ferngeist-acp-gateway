@@ -24,7 +24,7 @@ Format:
 - `[additive]` — a new endpoint, field, or optional behavior. Older clients
   ignore it; no bump required.
 - `[semantic]` — a field's meaning changed but the JSON shape did not. A bump
-  is required; the client gate will refuse.
+  is required unless an explicitly documented exception is accepted.
 
 Entries end with the date and the short hash of the commit that introduced
 the change, linked to the commit on GitHub, so any claim can be checked
@@ -38,7 +38,8 @@ against the code.
 - `[additive]` changes never bump the version — an old client still works, and
   the client gate would otherwise force a needless update.
 - When a bump is required, add the entry *and* bump the constant in the same
-  change, so a release always ships a coherent version + changelog.
+  change, so a release always ships a coherent version + changelog. The two
+  unreleased semantic changes below are accepted exceptions and retain `v2`.
 - Every contract-visible change gets a changelog entry with a date, even if it
   does not bump the version.
 
