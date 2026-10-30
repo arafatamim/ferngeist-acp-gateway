@@ -43,6 +43,7 @@ components:
   update: { in: internal/update }
   turns: { in: internal/turns }
   # infra
+  quota: { in: internal/quota }
   storage: { in: internal/storage }
   registry: { in: internal/registry }
   discovery: { in: internal/discovery }

@@ -475,3 +475,5 @@ not be coupled. Full release notes live in GitHub Releases.
   notifications. Gateway protocol version was `v1alpha1`; the workspace
   surfaces did not exist yet.
 - `v0.6.0` — earliest tagged release in this history.
+
+- [additive] Add `GET /v1/quotas` for CodexBar plan quota windows.

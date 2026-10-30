@@ -65,6 +65,7 @@ type Server struct {
 	discovery  *discovery.Service
 	logs       *logging.Service
 	registry   registryStatusProvider
+	quotas     func(context.Context) (json.RawMessage, error)
 
 	// customagentsSvc is the write policy behind /v1/agents/custom*, shared with
 	// the admin API.
@@ -200,6 +201,7 @@ type registryStatusProvider interface {
 
 // Deps is the set of configuration and subsystems NewServer wires together.
 type Deps struct {
+	Quotas       func(context.Context) (json.RawMessage, error)
 	Config       config.Config
 	Build        config.BuildInfo
 	Logger       *slog.Logger
@@ -233,6 +235,7 @@ func NewServer(deps Deps) *Server {
 		discovery:       deps.Discovery,
 		logs:            deps.Logs,
 		registry:        deps.Registry,
+		quotas:          deps.Quotas,
 		rateLimiter:     newPairingRateLimiter(cfg),
 		attempts:        newPairingAttemptTracker(cfg),
 		proofNonces:     newProofNonceTracker(),
@@ -276,6 +279,7 @@ func (s *Server) routes() (*http.ServeMux, *http.ServeMux) {
 	adminMux := http.NewServeMux()
 	mux.HandleFunc("/healthz", s.handleHealth)
 	mux.HandleFunc("/v1/status", s.handleStatus)
+	mux.HandleFunc("GET /v1/quotas", s.handleQuotas)
 	mux.HandleFunc("/v1/agents", s.handleAgents)
 	mux.HandleFunc("GET /v1/turns", s.handleTurns)
 	mux.HandleFunc("GET /v1/diagnostics/summary", s.handleDiagnosticsSummary)
