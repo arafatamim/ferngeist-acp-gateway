@@ -21,6 +21,7 @@ import (
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/pairing"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/projects"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/push"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/quota"
 	acpregistry "github.com/arafatamim/ferngeist-acp-gateway/internal/registry"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/remote"
 	gatewayruntime "github.com/arafatamim/ferngeist-acp-gateway/internal/runtime"
@@ -359,6 +360,7 @@ func composeServer(deps api.Deps, store *storage.SQLiteStore) (*api.Server, *ses
 		FrameLogMaxBackups: cfg.LogMaxBackups,
 	})
 
+	deps.Quotas = quota.Collect
 	deps.Session = sessionSvc
 	deps.CustomAgents = customagents.New(store, deps.Catalog, deps.Runtime.List, logger)
 	deps.Workspace = workspace.New(func() *storage.SQLiteStore { return store }, logger,

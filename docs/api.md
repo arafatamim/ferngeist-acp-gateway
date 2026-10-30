@@ -1260,3 +1260,17 @@ The ACP WebSocket endpoint is the primary transport for agent traffic.
 ## Notes
 
 This document is intentionally high-level. For implementation details, see the code in `internal/api` and `internal/session`.
+
+### Plan quotas
+
+`GET /v1/quotas` requires gateway read scope and returns `{ "providers": [...] }`.
+Each provider contains `provider`, optional `source`, and `usage` with CodexBar's
+`primary`, `secondary`, `tertiary`, `extraRateWindows`, and `updatedAt` fields.
+`rateWindowLabels` provides CodexBar’s labels when available. Windows contain
+`usedPercent`, `windowMinutes`, `resetsAt`, and `resetDescription` when available.
+Missing windows are null. A 503 response means quota data could not be collected.
+CodexBar must be installed on the gateway's PATH and configured for the daemon's
+OS account; provider availability depends on its credentials and platform.
+A provider that fails is retained with `usage: null` and `error: {"kind":"provider"}`;
+other providers remain available when a provider fails or exceeds the collection deadline. Error details
+are not forwarded.

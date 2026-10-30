@@ -53,6 +53,9 @@ not be coupled. Full release notes live in GitHub Releases.
 
 ## History
 
+- `[additive]` `GET /v1/quotas` — report CodexBar plan quota windows.
+  (2026-10-31, [9cf1d30](https://github.com/arafatamim/ferngeist-acp-gateway/commit/9cf1d30))
+
 - Unreleased:
 - `[additive]` Agent catalog entries may include a top-level `icon` containing a
   bundled monochrome SVG data URL when no ACP registry icon is available. Known
