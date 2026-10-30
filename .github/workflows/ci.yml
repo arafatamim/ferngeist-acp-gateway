@@ -64,6 +64,31 @@ jobs:
           FERNGEIST_RUN_REAL_AGENT_TESTS: "1"
         run: go test -count=1 ./internal/service/ -run TestLaunchdLifecycle -v
 
+      # Takes and releases a real caffeinate assertion; the Linux jobs cover
+      # the systemd-inhibit path through ./... .
+      - name: Keep-awake inhibitor
+        run: go test -count=1 ./internal/caffeine/ -v
+
+  windows-caffeine:
+    name: Windows keep-awake inhibitor
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.26"
+          cache-dependency-path: go.sum
+
+      # The only Windows-specific runtime code in the gateway's test surface:
+      # SetThreadExecutionState on a locked OS thread.
+      - name: Keep-awake inhibitor
+        env:
+          CGO_ENABLED: "0"
+        run: go test -count=1 ./internal/caffeine/ -v
+
   race:
     name: race detector
     runs-on: ubuntu-latest

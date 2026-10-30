@@ -103,6 +103,9 @@ type Config struct {
 	// UpdateCheckInterval is how often the daemon re-checks for a newer stable
 	// release. 0 means use the default (24h).
 	UpdateCheckInterval time.Duration
+	// KeepAwake holds an OS sleep inhibitor while any agent turn is running.
+	// Defaults on.
+	KeepAwake bool
 	// TailscaleMode controls automatic remote access provisioning:
 	// "off" disables it, "auto" uses the tailscale CLI when available and
 	// falls back to an embedded tsnet node, "cli" forces the CLI path,
@@ -167,11 +170,8 @@ func Load() Config {
 		TailscalePrivate:       envBool("FERNGEIST_GATEWAY_TAILSCALE_PRIVATE"),
 		JSRuntime:              normalizeJSRuntime(os.Getenv("FERNGEIST_GATEWAY_JS_RUNTIME")),
 	}
-	// UpdateCheckEnabled defaults to true; only an explicit false/0 disables it.
-	cfg.UpdateCheckEnabled = true
-	if v, ok := os.LookupEnv("FERNGEIST_GATEWAY_UPDATE_CHECK_ENABLED"); ok {
-		cfg.UpdateCheckEnabled = strings.TrimSpace(v) != "" && v != "0" && !strings.EqualFold(v, "false")
-	}
+	cfg.UpdateCheckEnabled = envBoolDefaultTrue("FERNGEIST_GATEWAY_UPDATE_CHECK_ENABLED")
+	cfg.KeepAwake = envBoolDefaultTrue("FERNGEIST_GATEWAY_KEEP_AWAKE")
 	return cfg.applySecurityDefaults()
 }
 
@@ -317,6 +317,12 @@ func credentialGracePeriodOrDefault() time.Duration {
 func envBool(key string) bool {
 	value := strings.TrimSpace(strings.ToLower(os.Getenv(key)))
 	return value == "1" || value == "true" || value == "yes"
+}
+
+// envBoolDefaultTrue is true unless key is set to empty, 0 or false.
+func envBoolDefaultTrue(key string) bool {
+	v, ok := os.LookupEnv(key)
+	return !ok || (strings.TrimSpace(v) != "" && v != "0" && !strings.EqualFold(v, "false"))
 }
 
 func defaultManagedBinDir() string {

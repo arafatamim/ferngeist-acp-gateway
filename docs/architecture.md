@@ -18,6 +18,7 @@ Its main job is to expose ACP agents through a unified WebSocket API. It discove
 - `internal/storage` — SQLite persistence (sessions, pairings, runtimes, push tokens, gateway identity, inbound diagnostics)
 - `internal/discovery` — LAN advertising via mDNS
 - `internal/config` — configuration and persisted settings
+- `internal/caffeine` — holds an OS sleep inhibitor while the daemon reports a running turn (no project imports)
 - `internal/daemon` — wiring and startup reconciliation
 - `internal/remote` — Tailscale adapter (CLI or embedded tsnet), funnel/serve provisioning, domain types (`Result`, `ErrAuthRequired`, `RemoteSetupSnapshot`), and the provisioning lifecycle (`Access`): retry loop, public URL persistence, paired-device notifications, and auth-pending state for the status API
 - `internal/adminclient` — typed HTTP client for the admin API (used by `daemon status` and `daemon install`)

@@ -7,10 +7,12 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/acquire"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/api"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/caffeine"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/catalog"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/config"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/customagents"
@@ -24,6 +26,7 @@ import (
 	gatewayruntime "github.com/arafatamim/ferngeist-acp-gateway/internal/runtime"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/session"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/storage"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/turns"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/update"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/workspace"
 )
@@ -364,6 +367,27 @@ func composeServer(deps api.Deps, store *storage.SQLiteStore) (*api.Server, *ses
 	return api.NewServer(deps), sessionSvc
 }
 
+// startKeepAwake keeps the host awake while any turn runs, including one
+// waiting on a human: sleeping then would cut off the client that must answer.
+// The returned stop runs after serve has shut the sessions down.
+func startKeepAwake(ctx context.Context, sessionSvc *session.RuntimeSession, logger *slog.Logger) (stop func()) {
+	ctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	busy := func() bool {
+		return slices.ContainsFunc(sessionSvc.TurnSnapshot().Turns, func(t turns.Status) bool {
+			return t.State == turns.StateRunning
+		})
+	}
+	go func() {
+		defer close(done)
+		caffeine.Run(ctx, busy, logger)
+	}()
+	return func() {
+		cancel()
+		<-done
+	}
+}
+
 func serveGateway(ctx context.Context, deps api.Deps, store *storage.SQLiteStore, access *remote.Access) error {
 	cfg, logger := deps.Config, deps.Logger
 	discoverySvc := discovery.New(logger)
@@ -373,6 +397,9 @@ func serveGateway(ctx context.Context, deps api.Deps, store *storage.SQLiteStore
 	defer discoverySvc.Stop()
 	deps.Discovery = discoverySvc
 	server, sessionSvc := composeServer(deps, store)
+	if cfg.KeepAwake {
+		defer startKeepAwake(ctx, sessionSvc, logger)()
+	}
 	if access != nil {
 		server.SetRemoteSetup(access.Snapshot)
 		if cfg.TailscaleAuthKey == "" {
