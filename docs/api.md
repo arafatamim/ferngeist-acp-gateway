@@ -992,8 +992,10 @@ clean. Worktrees outlive the chats that use them: they are removed only on an ex
     ```
   - `gatewayStartedAt` is the daemon start time also served by `/v1/status`.
     Outcomes live in memory only: when it changes, discard every status held
-    for this gateway. `observedAt` is the one instant the snapshot was taken
-    (UTC). `turns` is `[]` when none is known.
+    for this gateway. `observedAt` is the gateway time when sampling the turns
+    begins (UTC). The pumps and finished outcomes are sampled separately, not
+    atomically; a transition during sampling can be newer than `observedAt`.
+    `turns` is `[]` when none is known.
   - One entry per `(agentId, gatewaySessionId, sessionId)`: `sessionId` is the
     ACP session, `gatewaySessionId` the gateway session that ran the prompt. The
     same chat on two gateway sessions is two entries. A running prompt hides the
@@ -1018,6 +1020,27 @@ clean. Worktrees outlive the chats that use them: they are removed only on an ex
   - `stopReason` appears only when the agent sent one. `changedAt` is when the
     entry's state last changed: the prompt starting for `running`, the turn
     ending otherwise. Attention changes do not move it. All times are UTC.
+  - Timing for elapsed labels uses the existing fields:
+    - `startedAt` is when the gateway received the `session/prompt`, before
+      forwarding it to the agent. It stays fixed for that prompt, including
+      time waiting for human input, refreshes, detach/resume and completion.
+      A new prompt for the entry has its own start time.
+    - For a finished turn, `changedAt` is when the gateway processed the prompt
+      reply (or recorded a crash/cancellation), not when a client received it
+      or refreshed the list. It stays fixed through later `session/update`
+      frames and `session/load` history replay, until another prompt replaces
+      the entry. These are gateway-observed times, not agent execution times.
+    - At a snapshot, elapsed working time is
+      `max(0, observedAt - startedAt)` for `running`; time since completion is
+      `max(0, observedAt - changedAt)` otherwise. A finished turn's duration is
+      `max(0, changedAt - startedAt)`. Subtract these gateway timestamps rather
+      than the phone's wall clock, so clock agreement is unnecessary.
+    - Between refreshes, advance running elapsed time or completion age using
+      local monotonic elapsed time since receiving the snapshot. Network delay
+      makes the initial age approximate; refresh after reconnecting or restoring
+      the app. Clamping handles sampling races and gateway wall-clock changes;
+      these UTC timestamps do not guarantee monotonic durations if the gateway
+      clock is adjusted during a turn.
   - Retention: the latest outcome per entry, up to 4096 daemon-wide; past that
     the least recently changed is dropped. No expiry: judge staleness by
     `changedAt`. An entry that is absent or was dropped is unknown, never
