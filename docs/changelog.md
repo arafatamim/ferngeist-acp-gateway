@@ -53,6 +53,9 @@ not be coupled. Full release notes live in GitHub Releases.
 
 ## History
 
+- `[additive]` `GET /v1/quotas` — report CodexBar plan quota windows.
+  (2026-10-31, [9cf1d30](https://github.com/arafatamim/ferngeist-acp-gateway/commit/9cf1d30))
+
 - Unreleased:
 - `[additive]` Agent catalog entries may include a top-level `icon` containing a
   bundled monochrome SVG data URL when no ACP registry icon is available. Known
@@ -475,5 +478,3 @@ not be coupled. Full release notes live in GitHub Releases.
   notifications. Gateway protocol version was `v1alpha1`; the workspace
   surfaces did not exist yet.
 - `v0.6.0` — earliest tagged release in this history.
-
-- [additive] Add `GET /v1/quotas` for CodexBar plan quota windows.

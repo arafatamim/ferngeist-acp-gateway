@@ -3,10 +3,13 @@ package quota
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestCollectPreservesQuotaAndOmitsIdentity(t *testing.T) {
@@ -107,5 +110,23 @@ printf '%s' '{"provider":"fast","usage":{"primary":{"usedPercent":42}}}'
 	}
 	if !strings.Contains(string(result), `"usedPercent":42`) || !strings.Contains(string(result), `"provider":"slow"`) || !strings.Contains(string(result), `"kind":"provider"`) {
 		t.Fatalf("unexpected response: %s", result)
+	}
+}
+
+func TestRunStopsWaitingForInheritedStdout(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "codexbar")
+	data := "#!/bin/sh\n/bin/sleep 3 &\nexit 0\n"
+	if err := os.WriteFile(script, []byte(data), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	started := time.Now()
+	_, err := run(context.Background(), "usage")
+	if !errors.Is(err, exec.ErrWaitDelay) {
+		t.Fatalf("error = %v, want ErrWaitDelay", err)
+	}
+	if elapsed := time.Since(started); elapsed > 2500*time.Millisecond {
+		t.Fatalf("waited %v for inherited stdout", elapsed)
 	}
 }

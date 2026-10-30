@@ -135,6 +135,7 @@ func collectProvider(ctx context.Context, id string) provider {
 
 func run(ctx context.Context, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, "codexbar", args...)
+	cmd.WaitDelay = time.Second
 	var out bytes.Buffer
 	cmd.Stdout = &limitedWriter{w: &out, remaining: 1 << 20}
 	err := cmd.Run()
