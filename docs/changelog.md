@@ -43,6 +43,14 @@ against the code.
 - Every contract-visible change gets a changelog entry with a date, even if it
   does not bump the version.
 
+## Unreleased
+
+- `[additive]` Workspace file reads now return up to 8 MiB instead of 1 MiB,
+  supporting larger transcript images. Recognized non-SVG image MIME types now
+  return blobs even without NUL bytes. The existing text/blob response shapes
+  and size/truncation meanings are preserved; protocol version remains `v2`.
+  (2026-10-31)
+
 ## Release tags
 
 The **build** version (the daemon binary's `--version` and the mDNS

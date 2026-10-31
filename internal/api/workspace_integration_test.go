@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -916,5 +917,85 @@ func TestWorkspaceFileListRequiresReadScope(t *testing.T) {
 		if rec.Code != http.StatusForbidden {
 			t.Fatalf("%s scopeless status = %d, want 403 (body=%s)", path, rec.Code, rec.Body.String())
 		}
+	}
+}
+
+func TestWorkspaceFileImageReadLimit(t *testing.T) {
+	proj := t.TempDir()
+	env := newWorkspaceEnv(t, proj)
+	const limit = 8 << 20
+	for _, size := range []int{limit - 1, limit, limit + 1} {
+		t.Run(strconv.Itoa(size), func(t *testing.T) {
+			data := bytes.Repeat([]byte{0xff}, size)
+			copy(data, []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d})
+			if err := os.WriteFile(filepath.Join(proj, "image.png"), data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			rec := env.do(t, "/v1/runtimes/"+env.h.runtimeID+"/files?path=image.png&acpSessionId="+env.acpSessionID)
+			var body blobReadResponse
+			if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &body) != nil {
+				t.Fatalf("status = %d, invalid response", rec.Code)
+			}
+			got, err := base64.StdEncoding.DecodeString(body.Blob)
+			if err != nil || !bytes.Equal(got, data[:min(size, limit)]) || body.Size != size || body.Truncated != (size > limit) {
+				t.Fatalf("size=%d decoded=%d truncated=%t error=%v", body.Size, len(got), body.Truncated, err)
+			}
+		})
+	}
+	outside := filepath.Join(t.TempDir(), "outside.png")
+	if err := os.WriteFile(outside, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(proj, "escape.png")); err != nil {
+		t.Fatal(err)
+	}
+	for path, want := range map[string]int{
+		"?path=escape.png":                     http.StatusBadRequest,
+		"?path=../outside.png":                 http.StatusBadRequest,
+		"?path=image.png&acpSessionId=unknown": http.StatusNotFound,
+	} {
+		rec := env.do(t, "/v1/runtimes/"+env.h.runtimeID+"/files"+path)
+		if rec.Code != want {
+			t.Errorf("%s status = %d, want %d", path, rec.Code, want)
+		}
+	}
+	req := httptest.NewRequest(http.MethodGet, "/v1/runtimes/"+env.h.runtimeID+"/files?path=image.png", nil)
+	recorder := httptest.NewRecorder()
+	env.h.server.Handler().ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusUnauthorized {
+		t.Errorf("unauthenticated status = %d, want 401", recorder.Code)
+	}
+	svgText := "<svg><!--" + strings.Repeat("x", 2<<20) + "--></svg>"
+	if err := os.WriteFile(filepath.Join(proj, "image.svg"), []byte(svgText), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rec := env.do(t, "/v1/runtimes/"+env.h.runtimeID+"/files?path=image.svg")
+	var svg fileReadResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &svg); err != nil || rec.Code != http.StatusOK || svg.Text != svgText || svg.Truncated || svg.Size != len(svgText) {
+		t.Fatalf("SVG status=%d size=%d text length=%d truncated=%t error=%v", rec.Code, svg.Size, len(svg.Text), svg.Truncated, err)
+	}
+}
+
+func TestWorkspaceImageWithoutNULBytesReturnsBlob(t *testing.T) {
+	proj := t.TempDir()
+	env := newWorkspaceEnv(t, proj)
+	data := []byte{0xff, 0xd8, 0xff, 0xd9}
+	if err := os.WriteFile(filepath.Join(proj, "image.jpg"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rec := env.do(t, "/v1/runtimes/"+env.h.runtimeID+"/files?path=image.jpg")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var body blobReadResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	got, err := base64.StdEncoding.DecodeString(body.Blob)
+	if err != nil || !bytes.Equal(got, data) {
+		t.Fatalf("decoded blob = %x, error = %v, want %x", got, err, data)
+	}
+	if body.MimeType == nil || *body.MimeType != "image/jpeg" || body.Size != len(data) || body.Truncated {
+		t.Fatalf("image metadata = %+v", body)
 	}
 }

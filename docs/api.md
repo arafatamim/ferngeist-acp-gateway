@@ -339,11 +339,12 @@ opened or loaded on this runtime returns `404`.
       "truncated": false
     }
     ```
-  - Files larger than 1 MiB are truncated; `truncated` is `true` and `size` is
-    the full on-disk file size (the payload `text`/`blob` is capped at 1 MiB).
-    Binary detection uses the same NUL-byte heuristic
-    as git. `mimeType` is a best-effort guess from the file extension and is
-    omitted when the extension is not recognized (e.g. `.go` on platforms
+  - Files larger than 8 MiB are truncated; `truncated` is `true` and `size` is
+    the full on-disk file size (the payload `text`/`blob` is capped at 8 MiB).
+    Recognized image MIME types other than SVG return base64 blobs even without
+    NUL bytes. Other files use the same NUL-byte heuristic as git; text SVG
+    remains text. `mimeType` is a best-effort guess from the file extension and
+    is omitted when the extension is not recognized (e.g. `.go` on platforms
     without a system mime.types database).
   - Error responses:
     - `400` — missing `path`, or path escapes the project directory (absolute,
