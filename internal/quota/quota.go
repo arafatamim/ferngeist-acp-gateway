@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"os/exec"
+	"regexp"
 	"sync"
 	"time"
 )
@@ -30,11 +31,25 @@ type labels struct {
 	Tertiary  string `json:"tertiary,omitempty"`
 }
 type usage struct {
+	Details          []detail      `json:"details,omitempty"`
+	ProviderCost     *balance      `json:"providerCost,omitempty"`
 	ExtraRateWindows []namedWindow `json:"extraRateWindows,omitempty"`
 	Primary          *window       `json:"primary"`
 	Secondary        *window       `json:"secondary"`
 	Tertiary         *window       `json:"tertiary"`
 	UpdatedAt        *string       `json:"updatedAt"`
+}
+type balance struct {
+	Balance      *float64 `json:"balance"`
+	CurrencyCode string   `json:"currencyCode"`
+}
+type detail struct {
+	Title string      `json:"title"`
+	Rows  []detailRow `json:"rows"`
+}
+type detailRow struct {
+	Label string `json:"label"`
+	Value string `json:"value"`
 }
 type provider struct {
 	Icon             string         `json:"icon,omitempty"`
@@ -128,7 +143,8 @@ func collectProviders(ctx context.Context, providers []provider) {
 
 type usageSnapshot struct {
 	usage
-	Identity *struct {
+	ProviderCost json.RawMessage `json:"providerCost"`
+	Identity     *struct {
 		LoginMethod  string `json:"loginMethod"`
 		AccountEmail string `json:"accountEmail"`
 	} `json:"identity"`
@@ -163,6 +179,8 @@ func collectProvider(ctx context.Context, id string) provider {
 	p := provider{Provider: snapshot.Provider, Source: snapshot.Source, RateWindowLabels: snapshot.RateWindowLabels, Error: snapshot.Error}
 	if snapshot.Usage != nil {
 		p.Usage = &snapshot.Usage.usage
+		p.Usage.Details = billingDetails(p.Usage.Details)
+		p.Usage.ProviderCost = providerBalance(snapshot.Usage.ProviderCost)
 		if identity := snapshot.Usage.Identity; identity != nil {
 			p.Plan, p.Account = identity.LoginMethod, identity.AccountEmail
 		}
@@ -176,6 +194,42 @@ func collectProvider(ctx context.Context, id string) provider {
 		return unavailable
 	}
 	return p
+}
+
+var billingValue = regexp.MustCompile(`^(?:-?\$(?:[0-9]{1,12}|[0-9]{1,3}(?:,[0-9]{3}){1,3})\.[0-9]{2}|(?:[0-9]{1,12}|[0-9]{1,3}(?:,[0-9]{3}){1,3})(?:\.[0-9]{1,2})?[KMB]? (?:points|credits|HC))$`)
+var currencyCode = regexp.MustCompile(`^[A-Z]{3}$`)
+
+func billingDetails(details []detail) []detail {
+	allowed := map[string]map[string]bool{
+		"Credits":         {"Remaining": true, "Used": true, "Total added": true},
+		"API key":         {"API key limit": true, "API key remaining": true, "API key used": true, "Today": true, "This week": true, "This month": true},
+		"Team credits":    {"Available balance": true, "Lifetime spend": true},
+		"Personal budget": {"Spend": true, "Limit": true, "Remaining": true},
+		"Points":          {"Current balance": true, "Today": true, "Last 7 days": true, "Last 30 days": true},
+		"Hypercredits":    {"Balance": true},
+	}
+	var result []detail
+	for _, section := range details {
+		var rows []detailRow
+		for _, row := range section.Rows {
+			if allowed[section.Title][row.Label] && billingValue.MatchString(row.Value) {
+				rows = append(rows, row)
+				delete(allowed[section.Title], row.Label)
+			}
+		}
+		if len(rows) > 0 {
+			result = append(result, detail{Title: section.Title, Rows: rows})
+		}
+	}
+	return result
+}
+
+func providerBalance(raw json.RawMessage) *balance {
+	var b balance
+	if json.Unmarshal(raw, &b) != nil || b.Balance == nil || *b.Balance < 0 || *b.Balance > 1e12 || !currencyCode.MatchString(b.CurrencyCode) {
+		return nil
+	}
+	return &b
 }
 
 func run(ctx context.Context, args ...string) ([]byte, error) {

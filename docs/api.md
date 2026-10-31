@@ -1379,6 +1379,15 @@ Providers may also include `displayName` from CodexBar's provider configuration,
 and `account` from `usage.identity.accountEmail` when available. Account email is
 visible to paired clients with read scope; other identity fields are omitted.
 
+`usage.details` may contain recognized billing sections and rows with `title`,
+`label` and `value`, including OpenRouter credits, Vercel team credits and
+personal budgets, and Poe points. Only recognized rows with bounded formatted
+amounts are forwarded; charts, diagnostics and other details are omitted. Other
+provider-specific sections may therefore be unavailable. An optional
+`usage.providerCost` contains only `balance` and `currencyCode` when CodexBar
+reports a nonnegative balance and a three-letter currency code. A balance may
+also appear in `plan` or a window's `resetDescription`.
+
 Optional `costs` contains estimated local spend summaries, for example:
 
 ```json
@@ -1391,5 +1400,5 @@ These are API price estimates, not subscription charges. Only available,
 nonnegative USD amounts are included; zero is retained. Token counts are optional.
 Costs refresh with quotas under the same collection deadline. A missing, failed,
 or malformed cost report omits costs without suppressing quota data. Daily and
-project breakdowns, local paths, and credit-denominated `usage.providerCost` are
-never forwarded.
+project breakdowns and local paths are never forwarded. `usage.providerCost`
+is a provider-reported balance, separate from these estimated costs.

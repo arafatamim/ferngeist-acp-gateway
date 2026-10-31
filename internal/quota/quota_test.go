@@ -261,3 +261,66 @@ esac
 		}
 	}
 }
+
+func TestCollectRelaysOpenRouterCreditDetails(t *testing.T) {
+	dir := t.TempDir()
+	script := `#!/bin/sh
+case "$1" in
+config) printf '%s' '[{"provider":"openrouter","enabled":true}]';;
+usage) printf '%s' '[{"provider":"openrouter","source":"api","usage":{"primary":null,"secondary":null,"tertiary":null,"updatedAt":"2026-10-31T10:00:00Z","identity":{"loginMethod":"Balance: $35.05","accountID":"hidden-id"},"details":[{"title":"Credits","rows":[{"label":"Remaining","value":"$35.05"},{"label":"Used","value":"$12.50"},{"label":"Total added","value":"$47.55"},{"label":"Secret","value":"hidden-secret"}]},{"title":"API key","rows":[{"label":"Today","value":"$0.25"},{"label":"This week","value":"$1.00"},{"label":"This month","value":"$4.00"},{"label":"API key used","value":"hidden-token"}]}]}}]';;
+cost) printf '[]';;
+esac
+`
+	if err := os.WriteFile(filepath.Join(dir, "codexbar"), []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	result, err := Collect(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"plan":"Balance: $35.05"`, `"label":"Remaining","value":"$35.05"`, `"label":"Used","value":"$12.50"`, `"label":"Total added","value":"$47.55"`, `"label":"Today","value":"$0.25"`, `"label":"This week","value":"$1.00"`, `"label":"This month","value":"$4.00"`} {
+		if !strings.Contains(string(result), want) {
+			t.Fatalf("missing %s in %s", want, result)
+		}
+	}
+	for _, secret := range []string{"hidden-id", "hidden-secret", "hidden-token"} {
+		if strings.Contains(string(result), secret) {
+			t.Fatalf("unexpected %s in %s", secret, result)
+		}
+	}
+}
+
+func TestCollectRelaysProviderBalancesAcrossFormats(t *testing.T) {
+	dir := t.TempDir()
+	script := `#!/bin/sh
+case "$1" in
+config) printf '%s' '[{"provider":"vercel","enabled":true},{"provider":"grok","enabled":true},{"provider":"poe","enabled":true},{"provider":"hyper","enabled":true}]';;
+usage) case "$3" in
+vercel) printf '%s' '{"provider":"vercel","usage":{"details":[{"title":"Team credits","rows":[{"label":"Available balance","value":"$1,234.56"},{"label":"Lifetime spend","value":"$12.50"},{"label":"Secret","value":"hidden-secret"}]}]}}';;
+grok) printf '%s' '{"provider":"grok","usage":{"providerCost":{"balance":14.46,"currencyCode":"USD","secret":"hidden-token"}}}';;
+poe) printf '%s' '{"provider":"poe","usage":{"details":[{"title":"Points","rows":[{"label":"Current balance","value":"1.2K points"}]}]}}';;
+hyper) printf '%s' '{"provider":"hyper","usage":{"providerCost":{"balance":"invalid","currencyCode":"USD"},"details":[{"title":"Hypercredits","rows":[{"label":"Balance","value":"1,234.50 HC"}]}]}}';;
+esac;;
+cost) printf '[]';;
+esac
+`
+	if err := os.WriteFile(filepath.Join(dir, "codexbar"), []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	result, err := Collect(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"label":"Available balance","value":"$1,234.56"`, `"label":"Lifetime spend","value":"$12.50"`, `"balance":14.46,"currencyCode":"USD"`, `"label":"Current balance","value":"1.2K points"`, `"label":"Balance","value":"1,234.50 HC"`} {
+		if !strings.Contains(string(result), want) {
+			t.Fatalf("missing %s in %s", want, result)
+		}
+	}
+	for _, secret := range []string{"hidden-secret", "hidden-token"} {
+		if strings.Contains(string(result), secret) {
+			t.Fatalf("unexpected %s in %s", secret, result)
+		}
+	}
+}

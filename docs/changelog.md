@@ -82,6 +82,9 @@ not be coupled. Full release notes live in GitHub Releases.
 
 ## History
 
+- `[additive]` `GET /v1/quotas` — include sanitized billing detail rows and provider-reported balances.
+  (2026-10-31)
+
 - `[additive]` `GET /v1/quotas` — include optional bundled monochrome provider icons as base64 SVG data URLs; unknown provider icons are omitted.
   (2026-10-31, [abff69a](https://github.com/arafatamim/ferngeist-acp-gateway/commit/abff69a))
 - `[additive]` `GET /v1/agents` — include optional `quotaProvider` metadata for known single-provider agents; custom and multi-provider agents have none.
