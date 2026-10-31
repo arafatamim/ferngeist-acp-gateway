@@ -30,9 +30,10 @@ Ferngeist Gateway is configured through environment variables and persisted stat
 
 | Variable | Purpose | Default |
 |---|---|---|
-| `FERNGEIST_GATEWAY_SESSION_MAX_DISCONNECTED_SECONDS` | TTL for disconnected sessions before reaper closes them | `900` (15 min) |
+| `FERNGEIST_GATEWAY_SESSION_MAX_DISCONNECTED_SECONDS` | TTL for disconnected sessions before reaper closes them; 24h while a turn runs or an agent request awaits the client | `900` (15 min) |
 | `FERNGEIST_GATEWAY_MAX_SESSIONS_PER_DEVICE` | Max concurrent sessions per device | `5` |
 | `FERNGEIST_GATEWAY_PROGRESS_INTERVAL_SECONDS` | Minimum seconds between live progress pushes while the agent is mid-turn | `15` |
+| `FERNGEIST_GATEWAY_KEEP_AWAKE` | Keep the host from idle-sleeping while any agent turn is running (`systemd-inhibit` on Linux, `caffeinate` on macOS, `SetThreadExecutionState` on Windows); engages and drops within 30s of a turn starting or ending. Set to `0`/`false` to disable | `true` |
 | `FERNGEIST_GATEWAY_FRAME_LOG` | Toggle raw ACP JSON-RPC frame logging; when `1`, every client→agent and agent→client frame is appended to `<log dir>/<agent>-agent.log` as newline-delimited JSON, rotated by `FERNGEIST_GATEWAY_LOG_MAX_BYTES`/`FERNGEIST_GATEWAY_LOG_MAX_BACKUPS` | unset (disabled) |
 
 ## Update settings

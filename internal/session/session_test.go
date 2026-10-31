@@ -750,7 +750,7 @@ func TestListByDeviceReportsEachRuntimesAcpSessionIDs(t *testing.T) {
 	}
 	for _, sid := range []string{"ses_b", "ses_a"} {
 		frame := `{"jsonrpc":"2.0","id":"` + sid + `","method":"session/load","params":{"sessionId":"` + sid + `","cwd":"/proj"}}`
-		if err := loaded.pump.WriteToAgent([]byte(frame)); err != nil {
+		if err := loaded.pump.WriteToAgent(loaded.pump.connGen, []byte(frame)); err != nil {
 			t.Fatalf("WriteToAgent: %v", err)
 		}
 	}
@@ -1207,7 +1207,7 @@ func TestPumpWriteToAgent(t *testing.T) {
 		logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
-	if err := pump.WriteToAgent([]byte("hello")); err != nil {
+	if err := pump.WriteToAgent(pump.connGen, []byte("hello")); err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
 }
@@ -1365,7 +1365,7 @@ func TestWriteSessionCloseSkipsClientObservation(t *testing.T) {
 	}
 
 	// Sanity: WriteToAgent on the same frame WOULD capture it.
-	if err := pump.WriteToAgent([]byte(`{"jsonrpc":"2.0","method":"session/prompt","params":{"sessionId":"ses_client_1"}}`)); err != nil {
+	if err := pump.WriteToAgent(pump.connGen, []byte(`{"jsonrpc":"2.0","method":"session/prompt","params":{"sessionId":"ses_client_1"}}`)); err != nil {
 		t.Fatalf("WriteToAgent: %v", err)
 	}
 	if got := pump.AcpSessionID(); got != "ses_client_1" {
@@ -1941,6 +1941,46 @@ func TestReapExpiredReapsIdleAgent(t *testing.T) {
 	waitProcessStopped(t, sess)
 }
 
+func TestReapExpiredKeepsSilentRunningTurnUntilCap(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		silent time.Duration
+		reaped bool
+	}{
+		{"within cap", time.Hour, false},
+		{"past cap", awaitingClientGrace + time.Hour, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rs, store, agent, _, ctx := setupTest(t, Config{})
+			defer rs.Shutdown()
+			defer store.Close()
+
+			sess, _, err := rs.Create(ctx, agent, "dev-turn", nil)
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			if err := rs.DetachClient(sess.ID, 0); err != nil {
+				t.Fatalf("DetachClient: %v", err)
+			}
+			// A prompt the agent has not answered: the turn runs on, silently.
+			sess.pump.reqIDs.outbound(0, parseClientFrame([]byte(
+				`{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":{"sessionId":"acp-1"}}`)))
+			past := time.Now().UTC().Add(-tc.silent)
+			sess.DisconnectedAt = &past
+
+			rs.reapExpired(15 * time.Minute)
+
+			_, err = rs.GetSessionStatus(sess.ID)
+			if reaped := err == ErrSessionNotFound; reaped != tc.reaped {
+				t.Fatalf("reaped = %v, want %v (err %v)", reaped, tc.reaped, err)
+			}
+			if tc.reaped {
+				waitProcessStopped(t, sess)
+			}
+		})
+	}
+}
+
 func TestCreateEmptyDeviceID(t *testing.T) {
 	rs, store, agent, _, ctx := setupTest(t, Config{})
 	defer rs.Shutdown()
@@ -2410,7 +2450,13 @@ func TestTeardownCancelsPendingTurnsOnlyForThatSession(t *testing.T) {
 			_, _, err := rs.Restart(ctx, mine.RuntimeID, "dev-a", agent, nil)
 			return err
 		}},
-		{"reaper", func(_ context.Context, rs *RuntimeSession, _ catalog.Agent, _ *Session) error {
+		{"reaper", func(_ context.Context, rs *RuntimeSession, _ catalog.Agent, mine *Session) error {
+			// Silent and away past even a running turn's grace.
+			past := time.Now().UTC().Add(-awaitingClientGrace - time.Hour)
+			mine.DisconnectedAt = &past
+			mine.pump.lastStdoutMu.Lock()
+			mine.pump.lastStdoutAt = past
+			mine.pump.lastStdoutMu.Unlock()
 			rs.reapExpired(0)
 			return nil
 		}},

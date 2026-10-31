@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -14,11 +15,12 @@ func newTestLoadRecovery() *LoadRecovery {
 	return newLoadRecovery(slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
 
-// onFrame feeds one agent frame through the recovery policy, parsed the way the
-// pump's pipeline parses it.
+// onFrame feeds one agent frame through numbering and the recovery policy,
+// parsed the way the pump's pipeline parses it.
 func onFrame(t *testing.T, r *LoadRecovery, line string) ([]string, bool) {
 	t.Helper()
 	probe, ok := parseFrameProbe([]byte(line))
+	r.record(line, probe, ok)
 	return r.OnFrame(line, probe, ok)
 }
 
@@ -29,6 +31,13 @@ func loadRequest(id, sessionID string) *clientFrame {
 func updateFrame(sessionID, text string) string {
 	return `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"` + sessionID +
 		`","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"` + text + `"}}}}`
+}
+
+// numberedUpdateFrame is updateFrame as the gateway forwards it, numbered seq.
+func numberedUpdateFrame(sessionID, text string, seq int) string {
+	return `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"` + sessionID +
+		`","update":{"_meta":{"ferngeist/seq":` + strconv.Itoa(seq) + `},"content":{"type":"text","text":"` + text +
+		`"},"sessionUpdate":"agent_message_chunk"}}}`
 }
 
 // TestRecoverAlreadyLoaded covers the core fix: after a first successful load
@@ -75,7 +84,7 @@ func TestRecoverAlreadyLoaded(t *testing.T) {
 	if notice.Method != resumedMethod || notice.Params.SessionID != sid || notice.Params.ReplayedFrames != 2 {
 		t.Fatalf("resume notice = %s, want method %s sessionId %s replayedFrames 2", frames[0], resumedMethod, sid)
 	}
-	if frames[1] != h1 || frames[2] != h2 {
+	if frames[1] != numberedUpdateFrame(sid, "What is this?", 1) || frames[2] != numberedUpdateFrame(sid, "It is Ferngeist.", 2) {
 		t.Fatalf("buffered history not replayed in order:\n got %q, %q", frames[1], frames[2])
 	}
 

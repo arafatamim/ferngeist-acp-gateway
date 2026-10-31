@@ -371,7 +371,8 @@ func TestResilientSession_FullLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetPump() error = %v", err)
 	}
-	if err := pump.WriteToAgent([]byte(`{"jsonrpc":"2.0","id":"7","method":"session/prompt","params":{"sessionId":"mock_sess_1","prompt":[{"type":"text","text":"Push test"}]}}`)); err != nil {
+	// Gen 1: the connection closed above, so the reply finds no client.
+	if err := pump.WriteToAgent(1, []byte(`{"jsonrpc":"2.0","id":"7","method":"session/prompt","params":{"sessionId":"mock_sess_1","prompt":[{"type":"text","text":"Push test"}]}}`)); err != nil {
 		t.Fatalf("WriteToAgent() error = %v", err)
 	}
 
@@ -578,4 +579,58 @@ func TestResilientSession_AgentDeathDuringSession(t *testing.T) {
 	}
 
 	waitForSessionDeleted(t, h.store, connectResp.SessionID, 5*time.Second)
+}
+
+func (h *resilientTestHarness) attach(acpSessionID string) sessionAttachResponse {
+	h.t.Helper()
+	body := `{"agentId":"mock-acp","acpSessionId":"` + acpSessionID + `"}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/sessions/attach", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+h.token)
+	rec := httptest.NewRecorder()
+	h.server.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		h.t.Fatalf("attach status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var resp sessionAttachResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		h.t.Fatalf("Unmarshal(attach) error = %v", err)
+	}
+	h.runtimeID = resp.RuntimeID
+	return resp
+}
+
+// One attach call reattaches a chat: the session holding it is reused, even
+// while its old connection still counts as active, and a chat no live process
+// holds gets a fresh runtime the client must load it into.
+func TestSessionAttachReusesHoldingSessionOrLaunches(t *testing.T) {
+	h := newResilientTestHarness(t)
+	first := h.attach("")
+	if first.NeedsLoad || first.Epoch == "" || first.ProtocolVersion != ProtocolVersion || first.AttachToken == "" {
+		t.Fatalf("new chat attach = %+v", first)
+	}
+
+	conn1 := h.dialSessionWS(first.SessionID, first.AttachToken)
+	defer func() { _ = conn1.CloseNow() }()
+	sendWSMessage(t, conn1, `{"jsonrpc":"2.0","id":"1","method":"initialize","params":{"protocolVersion":1,"capabilities":{},"clientInfo":{"name":"test-client","version":"1.0.0"}}}`)
+	assertResult(t, readWSMessage(t, conn1), "1")
+	sendWSMessage(t, conn1, `{"jsonrpc":"2.0","id":"2","method":"session/new","params":{"cwd":"/proj"}}`)
+	assertResult(t, readWSMessage(t, conn1), "2")
+	assertNotification(t, readWSMessage(t, conn1), "session/update")
+
+	again := h.attach("mock_sess_1")
+	if again.SessionID != first.SessionID || again.RuntimeID != first.RuntimeID || again.Epoch != first.Epoch || again.NeedsLoad {
+		t.Fatalf("reattach = %+v, want session %s reused", again, first.SessionID)
+	}
+	conn2 := h.dialSessionWS(again.SessionID, again.AttachToken)
+	defer func() { _ = conn2.CloseNow() }()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, _, err := conn1.Read(ctx); err == nil {
+		t.Fatal("expected the stale connection to be taken over")
+	}
+
+	other := h.attach("ses_unheld")
+	if other.SessionID == first.SessionID || !other.NeedsLoad || other.Epoch == first.Epoch {
+		t.Fatalf("unheld chat attach = %+v, want a new runtime that needs a load", other)
+	}
 }

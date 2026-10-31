@@ -76,6 +76,8 @@ func (s *Server) resolveWorkspaceCwd(w http.ResponseWriter, r *http.Request, run
 	return "", false
 }
 
+const maxWorkspaceFileBytes = 8 << 20
+
 // handleWorkspaceFile reads a file inside a runtime's project directory.
 // GET /v1/runtimes/{runtimeId}/files?path=<rel>
 // Text files return a TextResourceContents; binary files return a
@@ -105,15 +107,15 @@ func (s *Server) handleWorkspaceFile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "path is a directory")
 		return
 	}
-	data, err := workspace.ReadFileLimited(abs, workspace.MaxFileReadBytes)
+	data, err := workspace.ReadFileLimited(abs, maxWorkspaceFileBytes)
 	if err != nil {
 		s.logger.Error("read workspace file", "path", abs, "error", err)
 		writeError(w, http.StatusInternalServerError, "failed to read file")
 		return
 	}
-	truncated := len(data) > workspace.MaxFileReadBytes
+	truncated := len(data) > maxWorkspaceFileBytes
 	if truncated {
-		data = data[:workspace.MaxFileReadBytes]
+		data = data[:maxWorkspaceFileBytes]
 	}
 	uri := workspace.FileURI(abs)
 	mimeType := workspace.MimeTypeFor(rel)
@@ -121,7 +123,7 @@ func (s *Server) handleWorkspaceFile(w http.ResponseWriter, r *http.Request) {
 	if mimeType != "" {
 		mimePtr = &mimeType
 	}
-	if workspace.IsBinary(data) {
+	if workspace.IsBinary(data) || (strings.HasPrefix(mimeType, "image/") && !strings.HasPrefix(mimeType, "image/svg+xml")) {
 		writeJSON(w, http.StatusOK, blobReadResponse{
 			BlobResourceContents: acp.BlobResourceContents{
 				Blob:     base64.StdEncoding.EncodeToString(data),

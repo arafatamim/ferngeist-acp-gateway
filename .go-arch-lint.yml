@@ -48,6 +48,7 @@ components:
   registry: { in: internal/registry }
   discovery: { in: internal/discovery }
   service: { in: internal/service }
+  caffeine: { in: internal/caffeine }
   # cross-cutting
   config: { in: internal/config }
   logging: { in: internal/logging }

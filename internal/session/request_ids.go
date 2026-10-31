@@ -230,14 +230,23 @@ func (r *requestIDs) dropSessionAgentRequestsLocked(sessionID string) {
 
 // promptRunning reports whether a session/prompt for sessionID awaits its reply.
 func (r *requestIDs) promptRunning(sessionID string) bool {
+	_, ok := r.promptStartedAt(sessionID)
+	return ok
+}
+
+// promptStartedAt reports when the latest session/prompt for sessionID still
+// awaiting its reply reached the gateway.
+func (r *requestIDs) promptStartedAt(sessionID string) (time.Time, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	var startedAt time.Time
+	ok := false
 	for _, req := range r.pending {
 		if req.promptSession == sessionID {
-			return true
+			startedAt, ok = maxTime(startedAt, req.startedAt), true
 		}
 	}
-	return false
+	return startedAt, ok
 }
 
 // liveTurn is one ACP session whose prompt awaits its reply.

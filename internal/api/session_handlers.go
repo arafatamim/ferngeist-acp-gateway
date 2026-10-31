@@ -2,15 +2,18 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/pairing"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/session"
 	"github.com/coder/websocket"
 )
 
 func (s *Server) registerSessionRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("POST /v1/sessions/attach", s.handleSessionAttach)
 	mux.HandleFunc("POST /v1/sessions/{sessionId}/resume", s.handleSessionResume)
 	mux.HandleFunc("GET /v1/sessions", s.handleSessionList)
 	mux.HandleFunc("DELETE /v1/sessions/{sessionId}", s.handleSessionClose)
@@ -22,6 +25,73 @@ func (s *Server) registerSessionRoutes(mux *http.ServeMux) {
 // the WebSocket reconnect.
 type sessionResumeResponse struct {
 	AttachToken string `json:"attachToken"`
+}
+
+// sessionAttachRequest is the body of POST /v1/sessions/attach. ACPSessionID
+// is the chat to reattach; empty for a new chat.
+type sessionAttachRequest struct {
+	AgentID      string `json:"agentId"`
+	ACPSessionID string `json:"acpSessionId"`
+}
+
+// sessionAttachResponse is returned by POST /v1/sessions/attach: everything a
+// client needs to open the WebSocket in one round trip. NeedsLoad means the
+// chat's agent process is new, so the client must session/load it; Epoch is
+// what a later catch-up resume names.
+type sessionAttachResponse struct {
+	runtimeConnectResponse
+	ProtocolVersion string `json:"protocolVersion"`
+	Epoch           string `json:"epoch"`
+	NeedsLoad       bool   `json:"needsLoad"`
+}
+
+// handleSessionAttach reattaches a chat with one call, replacing status, list,
+// resume and connect: a reopened chat whose turn is still streaming would
+// otherwise sit frozen through four round trips.
+func (s *Server) handleSessionAttach(w http.ResponseWriter, r *http.Request) {
+	credential, ok := s.requireGatewayScope(w, r, pairing.ScopeControl)
+	if !ok {
+		return
+	}
+	if s.sessionSvc == nil {
+		writeError(w, http.StatusServiceUnavailable, "session service not available")
+		return
+	}
+	var req sessionAttachRequest
+	r.Body = http.MaxBytesReader(w, r.Body, jsonBodyLimit)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	agent, err := s.catalog.Get(req.AgentID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	sess, attachToken, launched, err := s.sessionSvc.AttachACP(r.Context(), agent, credential.DeviceID, req.ACPSessionID)
+	if err != nil {
+		writeAgentLaunchError(w, err)
+		return
+	}
+	descriptor, err := s.runtime.Connect(sess.RuntimeID)
+	if err != nil {
+		s.writeStartupExit(w, r, sess, credential.DeviceID)
+		return
+	}
+	pump, err := s.sessionSvc.GetPump(sess.ID)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "agent session ended during attach")
+		return
+	}
+	resp := sessionAttachResponse{
+		runtimeConnectResponse: connectResponseFromDescriptor(r, descriptor),
+		ProtocolVersion:        ProtocolVersion,
+		Epoch:                  pump.Epoch(),
+		NeedsLoad:              launched && req.ACPSessionID != "",
+	}
+	resp.SessionID = sess.ID
+	resp.AttachToken = attachToken
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // sessionListResponse is returned by GET /v1/sessions. Lists all sessions
@@ -163,7 +233,8 @@ func (s *Server) handleSessionWebSocket(w http.ResponseWriter, r *http.Request, 
 	go keepAliveWebSocket(pingCtx, conn, s.logger, pump.LastClientWriteAt)
 
 	done := make(chan error, 1)
-	go proxyWebSocketToStdio(conn, pump.WriteToAgent, func() {}, runtimeID, s.runtime.AppendLog,
+	writeToAgent := func(payload []byte) error { return pump.WriteToAgent(gen, payload) }
+	go proxyWebSocketToStdio(conn, writeToAgent, func() {}, runtimeID, s.runtime.AppendLog,
 		func(payload []byte) {
 			s.sessionSvc.LogInbound(sessionID, string(payload))
 		}, done)

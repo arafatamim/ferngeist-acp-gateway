@@ -21,8 +21,8 @@ import (
 	"github.com/coder/acp-go-sdk"
 )
 
-// MaxFileReadBytes caps the size of a single file read by the workspace file
-// endpoint. Larger files are truncated and the response flags truncated=true.
+// MaxFileReadBytes caps file content in workspace git diffs and line counting.
+// The file endpoint has its own larger limit for transcript images.
 const MaxFileReadBytes = 1 << 20 // 1 MiB
 
 // MaxFileListEntries caps GET /v1/runtimes/{id}/files/list at 50,000 paths:

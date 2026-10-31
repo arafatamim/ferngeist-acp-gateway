@@ -133,6 +133,10 @@ type StdioPump struct {
 	// never share one. See requestIDs.
 	reqIDs requestIDs
 
+	// The prompts already delivered, so a repeat is never run twice. See
+	// deliveredPrompts.
+	prompts deliveredPrompts
+
 	// Resilient re-load support: buffers session/update history and recovers
 	// "already loaded" rejections from agents that keep the session loaded
 	// across a disconnect. See LoadRecovery. Nil when disabled.
@@ -332,23 +336,30 @@ func (p *StdioPump) queueLocked(frames []string) *websocket.Conn {
 	return nil
 }
 
-// WriteToAgent writes one client→agent frame to the agent's stdin. The frame is
-// parsed once. A duplicate `initialize` from a reconnecting client is answered
-// from the cached response instead: the agent is already initialized, and a
-// strict agent may reject a second handshake by exiting. Anything else is
-// rewritten for this connection and recorded (see prepareOutbound).
-func (p *StdioPump) WriteToAgent(payload []byte) error {
+// WriteToAgent writes one client→agent frame from connection gen (the
+// generation its Attach returned) to the agent's stdin. The frame is parsed
+// once. A duplicate `initialize` from a reconnecting client is answered from
+// the cached response instead: the agent is already initialized, and a strict
+// agent may reject a second handshake by exiting. A catch-up session/resume is
+// answered by the gateway (see answerCatchUp), and a prompt that already
+// reached the agent is refused (see dropDuplicatePrompt). Anything else is rewritten for
+// its connection and recorded (see prepareOutbound), so the reply to a request
+// from a superseded connection is withheld rather than sent to its successor.
+func (p *StdioPump) WriteToAgent(gen int64, payload []byte) error {
 	f := parseClientFrame(payload)
-	if p.replayInitialize(f) {
+	if p.replayInitialize(f) || p.answerCatchUp(gen, f) || p.dropDuplicatePrompt(gen, f) {
 		return nil
 	}
-	payload = p.prepareOutbound(f)
+	payload = p.prepareOutbound(gen, f)
 	if p.frameLog != nil {
 		p.frameLog.append(p.agentID, p.runtimeID, p.sessionID, "in", payload)
 	}
 	if err := p.writeToAgent(payload); err != nil {
 		if f.Method != "" && f.ID != nil {
 			p.reqIDs.discard(f.ID)
+		}
+		if f.Method == "session/prompt" {
+			p.prompts.release(f.Params.SessionID, f.Params.Meta.ClientID)
 		}
 		return err
 	}
