@@ -1,0 +1,99 @@
+Bundled monochrome provider icons. Trademark rights remain with their owners.
+
+@lobehub/icons-static-svg@1.101.0 (MIT)
+https://registry.npmjs.org/@lobehub/icons-static-svg/-/icons-static-svg-1.101.0.tgz
+simple-icons@16.36.0 (CC0-1.0)
+https://registry.npmjs.org/simple-icons/-/simple-icons-16.36.0.tgz
+
+MIT notice: https://github.com/lobehub/lobe-icons/blob/aea0ecb0fe1439467219197c52ffaeb579dfe33f/LICENSE
+
+SVGs copied unchanged except Simple Icons roots gain fill="currentColor".
+Provider IDs: CodexBar v0.82.0 Sources/CodexBarCore/Providers/Providers.swift.
+No runtime download; unmatched providers omit icon.
+
+alibaba.svg: @lobehub/icons-static-svg@1.101.0/icons/alibaba.svg
+amp.svg: @lobehub/icons-static-svg@1.101.0/icons/amp.svg
+antigravity.svg: @lobehub/icons-static-svg@1.101.0/icons/antigravity.svg
+atlascloud.svg: @lobehub/icons-static-svg@1.101.0/icons/atlascloud.svg
+azure.svg: @lobehub/icons-static-svg@1.101.0/icons/azure.svg
+bedrock.svg: @lobehub/icons-static-svg@1.101.0/icons/bedrock.svg
+chutes.svg: @lobehub/icons-static-svg@1.101.0/icons/chutes.svg
+claude.svg: @lobehub/icons-static-svg@1.101.0/icons/claude.svg
+cline.svg: @lobehub/icons-static-svg@1.101.0/icons/cline.svg
+coderabbit.svg: simple-icons@16.36.0/icons/coderabbit.svg
+codex.svg: @lobehub/icons-static-svg@1.101.0/icons/codex.svg
+commandcode.svg: @lobehub/icons-static-svg@1.101.0/icons/commandcode.svg
+cursor.svg: @lobehub/icons-static-svg@1.101.0/icons/cursor.svg
+deepgram.svg: simple-icons@16.36.0/icons/deepgram.svg
+deepinfra.svg: @lobehub/icons-static-svg@1.101.0/icons/deepinfra.svg
+deepseek.svg: @lobehub/icons-static-svg@1.101.0/icons/deepseek.svg
+devin.svg: @lobehub/icons-static-svg@1.101.0/icons/devin.svg
+doubao.svg: @lobehub/icons-static-svg@1.101.0/icons/doubao.svg
+elevenlabs.svg: @lobehub/icons-static-svg@1.101.0/icons/elevenlabs.svg
+exa.svg: @lobehub/icons-static-svg@1.101.0/icons/exa.svg
+fal.svg: @lobehub/icons-static-svg@1.101.0/icons/fal.svg
+fireworks.svg: @lobehub/icons-static-svg@1.101.0/icons/fireworks.svg
+flora.svg: @lobehub/icons-static-svg@1.101.0/icons/flora.svg
+gemini.svg: @lobehub/icons-static-svg@1.101.0/icons/gemini.svg
+githubcopilot.svg: @lobehub/icons-static-svg@1.101.0/icons/githubcopilot.svg
+gitkraken.svg: simple-icons@16.36.0/icons/gitkraken.svg
+grok.svg: @lobehub/icons-static-svg@1.101.0/icons/grok.svg
+groq.svg: @lobehub/icons-static-svg@1.101.0/icons/groq.svg
+huggingface.svg: @lobehub/icons-static-svg@1.101.0/icons/huggingface.svg
+hyper.svg: simple-icons@16.36.0/icons/hyper.svg
+jetbrains.svg: simple-icons@16.36.0/icons/jetbrains.svg
+kilocode.svg: @lobehub/icons-static-svg@1.101.0/icons/kilocode.svg
+kimi.svg: @lobehub/icons-static-svg@1.101.0/icons/kimi.svg
+kiro.svg: @lobehub/icons-static-svg@1.101.0/icons/kiro.svg
+longcat.svg: @lobehub/icons-static-svg@1.101.0/icons/longcat.svg
+manus.svg: @lobehub/icons-static-svg@1.101.0/icons/manus.svg
+minimax.svg: @lobehub/icons-static-svg@1.101.0/icons/minimax.svg
+mistral.svg: @lobehub/icons-static-svg@1.101.0/icons/mistral.svg
+moonshot.svg: @lobehub/icons-static-svg@1.101.0/icons/moonshot.svg
+muse.svg: @lobehub/icons-static-svg@1.101.0/icons/muse.svg
+notion.svg: @lobehub/icons-static-svg@1.101.0/icons/notion.svg
+nousresearch.svg: @lobehub/icons-static-svg@1.101.0/icons/nousresearch.svg
+ollama.svg: @lobehub/icons-static-svg@1.101.0/icons/ollama.svg
+openai.svg: @lobehub/icons-static-svg@1.101.0/icons/openai.svg
+opencode.svg: @lobehub/icons-static-svg@1.101.0/icons/opencode.svg
+openrouter.svg: @lobehub/icons-static-svg@1.101.0/icons/openrouter.svg
+perplexity.svg: @lobehub/icons-static-svg@1.101.0/icons/perplexity.svg
+pi.svg: @lobehub/icons-static-svg@1.101.0/icons/pi.svg
+poe.svg: @lobehub/icons-static-svg@1.101.0/icons/poe.svg
+qoder.svg: @lobehub/icons-static-svg@1.101.0/icons/qoder.svg
+qwen.svg: @lobehub/icons-static-svg@1.101.0/icons/qwen.svg
+raycast.svg: simple-icons@16.36.0/icons/raycast.svg
+replicate.svg: @lobehub/icons-static-svg@1.101.0/icons/replicate.svg
+sakana.svg: @lobehub/icons-static-svg@1.101.0/icons/sakana.svg
+stepfun.svg: @lobehub/icons-static-svg@1.101.0/icons/stepfun.svg
+sub2api.svg: @lobehub/icons-static-svg@1.101.0/icons/sub2api.svg
+tavily.svg: @lobehub/icons-static-svg@1.101.0/icons/tavily.svg
+trae.svg: @lobehub/icons-static-svg@1.101.0/icons/trae.svg
+typesafeai.svg: @lobehub/icons-static-svg@1.101.0/icons/typesafeai.svg
+v0.svg: @lobehub/icons-static-svg@1.101.0/icons/v0.svg
+venice.svg: @lobehub/icons-static-svg@1.101.0/icons/venice.svg
+vercel.svg: @lobehub/icons-static-svg@1.101.0/icons/vercel.svg
+vertexai.svg: @lobehub/icons-static-svg@1.101.0/icons/vertexai.svg
+warp.svg: simple-icons@16.36.0/icons/warp.svg
+windsurf.svg: @lobehub/icons-static-svg@1.101.0/icons/windsurf.svg
+workbuddy.svg: @lobehub/icons-static-svg@1.101.0/icons/workbuddy.svg
+xai.svg: @lobehub/icons-static-svg@1.101.0/icons/xai.svg
+xiaomimimo.svg: @lobehub/icons-static-svg@1.101.0/icons/xiaomimimo.svg
+zai.svg: @lobehub/icons-static-svg@1.101.0/icons/zai.svg
+zedindustries.svg: simple-icons@16.36.0/icons/zedindustries.svg
+zenmux.svg: @lobehub/icons-static-svg@1.101.0/icons/zenmux.svg
+
+Provider aliases:
+alibabatokenplan -> alibaba.svg
+azureopenai -> azure.svg
+claudeplatform -> claude.svg
+clinepass -> cline.svg
+copilot -> githubcopilot.svg
+kilo -> kilocode.svg
+mimo -> xiaomimimo.svg
+nous -> nousresearch.svg
+opencodego -> opencode.svg
+qwencloud -> qwen.svg
+traecn -> trae.svg
+typesafe -> typesafeai.svg
+zed -> zedindustries.svg

@@ -2,7 +2,9 @@ package quota
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"os"
 	"os/exec"
@@ -205,5 +207,57 @@ esac
 				t.Fatalf("unexpected response: %s", result)
 			}
 		})
+	}
+}
+
+func TestCollectBundlesProviderIconsAndOmitsUnknownIcons(t *testing.T) {
+	dir := t.TempDir()
+	script := `#!/bin/sh
+case "$1" in
+config) printf '%s' '[{"provider":"claude","enabled":true},{"provider":"copilot","enabled":true},{"provider":"unknown","enabled":true},{"provider":"warp","enabled":true}]';;
+usage) printf '{"provider":"%s","error":{"kind":"provider"}}' "$3";;
+cost) printf '[]';;
+esac
+`
+	if err := os.WriteFile(filepath.Join(dir, "codexbar"), []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	data, err := Collect(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		Providers []struct {
+			Provider string  `json:"provider"`
+			Icon     *string `json:"icon"`
+		} `json:"providers"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Providers) != 4 {
+		t.Fatalf("providers = %s", data)
+	}
+	for _, p := range payload.Providers {
+		if p.Provider == "unknown" {
+			if p.Icon != nil {
+				t.Fatalf("unknown provider has icon: %s", data)
+			}
+			continue
+		}
+		if p.Icon == nil || !strings.HasPrefix(*p.Icon, "data:image/svg+xml;base64,") {
+			t.Fatalf("%s: missing bundled SVG", p.Provider)
+		}
+		svg, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(*p.Icon, "data:image/svg+xml;base64,"))
+		var image struct {
+			ViewBox string `xml:"viewBox,attr"`
+		}
+		if err != nil || xml.Unmarshal(svg, &image) != nil || image.ViewBox == "" || !strings.Contains(string(svg), "currentColor") {
+			t.Fatalf("%s: invalid monochrome SVG: %s", p.Provider, svg)
+		}
+		if p.Provider == "copilot" && !strings.Contains(string(svg), "GithubCopilot") {
+			t.Fatalf("copilot must use GitHub Copilot artwork: %s", svg)
+		}
 	}
 }

@@ -53,6 +53,9 @@ not be coupled. Full release notes live in GitHub Releases.
 
 ## History
 
+- `[additive]` `GET /v1/quotas` — include optional bundled monochrome provider icons as base64 SVG data URLs; unknown provider icons are omitted.
+- `[additive]` `GET /v1/agents` — include optional `quotaProvider` metadata for known single-provider agents; custom and multi-provider agents have none.
+
 - `[additive]` `GET /v1/quotas` — include optional provider display name, plan, account email, and estimated USD spend for today and the last 30 days.
 
 - `[additive]` `GET /v1/quotas` — report CodexBar plan quota windows from a background-refreshed snapshot.

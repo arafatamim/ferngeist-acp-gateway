@@ -27,6 +27,20 @@ const mockAgentExecutablePlaceholder = "__MOCK_AGENT_EXECUTABLE__"
 //go:embed manifests/*.json
 var embeddedManifestFS embed.FS
 
+// quotaProviders identifies the billing service, never a model selected inside
+// a multi-provider agent. Unknown and custom agents have no inferred provider.
+var quotaProviders = map[string]string{
+	"amp-acp":            "amp",
+	"antigravity-acp":    "antigravity",
+	"claude-acp":         "claude",
+	"codex-acp":          "codex",
+	"cursor":             "cursor",
+	"factory-droid":      "factory",
+	"gemini":             "gemini",
+	"github-copilot-cli": "copilot",
+	"kimi":               "kimi",
+}
+
 // Agent is one gateway-visible ACP runtime entry. Entries come from three
 // sources: bundled gateway-owned manifests (such as the mock runtime), the ACP
 // registry (when it provides a supported launch method), or client-registered
@@ -37,6 +51,7 @@ type Agent struct {
 	Source          string          `json:"source"` // "embedded" | "registry" | "custom"
 	DisplayName     string          `json:"displayName"`
 	Icon            string          `json:"icon,omitempty"`
+	QuotaProvider   string          `json:"quotaProvider,omitempty"`
 	Protocol        string          `json:"protocol"`
 	PlatformSupport []string        `json:"platformSupport,omitempty"`
 	Detection       DetectionConfig `json:"detection"`
@@ -459,17 +474,24 @@ func (s *Service) refreshLocked() {
 		}
 	}
 
-	for i := range visible {
-		if visible[i].Icon == "" && visible[i].Registry.Icon == "" {
-			visible[i].Icon = bundledLogo(visible[i].ID)
-		}
-	}
+	enrichAgentMetadata(visible)
 
 	sort.Slice(visible, func(i, j int) bool {
 		return visible[i].ID < visible[j].ID
 	})
 	s.agents = visible
 	s.lastRefresh = time.Now()
+}
+
+func enrichAgentMetadata(agents []Agent) {
+	for i := range agents {
+		if agents[i].Source != "custom" {
+			agents[i].QuotaProvider = quotaProviders[agents[i].ID]
+		}
+		if agents[i].Icon == "" && agents[i].Registry.Icon == "" {
+			agents[i].Icon = bundledLogo(agents[i].ID)
+		}
+	}
 }
 
 func (s *Service) detect(agent Agent) bool {

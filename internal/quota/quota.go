@@ -37,6 +37,7 @@ type usage struct {
 	UpdatedAt        *string       `json:"updatedAt"`
 }
 type provider struct {
+	Icon             string         `json:"icon,omitempty"`
 	DisplayName      string         `json:"displayName,omitempty"`
 	Plan             string         `json:"plan,omitempty"`
 	Account          string         `json:"account,omitempty"`
@@ -77,7 +78,7 @@ func Collect(ctx context.Context) (json.RawMessage, error) {
 	var providers []provider
 	for _, p := range configured {
 		if p.Enabled && p.Provider != "" {
-			providers = append(providers, provider{Provider: p.Provider, DisplayName: p.DisplayName})
+			providers = append(providers, provider{Provider: p.Provider, DisplayName: p.DisplayName, Icon: providerIcon(p.Provider)})
 		}
 	}
 	if len(providers) > 100 {
@@ -118,6 +119,7 @@ func collectProviders(ctx context.Context, providers []provider) {
 			}
 			p := collectProvider(ctx, providers[i].Provider)
 			p.DisplayName = providers[i].DisplayName
+			p.Icon = providers[i].Icon
 			providers[i] = p
 		}(i)
 	}

@@ -79,6 +79,10 @@ Base path: `/v1`
       should prefer `registry.icon`, then decode `icon`, then use a neutral
       glyph. When no registry icon exists, the gateway supplies a known agent's
       logo or a generic agent icon.
+    - `quotaProvider` — optional CodexBar provider ID for highlighting a known
+      agent's quota entry (e.g. `codex-acp` → `codex`). Omitted for unknown,
+      multi-provider, and custom agents. It does not guarantee the provider is
+      installed, enabled, or returned by `/v1/quotas`.
 
 ### Pairing
 
@@ -1266,6 +1270,11 @@ This document is intentionally high-level. For implementation details, see the c
 `GET /v1/quotas` requires gateway read scope and returns `{ "providers": [...] }`.
 Each provider contains `provider`, optional `source`, and `usage` with CodexBar's
 `primary`, `secondary`, `tertiary`, `extraRateWindows`, and `updatedAt` fields.
+Optional `icon` is a bundled monochrome SVG as a `data:image/svg+xml;base64,`
+URL, using the same format as the agent `icon` field. Icons are keyed by provider
+ID (including known brand aliases), are available even when quota collection
+fails for that provider, and are omitted when no artwork is bundled. Clients
+should use a neutral glyph when absent.
 `rateWindowLabels` provides CodexBar’s labels when available. Windows contain
 `usedPercent`, `windowMinutes`, `resetsAt`, and `resetDescription` when available.
 Missing windows are null. Responses are served from the gateway's last snapshot;
