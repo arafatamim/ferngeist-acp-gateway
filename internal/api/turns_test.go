@@ -91,7 +91,7 @@ func TestTurnsShowsAnotherDevicesTurnsAndOutcomes(t *testing.T) {
 			t.Fatal(err)
 		}
 		frame := `{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":{"sessionId":"` + chat + `","prompt":[]}}`
-		if err := pump.WriteToAgent([]byte(frame)); err != nil {
+		if err := pump.WriteToAgent(0, []byte(frame)); err != nil {
 			t.Fatal(err)
 		}
 	}

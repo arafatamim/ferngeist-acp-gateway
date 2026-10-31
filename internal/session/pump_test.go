@@ -201,7 +201,7 @@ func TestSessionNewCwdBindsOnResponse(t *testing.T) {
 func TestSessionNewCwdBindsThroughIDRewrite(t *testing.T) {
 	p := newRecoveryPump()
 	p.proc = &runtime.Process{Stdin: nopWriteCloser{}}
-	if err := p.WriteToAgent([]byte(`{"jsonrpc":"2.0","id":"client-7","method":"session/new","params":{"cwd":"/proj"}}`)); err != nil {
+	if err := p.WriteToAgent(p.connGen, []byte(`{"jsonrpc":"2.0","id":"client-7","method":"session/new","params":{"cwd":"/proj"}}`)); err != nil {
 		t.Fatalf("WriteToAgent: %v", err)
 	}
 	p.handleStdoutLine(`{"jsonrpc":"2.0","id":1,"result":{"sessionId":"ses_x"}}`)
@@ -389,13 +389,13 @@ func TestLiveTurnsTrackRepliesAcrossDetach(t *testing.T) {
 		t.Run(outcome, func(t *testing.T) {
 			p := newRecoveryPump()
 			gen := p.Attach()
-			p.prepareOutbound(parseClientFrame([]byte(`{"id":0,"method":"session/load","params":{"sessionId":"idle"}}`)))
+			p.prepareOutbound(p.connGen, parseClientFrame([]byte(`{"id":0,"method":"session/load","params":{"sessionId":"idle"}}`)))
 			if got := liveSessions(p); len(got) != 0 {
 				t.Fatalf("before prompt = %v", got)
 			}
-			first := p.prepareOutbound(parseClientFrame([]byte(`{"id":1,"method":"session/prompt","params":{"sessionId":"active"}}`)))
-			second := p.prepareOutbound(parseClientFrame([]byte(`{"id":2,"method":"session/prompt","params":{"sessionId":"active"}}`)))
-			p.prepareOutbound(parseClientFrame([]byte(`{"id":3,"method":"session/prompt","params":{"sessionId":"other"}}`)))
+			first := p.prepareOutbound(p.connGen, parseClientFrame([]byte(`{"id":1,"method":"session/prompt","params":{"sessionId":"active"}}`)))
+			second := p.prepareOutbound(p.connGen, parseClientFrame([]byte(`{"id":2,"method":"session/prompt","params":{"sessionId":"active"}}`)))
+			p.prepareOutbound(p.connGen, parseClientFrame([]byte(`{"id":3,"method":"session/prompt","params":{"sessionId":"other"}}`)))
 			if !p.Detach(gen) {
 				t.Fatal("detach rejected")
 			}

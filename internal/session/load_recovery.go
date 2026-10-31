@@ -3,6 +3,7 @@ package session
 import (
 	"encoding/json"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -34,18 +35,33 @@ type LoadRecovery struct {
 	response     map[string][]byte         // acpSessionId -> first successful session/load response
 	pendingLoads map[string]string         // load request id -> acpSessionId
 
+	// Catch-up numbering. Every buffered update carries its session's next
+	// ferngeist/seq, so a reattaching client asks only for what it missed.
+	// epoch names this buffer: it dies with the pump, and a seq from another
+	// epoch means nothing here.
+	epoch   string
+	seq     map[string]int64 // acpSessionId -> last assigned seq
+	evicted map[string]int64 // acpSessionId -> highest seq evicted from history
+
 	logger *slog.Logger
 }
 
-// historyFrame is one buffered session/update; user marks a user_message_chunk.
+// historyFrame is one buffered session/update; user marks a user_message_chunk
+// and seq is its ferngeist/seq, 0 for a frame that could not be numbered.
 type historyFrame struct {
 	line string
 	user bool
+	seq  int64
 }
 
 // newLoadRecovery builds a LoadRecovery bound to the given logger.
 func newLoadRecovery(logger *slog.Logger) *LoadRecovery {
-	return &LoadRecovery{logger: logger}
+	return &LoadRecovery{
+		logger:  logger,
+		epoch:   generateID(),
+		seq:     make(map[string]int64),
+		evicted: make(map[string]int64),
+	}
 }
 
 // OnOutbound records an in-flight session/load request so the agent's later
@@ -54,7 +70,7 @@ func newLoadRecovery(logger *slog.Logger) *LoadRecovery {
 // before the frame is forwarded.
 func (r *LoadRecovery) OnOutbound(f *clientFrame) {
 	if f.Method == "session/prompt" && f.Params.SessionID != "" {
-		r.bufferPrompt(f.Params.SessionID, f.Params.Prompt)
+		r.bufferPrompt(f.Params.SessionID, f.Params.Prompt, f.Params.Meta.ClientID)
 		return
 	}
 	if f.Method != "session/load" || f.Params.SessionID == "" || len(f.ID) == 0 {
@@ -69,15 +85,12 @@ func (r *LoadRecovery) OnOutbound(f *clientFrame) {
 }
 
 // OnFrame inspects an agent->client frame and applies the re-load recovery
-// policy. It first buffers session/update history for future re-loads, then
-// handles recovery. When a duplicate session/load is rejected as "already
+// policy (history is buffered separately, by record). When a duplicate session/load is rejected as "already
 // loaded", it returns replacement frames — an explicit `_ferngeist/resumed`
 // notification, the buffered session/update history, and a synthesized success
 // — and reports handled=true so the caller suppresses the original error.
 // Otherwise the frame passes through unchanged.
 func (r *LoadRecovery) OnFrame(line string, probe frameProbe, ok bool) ([]string, bool) {
-	r.bufferHistory(line, probe, ok)
-
 	r.mu.Lock()
 	noPending := len(r.pendingLoads) == 0
 	r.mu.Unlock()
@@ -140,55 +153,101 @@ func (r *LoadRecovery) OnFrame(line string, probe frameProbe, ok bool) ([]string
 	return append(frames, success), true
 }
 
-// bufferHistory appends a session/update frame to its session's replay buffer,
-// evicting the oldest frames once the buffer exceeds maxLoadHistoryBytes. Only
+// record numbers a session/update frame and appends it to its session's replay
+// buffer, evicting the oldest frames once the buffer exceeds
+// maxLoadHistoryBytes, and returns the numbered line to forward. Only
 // session/update notifications are buffered; live request/response frames
 // (permission prompts, rpc results) are not, so a reconnecting client never
-// replays a stale, since-resolved request.
-func (r *LoadRecovery) bufferHistory(line string, probe frameProbe, ok bool) {
+// replays a stale, since-resolved request. The pump calls it under clientMu,
+// so a catch-up replay can neither repeat nor reorder this frame's forward.
+func (r *LoadRecovery) record(line string, probe frameProbe, ok bool) string {
 	if !ok ||
 		probe.Method != "session/update" || probe.Params == nil || probe.Params.SessionID == "" {
-		return
+		return line
 	}
+	sid := probe.Params.SessionID
 	user := probe.Params.Update != nil && probe.Params.Update.Discriminator == "user_message_chunk"
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.appendHistoryLocked(probe.Params.SessionID, line, user)
+	seq := r.seq[sid] + 1
+	stamped, numbered := withUpdateMeta(line, map[string]json.RawMessage{
+		seqMetaKey: json.RawMessage(strconv.FormatInt(seq, 10)),
+	})
+	if !numbered {
+		// Not an object update: buffered for re-load, but never numbered, so
+		// the session's seqs stay gap-free.
+		r.appendHistoryLocked(sid, line, user, 0)
+		return line
+	}
+	r.seq[sid] = seq
+	r.appendHistoryLocked(sid, stamped, user, seq)
+	return stamped
 }
 
 // bufferPrompt records a prompt the client sent as the user_message_chunk
 // updates a load replay would carry. Agents do not echo a live prompt, so
 // without this a re-load replays every reply since the gateway took the session
 // with no user turn between them, and the client folds them into one message.
-func (r *LoadRecovery) bufferPrompt(sessionID string, blocks []json.RawMessage) {
+// clientID, the prompt's own id, rides along so a reattaching client can tell
+// which of its prompts arrived.
+func (r *LoadRecovery) bufferPrompt(sessionID string, blocks []json.RawMessage, clientID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, block := range blocks {
+		seq := r.seq[sessionID] + 1
+		meta := map[string]any{seqMetaKey: seq}
+		if clientID != "" {
+			meta[clientIDMetaKey] = clientID
+		}
 		frame, err := json.Marshal(map[string]any{
 			"jsonrpc": "2.0",
 			"method":  "session/update",
 			"params": map[string]any{
 				"sessionId": sessionID,
-				"update":    map[string]any{"sessionUpdate": "user_message_chunk", "content": block},
+				"update": map[string]any{
+					"sessionUpdate": "user_message_chunk",
+					"content":       block,
+					"_meta":         meta,
+				},
 			},
 		})
 		if err == nil {
-			r.appendHistoryLocked(sessionID, string(frame), true)
+			r.seq[sessionID] = seq
+			r.appendHistoryLocked(sessionID, string(frame), true, seq)
 		}
 	}
+}
+
+// catchUp returns sid's buffered updates numbered after afterSeq, oldest
+// first, and the session's head seq. gap reports that the buffer cannot fill
+// the client's gap: another epoch (a restarted pump), updates it needs were
+// evicted, or a seq this epoch never assigned.
+func (r *LoadRecovery) catchUp(sid, epoch string, afterSeq int64) (frames []string, head int64, gap bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	head = r.seq[sid]
+	if epoch != r.epoch || afterSeq < r.evicted[sid] || afterSeq > head {
+		return nil, head, true
+	}
+	for _, f := range r.history[sid] {
+		if f.seq > afterSeq {
+			frames = append(frames, f.line)
+		}
+	}
+	return frames, head, false
 }
 
 // appendHistoryLocked appends one frame, then evicts the oldest past
 // maxLoadHistoryBytes. After an eviction it keeps dropping up to the next user
 // message, so a replay never opens partway through a reply. Caller holds mu.
-func (r *LoadRecovery) appendHistoryLocked(sid, line string, user bool) {
+func (r *LoadRecovery) appendHistoryLocked(sid, line string, user bool, seq int64) {
 	if r.history == nil {
 		r.history = make(map[string][]historyFrame)
 		r.histSize = make(map[string]int)
 		r.userFrames = make(map[string]int)
 	}
-	r.history[sid] = append(r.history[sid], historyFrame{line: line, user: user})
+	r.history[sid] = append(r.history[sid], historyFrame{line: line, user: user, seq: seq})
 	r.histSize[sid] += len(line)
 	if user {
 		r.userFrames[sid]++
@@ -217,6 +276,7 @@ func (r *LoadRecovery) dropOldestLocked(sid string) {
 	dropped := r.history[sid][0]
 	r.history[sid] = r.history[sid][1:]
 	r.histSize[sid] -= len(dropped.line)
+	r.evicted[sid] = max(r.evicted[sid], dropped.seq)
 	if dropped.user {
 		r.userFrames[sid]--
 	}

@@ -876,6 +876,30 @@ clean. Worktrees outlive the chats that use them: they are removed only on an ex
     - `401` — invalid or missing device credential
     - `503` — session service not available
 
+- `POST /v1/sessions/attach`
+  - Reattaches a chat in one call, replacing status, list, resume and connect.
+    Requires `control` scope, since it may launch the agent.
+  - Request: `{"agentId": "string", "acpSessionId": "string"}`. `acpSessionId`
+    is the chat to reattach; omit it (or send `""`) for a new chat.
+  - If a live gateway session of the device for that agent holds the ACP
+    session, it is reused, even while marked `active`: the WebSocket attach
+    that follows takes over its old connection. Otherwise a fresh agent process
+    and gateway session are started.
+  - Response: the `POST /v1/agents/{agentId}/connect` fields plus
+    ```json
+    {
+      "protocolVersion": "v2",
+      "epoch": "string",
+      "needsLoad": false
+    }
+    ```
+    `needsLoad` is `true` when the chat's agent process is new, so the client
+    must `session/load` it. `epoch` names the runtime's update numbering (see
+    catch-up resume under [ACP bridge](#acp-bridge)); a gateway that serves
+    this endpoint supports catch-up resume.
+  - Error responses: as `POST /v1/agents/{agentId}/connect`, plus `400` for an
+    invalid body.
+
 - `GET /v1/sessions`
   - Lists all gateway sessions belonging to the authenticated device.
   - Authenticated with the device credential (bearer token).
@@ -1155,6 +1179,45 @@ prompt runs, and always fire on each tool call that completes or fails.
     {"jsonrpc":"2.0","method":"_ferngeist/turn_result","params":{"sessionId":"ses_abc","stopReason":"end_turn","usage":{"totalTokens":15},"durationMs":240000}}
     ```
     A new `session/prompt` for the session clears the kept result, so a stale outcome never lands on a later turn. `session/resume` restores like `session/load`: unanswered agent requests are re-sent after its reply too. Clients that do not know the notification ignore it, as ACP requires for unknown notifications. Underscore-prefixed per ACP's extension rule, like `_ferngeist/turn_ended`.
+  - Every `session/update` the gateway forwards or buffers carries
+    `params.update._meta["ferngeist/seq"]`: a number counting the ACP session's
+    updates from 1, without gaps, merged into any `_meta` the agent sent. It is
+    on the update, not `params._meta`, because the Kotlin ACP SDK drops
+    notification-level `_meta` for updates arriving during a prompt. Numbers
+    restart with every agent process; the runtime's `epoch` (from
+    `POST /v1/sessions/attach`, or a catch-up reply) tells them apart. The
+    user-message updates the gateway buffers for a client's prompt are numbered
+    too, but are only sent in a replay or catch-up, so a live client sees gaps
+    where its own prompts were.
+  - **Catch-up resume.** A `session/resume` whose `params._meta` carries
+    `"ferngeist/catchUp": {"epoch": "string", "afterSeq": 41}` is answered by
+    the gateway, not the agent (which need not support resume), when the
+    runtime holds that ACP session. The client receives the buffered updates
+    numbered after `afterSeq` in order, then any `_ferngeist/turn_result`, then
+    the reply, then the agent's unanswered requests:
+    ```json
+    {"jsonrpc":"2.0","id":5,"result":{"_meta":{"ferngeist/catchUp":{"epoch":"string","headSeq":57,"turnActive":true,"turnStartedAt":"2026-10-31T10:00:00Z","gap":false}}}}
+    ```
+    `headSeq` is the session's latest number. `turnActive` reports a prompt
+    still awaiting its reply, which `turnStartedAt` says when the gateway
+    received. `gap: true` means no updates were replayed because the buffer
+    cannot fill the gap (another epoch, updates already evicted past the 8 MiB
+    cap, or an `afterSeq` past `headSeq`); the client then sends `session/load`.
+    A resume for a session the runtime does not hold goes to the agent, and its
+    reply carries no `ferngeist/catchUp`: treat that as a gap.
+  - **Exactly-once prompts.** A `session/prompt` may carry
+    `params._meta["ferngeist/clientId"]`, the client's own id for the prompt.
+    The user-message updates the gateway buffers for it carry the same
+    `ferngeist/clientId` in their update `_meta`, so a catch-up shows which
+    prompts arrived. The gateway remembers the last 32 clientIds per ACP
+    session; a prompt repeating one is not sent to the agent and gets
+    `{"code":-32050,"message":"prompt already delivered","data":{"clientId":"..."}}`,
+    which the client treats as sent: the original turn may still be running.
+    Prompts without a clientId are forwarded as before.
+  - A request is answered on the connection that sent it. The reply to a
+    request from a connection that has since been superseded is withheld (a
+    prompt's turn then ends with `_ferngeist/turn_ended`), as are the
+    gateway's own answers to it.
   - A `session/prompt` result carries the turn's length as `_meta.ferngeist.durationMs`, measured on the gateway from the prompt's arrival to the agent's reply. A client that heard the reply late (a stalled connection) can time the turn with it instead of its own clock. The agent's own `_meta` keys are kept.
 
 ### Attach tokens

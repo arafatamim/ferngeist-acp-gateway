@@ -179,6 +179,12 @@ func (p *StdioPump) applyLoadRecovery(f *frame) {
 func (p *StdioPump) forward(f *frame) {
 	var evict *websocket.Conn
 	p.clientMu.Lock()
+	if p.loadRecovery != nil {
+		// Numbered and buffered under clientMu: see LoadRecovery.record.
+		if line := p.loadRecovery.record(f.line, f.probe, f.ok); line != f.line {
+			f.line, f.out = line, []string{line}
+		}
+	}
 	// Under clientMu: a reply routed for one generation must not reach the next.
 	out := p.reqIDs.reply(p.connGen, f.probe, f.out)
 	bound := p.client != nil && p.writerQ != nil
@@ -202,18 +208,7 @@ func (p *StdioPump) forward(f *frame) {
 	// A session/resume restores the same way a session/load does.
 	if f.isReply && (f.origin.method == "session/load" || f.origin.method == "session/resume") &&
 		f.origin.gen == p.connGen && bound && (f.resumed || f.probe.Error == nil) {
-		replyIdx := len(out) - 1
-		out = p.reqIDs.redeliver(p.connGen, f.origin.loadSession, out)
-		// A turn the client missed ends here, before the reply its SDK waits
-		// for: the app stamps the reloaded turn with it instead of leaving
-		// the context meter stale and the turn untimed.
-		if replyIdx >= 0 {
-			if res, ok := p.takeTurnResult(f.origin.loadSession); ok {
-				out = append(out, "")
-				copy(out[replyIdx+1:], out[replyIdx:])
-				out[replyIdx] = turnResultFrame(f.origin.loadSession, res)
-			}
-		}
+		out = p.restoreLocked(f.origin.loadSession, out)
 	}
 	var deliveredGen int64
 	if bound {
@@ -228,6 +223,25 @@ func (p *StdioPump) forward(f *frame) {
 	if evict != nil {
 		_ = evict.CloseNow()
 	}
+}
+
+// restoreLocked completes a reply that restores sessionID (the last of out) for
+// the current connection: the unanswered agent requests follow it, and a turn
+// the client missed ends just before it, ahead of the reply its SDK waits for,
+// so the app stamps the restored turn instead of leaving the context meter
+// stale and the turn untimed. Caller holds clientMu.
+func (p *StdioPump) restoreLocked(sessionID string, out []string) []string {
+	replyIdx := len(out) - 1
+	out = p.reqIDs.redeliver(p.connGen, sessionID, out)
+	if replyIdx < 0 {
+		return out
+	}
+	if res, ok := p.takeTurnResult(sessionID); ok {
+		out = append(out, "")
+		copy(out[replyIdx+1:], out[replyIdx:])
+		out[replyIdx] = turnResultFrame(sessionID, res)
+	}
+	return out
 }
 
 // clientFrame is the single parse of one client→agent frame; every inbound
@@ -250,6 +264,10 @@ type clientParams struct {
 	Cwd       string            `json:"cwd"`
 	RequestID json.RawMessage   `json:"requestId"`
 	Prompt    []json.RawMessage `json:"prompt"`
+	Meta      struct {
+		CatchUp  *catchUpRequest `json:"ferngeist/catchUp"`
+		ClientID string          `json:"ferngeist/clientId"`
+	} `json:"_meta"`
 }
 
 func parseClientFrame(payload []byte) *clientFrame {
@@ -272,10 +290,7 @@ func parseClientFrame(payload []byte) *clientFrame {
 // anything the re-load replay has to remember. The request-id stage runs
 // first: the later stages key a pending session/new or session/load by the
 // agent-side id it assigns, because that is the id the agent replies with.
-func (p *StdioPump) prepareOutbound(f *clientFrame) []byte {
-	p.clientMu.Lock()
-	gen := p.connGen
-	p.clientMu.Unlock()
+func (p *StdioPump) prepareOutbound(gen int64, f *clientFrame) []byte {
 	payload := p.reqIDs.outbound(gen, f)
 	p.acp.observeInbound(f)
 	if f.Method == "session/prompt" {

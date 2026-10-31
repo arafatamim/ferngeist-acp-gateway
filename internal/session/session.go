@@ -49,7 +49,7 @@ const (
 	shutdownTimeout = 5 * time.Second
 
 	// awaitingClientGrace is how long a disconnected session survives while the
-	// agent waits on a request the client has not answered. ponytail: a fixed
+	// agent waits on a request the client has not answered or runs a turn. ponytail: a fixed
 	// bound, move it to Config if it needs tuning.
 	awaitingClientGrace = 24 * time.Hour
 )

@@ -152,7 +152,7 @@ func TestFrameLogPumpTaps(t *testing.T) {
 	// Outbound via the drain loop path (handleStdoutLine with no client).
 	pump.handleStdoutLine(`{"jsonrpc":"2.0","id":"1","result":{"protocolVersion":1}}`)
 	// Inbound via WriteToAgent.
-	if err := pump.WriteToAgent([]byte(`{"jsonrpc":"2.0","id":"2","method":"session/new","params":{"cwd":"/proj"}}`)); err != nil {
+	if err := pump.WriteToAgent(pump.connGen, []byte(`{"jsonrpc":"2.0","id":"2","method":"session/new","params":{"cwd":"/proj"}}`)); err != nil {
 		t.Fatalf("WriteToAgent: %v", err)
 	}
 	m.flushForTest(5 * time.Second)

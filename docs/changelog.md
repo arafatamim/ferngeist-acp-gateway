@@ -45,6 +45,27 @@ against the code.
 
 ## Unreleased
 
+- `[additive]` `POST /v1/sessions/attach` (`control` scope) reattaches a chat
+  in one call: it reuses the device's live gateway session holding the ACP
+  session (taking over an `active` one) or starts a runtime and returns
+  `needsLoad: true`, with the connect fields, `protocolVersion` and the
+  runtime's catch-up `epoch`. (2026-10-31)
+- `[additive]` Every `session/update` carries `params.update._meta["ferngeist/seq"]`,
+  numbered per ACP session. A `session/resume` with
+  `params._meta["ferngeist/catchUp"] = {epoch, afterSeq}` for a held session is
+  answered by the gateway with only the missed updates and a reply whose
+  `result._meta["ferngeist/catchUp"]` reports `epoch`, `headSeq`,
+  `turnActive`, `turnStartedAt` and `gap`. (2026-10-31)
+- `[additive]` `session/prompt` may carry `params._meta["ferngeist/clientId"]`;
+  buffered prompt updates carry it back, and a repeat of one of the session's
+  last 32 is refused with JSON-RPC error `-32050` instead of reaching the agent.
+  Replies to a superseded connection's requests are now withheld as documented,
+  rather than delivered to its successor. (2026-10-31)
+- `[semantic]` A disconnected session whose turn is still running is kept for
+  up to 24 hours, like one awaiting a permission answer, instead of being
+  reaped after 15 silent minutes. No protocol version bump: no client depends
+  on the earlier reap. (2026-10-31)
+
 - `[additive]` Workspace file reads now return up to 8 MiB instead of 1 MiB,
   supporting larger transcript images. Recognized non-SVG image MIME types now
   return blobs even without NUL bytes. The existing text/blob response shapes

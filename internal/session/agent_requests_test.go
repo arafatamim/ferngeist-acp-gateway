@@ -46,7 +46,7 @@ func wsPair(t *testing.T) (server, client *websocket.Conn) {
 }
 
 // quietFrame is the sentinel readFrames pushes to prove nothing else was queued.
-const quietFrame = `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"quiet","update":{}}}`
+const quietFrame = `{"jsonrpc":"2.0","method":"_test/quiet"}`
 
 // readFrames reads n frames, then checks no other frame was queued ahead of a
 // sentinel. (A timed-out Read closes the connection, so it cannot probe.)
@@ -355,7 +355,7 @@ func outcomeCollector(p *StdioPump) *[]turns.Status {
 func sendPrompt(t *testing.T, p *StdioPump, clientID int, sessionID string) string {
 	t.Helper()
 	frame := fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"session/prompt","params":{"sessionId":%q,"prompt":[]}}`, clientID, sessionID)
-	return agentIDOf(t, p.prepareOutbound(parseClientFrame([]byte(frame))))
+	return agentIDOf(t, p.prepareOutbound(p.connGen, parseClientFrame([]byte(frame))))
 }
 
 func agentReply(id, body string) string {
@@ -406,12 +406,12 @@ func TestOnlyPromptRepliesRecordOutcomes(t *testing.T) {
 	p := newPump()
 	got := outcomeCollector(p)
 	for i, method := range []string{"initialize", "session/load", "session/list", "session/set_mode"} {
-		id := agentIDOf(t, p.prepareOutbound(parseClientFrame([]byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":%q,"params":{"sessionId":"ses_a"}}`, i+10, method)))))
+		id := agentIDOf(t, p.prepareOutbound(p.connGen, parseClientFrame([]byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":%q,"params":{"sessionId":"ses_a"}}`, i+10, method)))))
 		p.handleStdoutLine(agentReply(id, `"result":{"stopReason":"end_turn"}`))
 	}
 	sendPrompt(t, p, 1, "ses_a")
-	p.prepareOutbound(parseClientFrame([]byte(`{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"ses_a"}}`)))
-	p.prepareOutbound(parseClientFrame([]byte(`{"jsonrpc":"2.0","method":"$/cancel_request","params":{"requestId":1}}`)))
+	p.prepareOutbound(p.connGen, parseClientFrame([]byte(`{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"ses_a"}}`)))
+	p.prepareOutbound(p.connGen, parseClientFrame([]byte(`{"jsonrpc":"2.0","method":"$/cancel_request","params":{"requestId":1}}`)))
 	p.handleStdoutLine(agentReply("999", `"result":{"stopReason":"end_turn"}`))
 	if len(*got) != 0 {
 		t.Fatalf("outcomes = %+v, want none", *got)
@@ -456,7 +456,7 @@ func TestFailedPromptWriteLeavesNoRunningTurn(t *testing.T) {
 	r, w := io.Pipe()
 	_ = r.Close() // every write now fails
 	p.proc = &runtime.Process{Stdin: w}
-	if err := p.WriteToAgent([]byte(`{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":{"sessionId":"ses_a","prompt":[]}}`)); err == nil {
+	if err := p.WriteToAgent(p.connGen, []byte(`{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":{"sessionId":"ses_a","prompt":[]}}`)); err == nil {
 		t.Fatal("write to a closed stdin succeeded")
 	}
 	if got := liveSessions(p); len(got) != 0 {
@@ -471,7 +471,7 @@ func TestLiveTurnsReportAttention(t *testing.T) {
 	gen := p.Attach()
 	promptA := sendPrompt(t, p, 1, "ses_a")
 	sendPrompt(t, p, 2, "ses_b")
-	auth := agentIDOf(t, p.prepareOutbound(parseClientFrame([]byte(`{"jsonrpc":"2.0","id":3,"method":"authenticate","params":{"methodId":"x"}}`))))
+	auth := agentIDOf(t, p.prepareOutbound(p.connGen, parseClientFrame([]byte(`{"jsonrpc":"2.0","id":3,"method":"authenticate","params":{"methodId":"x"}}`))))
 	for _, line := range []string{
 		permissionRequest, // id 7, ses_a
 		fmt.Sprintf(`{"jsonrpc":"2.0","id":"e1","method":"elicitation/create","params":{"requestId":%s,"mode":"form","message":"?","requestedSchema":{}}}`, promptA),
@@ -490,7 +490,7 @@ func TestLiveTurnsReportAttention(t *testing.T) {
 	assertAttention(t, p, map[string]string{"ses_a": "elicitation,permission", "ses_b": "elicitation"})
 
 	answer := func(id string) {
-		p.prepareOutbound(parseClientFrame([]byte(`{"jsonrpc":"2.0","id":` + id + `,"result":{}}`)))
+		p.prepareOutbound(p.connGen, parseClientFrame([]byte(`{"jsonrpc":"2.0","id":`+id+`,"result":{}}`)))
 	}
 	answer("7")
 	assertAttention(t, p, map[string]string{"ses_a": "elicitation", "ses_b": "elicitation"})

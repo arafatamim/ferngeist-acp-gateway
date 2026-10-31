@@ -13,7 +13,7 @@ import (
 func promptAndReply(t *testing.T, p *StdioPump, sessionID, result string) {
 	t.Helper()
 	frame := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":{"sessionId":%q,"prompt":[]}}`, sessionID)
-	agent := agentIDOf(t, p.prepareOutbound(parseClientFrame([]byte(frame))))
+	agent := agentIDOf(t, p.prepareOutbound(p.connGen, parseClientFrame([]byte(frame))))
 	p.handleStdoutLine(fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"result":%s}`, agent, result))
 }
 
@@ -53,7 +53,7 @@ func TestNewPromptClearsKeptResult(t *testing.T) {
 	if _, ok := turnSlot(t, pump, "ses_a"); !ok {
 		t.Fatal("setup: result was not kept")
 	}
-	pump.prepareOutbound(parseClientFrame([]byte(`{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"sessionId":"ses_a","prompt":[]}}`)))
+	pump.prepareOutbound(pump.connGen, parseClientFrame([]byte(`{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"sessionId":"ses_a","prompt":[]}}`)))
 	if _, ok := turnSlot(t, pump, "ses_a"); ok {
 		t.Fatal("new prompt did not clear the kept result")
 	}
@@ -64,7 +64,7 @@ func TestNewPromptClearsKeptResult(t *testing.T) {
 func TestStaleGenerationPromptResultNotKept(t *testing.T) {
 	pump := newPump()
 	frame := `{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":{"sessionId":"ses_a","prompt":[]}}`
-	agent := agentIDOf(t, pump.prepareOutbound(parseClientFrame([]byte(frame))))
+	agent := agentIDOf(t, pump.prepareOutbound(pump.connGen, parseClientFrame([]byte(frame))))
 	pump.Attach() // generation moves on with nobody bound
 	pump.handleStdoutLine(fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"result":{"stopReason":"end_turn"}}`, agent))
 	if _, ok := turnSlot(t, pump, "ses_a"); ok {
