@@ -82,6 +82,11 @@ not be coupled. Full release notes live in GitHub Releases.
 
 ## History
 
+- `[additive]` `GET /v1/quotas` — identify a missing CodexBar executable with the `codexbar_not_found` error code.
+  (2026-10-31)
+- `[additive]` `GET /v1/quotas` — identify an invalid CodexBar provider list with the `codexbar_invalid_response` error code.
+  (2026-10-31)
+
 - `[additive]` `GET /v1/quotas` — include sanitized billing detail rows and provider-reported balances.
   (2026-10-31)
 

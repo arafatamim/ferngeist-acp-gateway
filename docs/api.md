@@ -1367,7 +1367,12 @@ should use a neutral glyph when absent.
 Missing windows are null. Responses are served from the gateway's last snapshot;
 when it is over a minute old a background refresh starts, so `usage.updatedAt`
 may lag by up to that interval plus one collection. A 503 response means no
-snapshot could be collected yet.
+snapshot could be collected yet. If CodexBar is not found on the daemon's PATH,
+the 503 body includes `"code":"codexbar_not_found"` alongside
+`"error":"quotas unavailable"`. Other collection failures return the error
+without that code. If CodexBar returns an invalid provider list, the code is
+`codexbar_invalid_response`. A previously collected snapshot remains available
+on failure.
 CodexBar must be installed on the gateway's PATH and configured for the daemon's
 OS account; provider availability depends on its credentials and platform.
 A provider that fails is retained with `usage: null` and `error: {"kind":"provider"}`;

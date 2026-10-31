@@ -6,7 +6,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"io/fs"
 	"os/exec"
 	"regexp"
 	"sync"
@@ -88,7 +90,7 @@ func Collect(ctx context.Context) (json.RawMessage, error) {
 	}
 	var configured []configuredProvider
 	if err := json.Unmarshal(data, &configured); err != nil || configured == nil {
-		return nil, errors.New("invalid provider list")
+		return nil, fmt.Errorf("invalid provider list: %w", fs.ErrInvalid)
 	}
 	var providers []provider
 	for _, p := range configured {

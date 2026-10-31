@@ -134,7 +134,7 @@ const (
 // errorResponse is the standard JSON error envelope returned on API errors.
 type errorResponse struct {
 	Error string `json:"error"`
-	// Code and ServerTime are set only on auth rejections; see writeAuthError.
+	// Code identifies selected errors; ServerTime is set on auth rejections.
 	Code       string     `json:"code,omitempty"`
 	ServerTime *time.Time `json:"serverTime,omitempty"`
 }
