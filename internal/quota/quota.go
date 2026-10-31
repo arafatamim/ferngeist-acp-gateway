@@ -37,6 +37,11 @@ type usage struct {
 	UpdatedAt        *string       `json:"updatedAt"`
 }
 type provider struct {
+	Icon             string         `json:"icon,omitempty"`
+	DisplayName      string         `json:"displayName,omitempty"`
+	Plan             string         `json:"plan,omitempty"`
+	Account          string         `json:"account,omitempty"`
+	Costs            []cost         `json:"costs,omitempty"`
 	RateWindowLabels *labels        `json:"rateWindowLabels,omitempty"`
 	Provider         string         `json:"provider"`
 	Source           string         `json:"source,omitempty"`
@@ -52,8 +57,9 @@ type response struct {
 }
 
 type configuredProvider struct {
-	Provider string `json:"provider"`
-	Enabled  bool   `json:"enabled"`
+	DisplayName string `json:"displayName"`
+	Provider    string `json:"provider"`
+	Enabled     bool   `json:"enabled"`
 }
 
 // Collect returns a sanitized JSON snapshot of the configured providers.
@@ -72,12 +78,32 @@ func Collect(ctx context.Context) (json.RawMessage, error) {
 	var providers []provider
 	for _, p := range configured {
 		if p.Enabled && p.Provider != "" {
-			providers = append(providers, provider{Provider: p.Provider})
+			providers = append(providers, provider{Provider: p.Provider, DisplayName: p.DisplayName, Icon: providerIcon(p.Provider)})
 		}
 	}
 	if len(providers) > 100 {
 		return nil, errors.New("too many providers")
 	}
+	var wg sync.WaitGroup
+	wg.Add(1)
+	var costs []costSnapshot
+	go func() {
+		defer wg.Done()
+		costs = collectCosts(ctx)
+	}()
+	collectProviders(ctx, providers)
+	wg.Wait()
+	attachCosts(providers, costs)
+	if parent.Err() != nil {
+		return nil, parent.Err()
+	}
+	if providers == nil {
+		providers = []provider{}
+	}
+	return json.Marshal(response{Providers: providers})
+}
+
+func collectProviders(ctx context.Context, providers []provider) {
 	var wg sync.WaitGroup
 	limit := make(chan struct{}, 8)
 	for i := range providers {
@@ -91,17 +117,29 @@ func Collect(ctx context.Context) (json.RawMessage, error) {
 				providers[i].Error = &providerError{Kind: "provider"}
 				return
 			}
-			providers[i] = collectProvider(ctx, providers[i].Provider)
+			p := collectProvider(ctx, providers[i].Provider)
+			p.DisplayName = providers[i].DisplayName
+			p.Icon = providers[i].Icon
+			providers[i] = p
 		}(i)
 	}
 	wg.Wait()
-	if parent.Err() != nil {
-		return nil, parent.Err()
-	}
-	if providers == nil {
-		providers = []provider{}
-	}
-	return json.Marshal(response{Providers: providers})
+}
+
+type usageSnapshot struct {
+	usage
+	Identity *struct {
+		LoginMethod  string `json:"loginMethod"`
+		AccountEmail string `json:"accountEmail"`
+	} `json:"identity"`
+}
+
+type providerSnapshot struct {
+	Provider         string         `json:"provider"`
+	Source           string         `json:"source"`
+	RateWindowLabels *labels        `json:"rateWindowLabels"`
+	Usage            *usageSnapshot `json:"usage"`
+	Error            *providerError `json:"error"`
 }
 
 func collectProvider(ctx context.Context, id string) provider {
@@ -112,15 +150,22 @@ func collectProvider(ctx context.Context, id string) provider {
 		return unavailable
 	}
 	data = bytes.TrimSpace(data)
-	var p provider
+	var snapshot providerSnapshot
 	if len(data) > 0 && data[0] == '[' {
-		var list []provider
+		var list []providerSnapshot
 		if json.Unmarshal(data, &list) != nil || len(list) != 1 {
 			return unavailable
 		}
-		p = list[0]
-	} else if json.Unmarshal(data, &p) != nil {
+		snapshot = list[0]
+	} else if json.Unmarshal(data, &snapshot) != nil {
 		return unavailable
+	}
+	p := provider{Provider: snapshot.Provider, Source: snapshot.Source, RateWindowLabels: snapshot.RateWindowLabels, Error: snapshot.Error}
+	if snapshot.Usage != nil {
+		p.Usage = &snapshot.Usage.usage
+		if identity := snapshot.Usage.Identity; identity != nil {
+			p.Plan, p.Account = identity.LoginMethod, identity.AccountEmail
+		}
 	}
 	if p.Provider != id || (p.Usage == nil && p.Error == nil) {
 		return unavailable
@@ -154,4 +199,71 @@ func (w *limitedWriter) Write(p []byte) (int, error) {
 	n, err := w.w.Write(p)
 	w.remaining -= n
 	return n, err
+}
+
+type cost struct {
+	Label     string  `json:"label"`
+	Amount    float64 `json:"amount"`
+	Tokens    *int64  `json:"tokens,omitempty"`
+	Currency  string  `json:"currency"`
+	Estimated bool    `json:"estimated"`
+}
+
+type costSnapshot struct {
+	Provider          string          `json:"provider"`
+	SessionCostUSD    *float64        `json:"sessionCostUSD"`
+	SessionTokens     *int64          `json:"sessionTokens"`
+	Last30DaysCostUSD *float64        `json:"last30DaysCostUSD"`
+	Last30DaysTokens  *int64          `json:"last30DaysTokens"`
+	CurrencyCode      string          `json:"currencyCode"`
+	Error             json.RawMessage `json:"error"`
+}
+
+func collectCosts(ctx context.Context) []costSnapshot {
+	data, err := run(ctx, "cost", "--format", "json")
+	var exitErr *exec.ExitError
+	if err != nil && !errors.As(err, &exitErr) {
+		return nil
+	}
+	var snapshots []costSnapshot
+	if json.Unmarshal(data, &snapshots) != nil {
+		return nil
+	}
+	return snapshots
+}
+
+func attachCosts(providers []provider, snapshots []costSnapshot) {
+	byProvider := make(map[string][]cost)
+	for _, snapshot := range snapshots {
+		if snapshot.CurrencyCode != "USD" || (len(snapshot.Error) > 0 && string(snapshot.Error) != "null") {
+			continue
+		}
+		rows := costRows(snapshot)
+		byProvider[snapshot.Provider] = rows
+	}
+	for i := range providers {
+		providers[i].Costs = byProvider[providers[i].Provider]
+	}
+}
+
+func costRows(snapshot costSnapshot) []cost {
+	var rows []cost
+	for _, period := range []struct {
+		label  string
+		amount *float64
+		tokens *int64
+	}{
+		{"Today", snapshot.SessionCostUSD, snapshot.SessionTokens},
+		{"Last 30 days", snapshot.Last30DaysCostUSD, snapshot.Last30DaysTokens},
+	} {
+		if period.amount == nil || *period.amount < 0 {
+			continue
+		}
+		tokens := period.tokens
+		if tokens != nil && *tokens < 0 {
+			tokens = nil
+		}
+		rows = append(rows, cost{Label: period.label, Amount: *period.amount, Tokens: tokens, Currency: "USD", Estimated: true})
+	}
+	return rows
 }

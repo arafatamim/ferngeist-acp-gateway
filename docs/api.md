@@ -79,6 +79,10 @@ Base path: `/v1`
       should prefer `registry.icon`, then decode `icon`, then use a neutral
       glyph. When no registry icon exists, the gateway supplies a known agent's
       logo or a generic agent icon.
+    - `quotaProvider` — optional CodexBar provider ID for highlighting a known
+      agent's quota entry (e.g. `codex-acp` → `codex`). Omitted for unknown,
+      multi-provider, and custom agents. It does not guarantee the provider is
+      installed, enabled, or returned by `/v1/quotas`.
 
 ### Pairing
 
@@ -1353,11 +1357,39 @@ This document is intentionally high-level. For implementation details, see the c
 `GET /v1/quotas` requires gateway read scope and returns `{ "providers": [...] }`.
 Each provider contains `provider`, optional `source`, and `usage` with CodexBar's
 `primary`, `secondary`, `tertiary`, `extraRateWindows`, and `updatedAt` fields.
+Optional `icon` is a bundled monochrome SVG as a `data:image/svg+xml;base64,`
+URL, using the same format as the agent `icon` field. Icons are keyed by provider
+ID (including known brand aliases), are available even when quota collection
+fails for that provider, and are omitted when no artwork is bundled. Clients
+should use a neutral glyph when absent.
 `rateWindowLabels` provides CodexBar’s labels when available. Windows contain
 `usedPercent`, `windowMinutes`, `resetsAt`, and `resetDescription` when available.
-Missing windows are null. A 503 response means quota data could not be collected.
+Missing windows are null. Responses are served from the gateway's last snapshot;
+when it is over a minute old a background refresh starts, so `usage.updatedAt`
+may lag by up to that interval plus one collection. A 503 response means no
+snapshot could be collected yet.
 CodexBar must be installed on the gateway's PATH and configured for the daemon's
 OS account; provider availability depends on its credentials and platform.
 A provider that fails is retained with `usage: null` and `error: {"kind":"provider"}`;
 other providers remain available when a provider fails or exceeds the collection deadline. Error details
 are not forwarded.
+
+Providers may also include `displayName` from CodexBar's provider configuration,
+`plan` from `usage.identity.loginMethod` (unchanged, e.g. `Claude Pro` or `plus`),
+and `account` from `usage.identity.accountEmail` when available. Account email is
+visible to paired clients with read scope; other identity fields are omitted.
+
+Optional `costs` contains estimated local spend summaries, for example:
+
+```json
+[{"label":"Today","amount":0.25,"tokens":1200,"currency":"USD","estimated":true},
+ {"label":"Last 30 days","amount":12.50,"tokens":54000,"currency":"USD","estimated":true}]
+```
+
+Amounts come from CodexBar's `sessionCostUSD` (today) and `last30DaysCostUSD`.
+These are API price estimates, not subscription charges. Only available,
+nonnegative USD amounts are included; zero is retained. Token counts are optional.
+Costs refresh with quotas under the same collection deadline. A missing, failed,
+or malformed cost report omits costs without suppressing quota data. Daily and
+project breakdowns, local paths, and credit-denominated `usage.providerCost` are
+never forwarded.

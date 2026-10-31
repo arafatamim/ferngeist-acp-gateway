@@ -2,6 +2,7 @@ package catalog
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -10,6 +11,58 @@ import (
 
 	acpregistry "github.com/arafatamim/ferngeist-acp-gateway/internal/registry"
 )
+
+func TestAgentListJSONIdentifiesOnlyKnownQuotaProviders(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		id     string
+		custom bool
+		want   string
+	}{
+		{name: "registry provider", id: "codex-acp", want: "codex"},
+		{name: "multi-model agent", id: "opencode"},
+		{name: "unknown agent with known display name", id: "unknown-agent"},
+		{name: "embedded mock", id: "mock-acp"},
+		{name: "custom shadows mapped registry agent", id: "codex-acp", custom: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			entries := map[string]acpregistry.AgentEntry{}
+			if tc.id != "mock-acp" {
+				entries[tc.id] = acpregistry.AgentEntry{ID: tc.id, Name: "Codex"}
+			}
+			service := New(t.TempDir(), fakeRegistrySource{snapshot: acpregistry.Snapshot{Agents: entries}})
+			if tc.custom {
+				service.SetCustomProvider(func() []CustomAgent {
+					return []CustomAgent{{ID: tc.id, DisplayName: "Codex", Command: "custom-command"}}
+				})
+			}
+			data, err := json.Marshal(service.List())
+			if err != nil {
+				t.Fatal(err)
+			}
+			var agents []struct {
+				ID            string  `json:"id"`
+				QuotaProvider *string `json:"quotaProvider"`
+			}
+			if err := json.Unmarshal(data, &agents); err != nil {
+				t.Fatal(err)
+			}
+			for _, agent := range agents {
+				if agent.ID != tc.id {
+					continue
+				}
+				if tc.want == "" && agent.QuotaProvider != nil {
+					t.Fatalf("quotaProvider = %q, want field omitted", *agent.QuotaProvider)
+				}
+				if tc.want != "" && (agent.QuotaProvider == nil || *agent.QuotaProvider != tc.want) {
+					t.Fatalf("quotaProvider = %v, want %q", agent.QuotaProvider, tc.want)
+				}
+				return
+			}
+			t.Fatalf("agent %q missing from JSON", tc.id)
+		})
+	}
+}
 
 func TestLoadEmbeddedAgents(t *testing.T) {
 	agents, err := loadEmbeddedAgents()
