@@ -357,7 +357,7 @@ func composeServer(deps api.Deps, store *storage.SQLiteStore) (*api.Server, *ses
 		FrameLogMaxBackups: cfg.LogMaxBackups,
 	})
 
-	deps.Quotas = quota.Collect
+	deps.Quotas = quota.NewCache(quota.Collect, time.Minute).Get
 	deps.Session = sessionSvc
 	deps.CustomAgents = customagents.New(store, deps.Catalog, deps.Runtime.List, logger)
 	deps.Workspace = workspace.New(func() *storage.SQLiteStore { return store }, logger,

@@ -53,7 +53,7 @@ not be coupled. Full release notes live in GitHub Releases.
 
 ## History
 
-- `[additive]` `GET /v1/quotas` — report CodexBar plan quota windows.
+- `[additive]` `GET /v1/quotas` — report CodexBar plan quota windows from a background-refreshed snapshot.
   (2026-10-31, [9cf1d30](https://github.com/arafatamim/ferngeist-acp-gateway/commit/9cf1d30))
 
 - Unreleased:

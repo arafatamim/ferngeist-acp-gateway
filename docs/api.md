@@ -1268,7 +1268,10 @@ Each provider contains `provider`, optional `source`, and `usage` with CodexBar'
 `primary`, `secondary`, `tertiary`, `extraRateWindows`, and `updatedAt` fields.
 `rateWindowLabels` provides CodexBar’s labels when available. Windows contain
 `usedPercent`, `windowMinutes`, `resetsAt`, and `resetDescription` when available.
-Missing windows are null. A 503 response means quota data could not be collected.
+Missing windows are null. Responses are served from the gateway's last snapshot;
+when it is over a minute old a background refresh starts, so `usage.updatedAt`
+may lag by up to that interval plus one collection. A 503 response means no
+snapshot could be collected yet.
 CodexBar must be installed on the gateway's PATH and configured for the daemon's
 OS account; provider availability depends on its credentials and platform.
 A provider that fails is retained with `usage: null` and `error: {"kind":"provider"}`;
