@@ -1277,3 +1277,23 @@ OS account; provider availability depends on its credentials and platform.
 A provider that fails is retained with `usage: null` and `error: {"kind":"provider"}`;
 other providers remain available when a provider fails or exceeds the collection deadline. Error details
 are not forwarded.
+
+Providers may also include `displayName` from CodexBar's provider configuration,
+`plan` from `usage.identity.loginMethod` (unchanged, e.g. `Claude Pro` or `plus`),
+and `account` from `usage.identity.accountEmail` when available. Account email is
+visible to paired clients with read scope; other identity fields are omitted.
+
+Optional `costs` contains estimated local spend summaries, for example:
+
+```json
+[{"label":"Today","amount":0.25,"tokens":1200,"currency":"USD","estimated":true},
+ {"label":"Last 30 days","amount":12.50,"tokens":54000,"currency":"USD","estimated":true}]
+```
+
+Amounts come from CodexBar's `sessionCostUSD` (today) and `last30DaysCostUSD`.
+These are API price estimates, not subscription charges. Only available,
+nonnegative USD amounts are included; zero is retained. Token counts are optional.
+Costs refresh with quotas under the same collection deadline. A missing, failed,
+or malformed cost report omits costs without suppressing quota data. Daily and
+project breakdowns, local paths, and credit-denominated `usage.providerCost` are
+never forwarded.
