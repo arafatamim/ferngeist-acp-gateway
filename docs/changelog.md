@@ -54,9 +54,12 @@ not be coupled. Full release notes live in GitHub Releases.
 ## History
 
 - `[additive]` `GET /v1/quotas` — include optional bundled monochrome provider icons as base64 SVG data URLs; unknown provider icons are omitted.
+  (2026-10-31, [abff69a](https://github.com/arafatamim/ferngeist-acp-gateway/commit/abff69a))
 - `[additive]` `GET /v1/agents` — include optional `quotaProvider` metadata for known single-provider agents; custom and multi-provider agents have none.
+  (2026-10-31, [abff69a](https://github.com/arafatamim/ferngeist-acp-gateway/commit/abff69a))
 
 - `[additive]` `GET /v1/quotas` — include optional provider display name, plan, account email, and estimated USD spend for today and the last 30 days.
+  (2026-10-31, [2afade5](https://github.com/arafatamim/ferngeist-acp-gateway/commit/2afade5))
 
 - `[additive]` `GET /v1/quotas` — report CodexBar plan quota windows from a background-refreshed snapshot.
   (2026-10-31, [9cf1d30](https://github.com/arafatamim/ferngeist-acp-gateway/commit/9cf1d30))

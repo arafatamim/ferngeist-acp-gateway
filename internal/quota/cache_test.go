@@ -5,51 +5,56 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
 func TestCacheServesStaleSnapshotWhileRefreshingAndKeepsItOnFailure(t *testing.T) {
-	type reply struct {
-		data string
-		err  error
-	}
-	replies := make(chan reply)
-	cache := NewCache(func(context.Context) (json.RawMessage, error) {
-		r := <-replies
-		if r.err != nil {
-			return nil, r.err
+	synctest.Test(t, func(t *testing.T) {
+		type reply struct {
+			data string
+			err  error
 		}
-		return json.RawMessage(r.data), nil
-	}, 0)
-	get := func() (json.RawMessage, error) {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		return cache.Get(ctx)
-	}
+		replies := make(chan reply, 1)
+		// The final stale Get may start a refresh; closing releases that collector.
+		defer close(replies)
+		cache := NewCache(func(context.Context) (json.RawMessage, error) {
+			r, ok := <-replies
+			if !ok {
+				return nil, context.Canceled
+			}
+			if r.err != nil {
+				return nil, r.err
+			}
+			return json.RawMessage(r.data), nil
+		}, 0)
+		get := func() (json.RawMessage, error) {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			return cache.Get(ctx)
+		}
 
-	go func() { replies <- reply{data: "1"} }()
-	if data, err := get(); err != nil || string(data) != "1" {
-		t.Fatalf("first Get = %s, %v; want collected snapshot", data, err)
-	}
-	// The snapshot is stale (maxAge 0); Get must not wait for the refresh it starts.
-	if data, err := get(); err != nil || string(data) != "1" {
-		t.Fatalf("stale Get = %s, %v; want old snapshot", data, err)
-	}
-	replies <- reply{err: errors.New("codexbar failed")}
-	if data, err := get(); err != nil || string(data) != "1" {
-		t.Fatalf("Get after failed refresh = %s, %v; want old snapshot", data, err)
-	}
-	replies <- reply{data: "2"}
-	deadline := time.Now().Add(time.Second)
-	for {
-		if data, _ := get(); string(data) == "2" {
-			break
+		replies <- reply{data: "1"}
+		if data, err := get(); err != nil || string(data) != "1" {
+			t.Fatalf("first Get = %s, %v; want collected snapshot", data, err)
 		}
-		if time.Now().After(deadline) {
-			t.Fatal("refreshed snapshot never served")
+		synctest.Wait()
+		// The snapshot is stale (maxAge 0); Get must not wait for the refresh it starts.
+		if data, err := get(); err != nil || string(data) != "1" {
+			t.Fatalf("stale Get = %s, %v; want old snapshot", data, err)
 		}
-		time.Sleep(time.Millisecond)
-	}
+		replies <- reply{err: errors.New("codexbar failed")}
+		// Wait for singleflight to remove the failed call before triggering its replacement.
+		synctest.Wait()
+		if data, err := get(); err != nil || string(data) != "1" {
+			t.Fatalf("Get after failed refresh = %s, %v; want old snapshot", data, err)
+		}
+		replies <- reply{data: "2"}
+		synctest.Wait()
+		if data, err := get(); err != nil || string(data) != "2" {
+			t.Fatalf("refreshed Get = %s, %v; want new snapshot", data, err)
+		}
+	})
 }
 
 func TestCacheReturnsCollectErrorWhenNoSnapshotExists(t *testing.T) {
