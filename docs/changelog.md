@@ -38,12 +38,33 @@ against the code.
 - `[additive]` changes never bump the version — an old client still works, and
   the client gate would otherwise force a needless update.
 - When a bump is required, add the entry *and* bump the constant in the same
-  change, so a release always ships a coherent version + changelog. The two
-  unreleased semantic changes below are accepted exceptions and retain `v2`.
+  change, so a release always ships a coherent version + changelog. Explicitly
+  documented backward-compatible semantic exceptions below retain `v2`.
 - Every contract-visible change gets a changelog entry with a date, even if it
   does not bump the version.
 
 ## Unreleased
+
+- `[semantic]` Attach and catch-up reuse only ACP sessions the
+  agent accepted. Gap replies preserve kept turn results and unanswered requests
+  for session/load; unnumbered buffered updates force a gap only for cursors
+  before their boundary, and turnStartedAt
+  is UTC. Numbering accepts the same malformed Unicode as the frame parser,
+  preserving opaque content. Explicit agent prompt errors release the clientId for retry; cached
+  initialize replies are withheld from superseded connections. Disconnected
+  running turns use the configured silence bound (15 minutes by default),
+  retaining the 24-hour grace only for unanswered agent requests. Quota refresh
+  failures also respect the one-minute retry interval. Duplicate prompts wait for
+  the original stdin write to finish; failed writes and explicit rejections
+  remove their synthetic user messages from replay only when no agent updates
+  followed them; errors after streamed output preserve the user turn boundary.
+  Removed prompts invalidate cursors that could contain them, while earlier
+  cursors can catch up without the rejected message.
+  Evicted unnumbered updates
+  retain a catch-up gap boundary. Maintainer-approved versioning exception:
+  protocol remains `v2` because these backward-compatible corrections preserve
+  wire shapes and require no client changes.
+  (2026-11-01)
 
 - `[additive]` `POST /v1/sessions/attach` (`control` scope) reattaches a chat
   in one call: it reuses the device's live gateway session holding the ACP
@@ -61,12 +82,13 @@ against the code.
   last 32 is refused with JSON-RPC error `-32050` instead of reaching the agent.
   Replies to a superseded connection's requests are now withheld as documented,
   rather than delivered to its successor. (2026-10-31)
-- `[semantic]` A disconnected session whose turn is still running is kept for
+- `[semantic]` Initially, a disconnected session whose turn is still running was kept for
   up to 24 hours, like one awaiting a permission answer, instead of being
   reaped after 15 silent minutes. No protocol version bump: no client depends
-  on the earlier reap. (2026-10-31)
+  on the earlier reap. Superseded by the silence bound above. (2026-10-31)
 
 - `[additive]` Workspace file reads now return up to 8 MiB instead of 1 MiB,
+  with a bounded two-minute write deadline for larger transfers on mobile links,
   supporting larger transcript images. Recognized non-SVG image MIME types now
   return blobs even without NUL bytes. The existing text/blob response shapes
   and size/truncation meanings are preserved; protocol version remains `v2`.

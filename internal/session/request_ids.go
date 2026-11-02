@@ -63,6 +63,8 @@ type pendingRequest struct {
 	method   string
 	// The ACP session a session/prompt drives; empty for every other method.
 	promptSession string
+	// The prompt's deduplication id, released if the agent rejects it.
+	promptClientID string
 	// When a session/prompt reached the gateway; zero for every other method.
 	startedAt time.Time
 	// The ACP session a session/load restores; empty for every other method.
@@ -100,6 +102,7 @@ func (r *requestIDs) outbound(gen int64, f *clientFrame) []byte {
 	switch f.Method {
 	case "session/prompt":
 		origin.promptSession = f.Params.SessionID
+		origin.promptClientID = f.Params.Meta.ClientID
 		origin.startedAt = time.Now()
 	case "session/load", "session/resume":
 		origin.loadSession = f.Params.SessionID

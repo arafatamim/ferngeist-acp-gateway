@@ -136,6 +136,8 @@ type StdioPump struct {
 	// The prompts already delivered, so a repeat is never run twice. See
 	// deliveredPrompts.
 	prompts deliveredPrompts
+	// promptWriteMu keeps an in-flight claim from being acknowledged as delivery.
+	promptWriteMu sync.Mutex
 
 	// Resilient re-load support: buffers session/update history and recovers
 	// "already loaded" rejections from agents that keep the session loaded
@@ -336,6 +338,22 @@ func (p *StdioPump) queueLocked(frames []string) *websocket.Conn {
 	return nil
 }
 
+// queueClientReply builds and queues a gateway reply only for the connection
+// that requested it. Build runs under clientMu so catch-up snapshots and live
+// updates stay ordered; an overflowing connection is closed after unlocking.
+func (p *StdioPump) queueClientReply(gen int64, build func() []string) {
+	p.clientMu.Lock()
+	if gen != p.connGen || p.client == nil || p.writerQ == nil {
+		p.clientMu.Unlock()
+		return
+	}
+	evict := p.queueLocked(build())
+	p.clientMu.Unlock()
+	if evict != nil {
+		_ = evict.CloseNow() // Already detached; a close error needs no further action.
+	}
+}
+
 // WriteToAgent writes one client→agent frame from connection gen (the
 // generation its Attach returned) to the agent's stdin. The frame is parsed
 // once. A duplicate `initialize` from a reconnecting client is answered from
@@ -347,7 +365,11 @@ func (p *StdioPump) queueLocked(frames []string) *websocket.Conn {
 // from a superseded connection is withheld rather than sent to its successor.
 func (p *StdioPump) WriteToAgent(gen int64, payload []byte) error {
 	f := parseClientFrame(payload)
-	if p.replayInitialize(f) || p.answerCatchUp(gen, f) || p.dropDuplicatePrompt(gen, f) {
+	if f.Method == "session/prompt" {
+		p.promptWriteMu.Lock()
+		defer p.promptWriteMu.Unlock()
+	}
+	if p.replayInitialize(gen, f) || p.answerCatchUp(gen, f) || p.dropDuplicatePrompt(gen, f) {
 		return nil
 	}
 	payload = p.prepareOutbound(gen, f)
@@ -359,7 +381,7 @@ func (p *StdioPump) WriteToAgent(gen int64, payload []byte) error {
 			p.reqIDs.discard(f.ID)
 		}
 		if f.Method == "session/prompt" {
-			p.prompts.release(f.Params.SessionID, f.Params.Meta.ClientID)
+			p.forgetPrompt(f.Params.SessionID, f.Params.Meta.ClientID, responseIDKey(f.ID))
 		}
 		return err
 	}

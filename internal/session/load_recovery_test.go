@@ -36,8 +36,8 @@ func updateFrame(sessionID, text string) string {
 // numberedUpdateFrame is updateFrame as the gateway forwards it, numbered seq.
 func numberedUpdateFrame(sessionID, text string, seq int) string {
 	return `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"` + sessionID +
-		`","update":{"_meta":{"ferngeist/seq":` + strconv.Itoa(seq) + `},"content":{"type":"text","text":"` + text +
-		`"},"sessionUpdate":"agent_message_chunk"}}}`
+		`","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"` + text +
+		`"},"_meta":{"ferngeist/seq":` + strconv.Itoa(seq) + `}}}}`
 }
 
 // TestRecoverAlreadyLoaded covers the core fix: after a first successful load

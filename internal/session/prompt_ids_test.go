@@ -2,8 +2,10 @@ package session
 
 import (
 	"io"
+	"slices"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/runtime"
 )
@@ -96,5 +98,142 @@ func TestFailedPromptWriteDoesNotBlockItsResend(t *testing.T) {
 	}
 	if !pump.prompts.claim("ses_a", "c1") {
 		t.Fatal("failed prompt still counts as delivered")
+	}
+}
+
+func TestPromptRetryFollowsAgentOutcome(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		reply  string
+		writes int
+	}{
+		{"rejected", `"error":{"code":-32602,"message":"invalid model"}`, 2},
+		{"completed", `"result":{"stopReason":"end_turn","usage":{"totalTokens":15}}`, 1},
+		{"swallowed failure", `"result":{"stopReason":"end_turn"}`, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var writes []string
+			pump := recordingPump(&writes)
+			if err := pump.WriteToAgent(0, promptWithClientID(1, "c1")); err != nil {
+				t.Fatal(err)
+			}
+			id := agentIDOf(t, []byte(writes[0]))
+			pump.handleStdoutLine(`{"jsonrpc":"2.0","id":` + id + `,` + tc.reply + `}`)
+			if err := pump.WriteToAgent(0, promptWithClientID(2, "c1")); err != nil {
+				t.Fatal(err)
+			}
+			if len(writes) != tc.writes {
+				t.Fatalf("agent got %d prompts, want %d", len(writes), tc.writes)
+			}
+		})
+	}
+}
+
+func TestDuplicatePromptWaitsForFailedWrite(t *testing.T) {
+	pump := heldPump()
+	r, w := io.Pipe()
+	t.Cleanup(func() { _ = r.Close(); _ = w.Close() })
+	entered := make(chan struct{})
+	pump.proc = &runtime.Process{Stdin: blockingPromptWriter{w, entered}}
+	first := make(chan error, 1)
+	go func() { first <- pump.WriteToAgent(0, promptWithClientID(1, "c1")) }()
+	<-entered
+	second := make(chan error, 1)
+	go func() { second <- pump.WriteToAgent(1, promptWithClientID(2, "c1")) }()
+	select {
+	case err := <-second:
+		t.Fatalf("duplicate completed before delivery: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	_ = r.Close()
+	if err := <-first; err == nil {
+		t.Fatal("first write succeeded")
+	}
+	if err := <-second; err == nil {
+		t.Fatal("duplicate falsely acknowledged delivery")
+	}
+}
+
+type blockingPromptWriter struct {
+	*io.PipeWriter
+	entered chan struct{}
+}
+
+func (w blockingPromptWriter) Write(b []byte) (int, error) {
+	select {
+	case <-w.entered:
+	default:
+		close(w.entered)
+	}
+	return w.PipeWriter.Write(b)
+}
+
+func TestUndeliveredPromptIsAbsentFromReplay(t *testing.T) {
+	for _, rejected := range []bool{false, true} {
+		t.Run(strconv.FormatBool(rejected), func(t *testing.T) {
+			var writes []string
+			pump := recordingPump(&writes)
+			if !rejected {
+				r, w := io.Pipe()
+				_ = r.Close()
+				t.Cleanup(func() { _ = w.Close() })
+				pump.proc.Stdin = w
+			}
+			err := pump.WriteToAgent(0, promptWithClientID(1, "c1"))
+			if rejected {
+				if err != nil {
+					t.Fatal(err)
+				}
+				id := agentIDOf(t, []byte(writes[0]))
+				pump.handleStdoutLine(`{"jsonrpc":"2.0","id":` + id + `,"error":{"code":-32602,"message":"invalid model"}}`)
+			} else if err == nil {
+				t.Fatal("write unexpectedly succeeded")
+			}
+			frames, _, _ := pump.loadRecovery.catchUp("ses_a", pump.loadRecovery.epoch, 0)
+			if len(frames) != 0 {
+				t.Fatalf("undelivered prompt replayed: %q", frames)
+			}
+		})
+	}
+}
+
+func TestPromptErrorAfterOutputPreservesUserBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		update string
+		gap    bool
+	}{
+		{"message", updateFrame("ses_a", "partial"), false},
+		{"tool", `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"ses_a","update":{"sessionUpdate":"tool_call","toolCallId":"t1","status":"in_progress"}}}`, false},
+		{"unnumbered", `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"ses_a","update":{"sessionUpdate":"plan","_meta":[]}}}`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var writes []string
+			pump := recordingPump(&writes)
+			if err := pump.WriteToAgent(0, promptWithClientID(1, "c1")); err != nil {
+				t.Fatal(err)
+			}
+			pump.handleStdoutLine(tc.update)
+			id := agentIDOf(t, []byte(writes[0]))
+			pump.handleStdoutLine(`{"jsonrpc":"2.0","id":` + id + `,"error":{"code":-32603,"message":"turn failed"}}`)
+
+			r := pump.loadRecovery
+			r.OnOutbound(loadRequest("99", "ses_a"))
+			replay, handled := onFrame(t, r, `{"jsonrpc":"2.0","id":99,"error":{"message":"already loaded"}}`)
+			const user = `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"ses_a","update":{"_meta":{"ferngeist/clientId":"c1","ferngeist/seq":1},"content":{"type":"text","text":"go"},"sessionUpdate":"user_message_chunk"}}}`
+			if !handled || len(replay) != 4 || replay[1] != user {
+				t.Fatalf("replay lost the partial turn's user boundary: %q", replay)
+			}
+			frames, _, gap := r.catchUp("ses_a", r.epoch, 0)
+			if gap != tc.gap || (!gap && !slices.Equal(frames, replay[1:3])) {
+				t.Fatalf("catch-up = %q, gap %v; want preserved turn, gap %v", frames, gap, tc.gap)
+			}
+			if err := pump.WriteToAgent(0, promptWithClientID(2, "c1")); err != nil {
+				t.Fatal(err)
+			}
+			if len(writes) != 2 {
+				t.Fatal("error after partial output prevented clientId retry")
+			}
+		})
 	}
 }

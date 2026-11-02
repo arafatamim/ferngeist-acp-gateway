@@ -39,19 +39,26 @@ type LoadRecovery struct {
 	// ferngeist/seq, so a reattaching client asks only for what it missed.
 	// epoch names this buffer: it dies with the pump, and a seq from another
 	// epoch means nothing here.
-	epoch   string
-	seq     map[string]int64 // acpSessionId -> last assigned seq
-	evicted map[string]int64 // acpSessionId -> highest seq evicted from history
+	epoch    string
+	seq      map[string]int64         // acpSessionId -> last assigned seq
+	evicted  map[string]int64         // acpSessionId -> highest seq evicted from history
+	rejected map[string][]cursorRange // cursors that may contain removed prompts
 
 	logger *slog.Logger
+}
+
+type cursorRange struct {
+	from, through int64
 }
 
 // historyFrame is one buffered session/update; user marks a user_message_chunk
 // and seq is its ferngeist/seq, 0 for a frame that could not be numbered.
 type historyFrame struct {
-	line string
-	user bool
-	seq  int64
+	line        string
+	user        bool
+	seq         int64
+	promptID    string
+	gapBoundary int64
 }
 
 // newLoadRecovery builds a LoadRecovery bound to the given logger.
@@ -70,7 +77,7 @@ func newLoadRecovery(logger *slog.Logger) *LoadRecovery {
 // before the frame is forwarded.
 func (r *LoadRecovery) OnOutbound(f *clientFrame) {
 	if f.Method == "session/prompt" && f.Params.SessionID != "" {
-		r.bufferPrompt(f.Params.SessionID, f.Params.Prompt, f.Params.Meta.ClientID)
+		r.bufferPrompt(f.Params.SessionID, f.Params.Prompt, f.Params.Meta.ClientID, responseIDKey(f.ID))
 		return
 	}
 	if f.Method != "session/load" || f.Params.SessionID == "" || len(f.ID) == 0 {
@@ -191,7 +198,7 @@ func (r *LoadRecovery) record(line string, probe frameProbe, ok bool) string {
 // with no user turn between them, and the client folds them into one message.
 // clientID, the prompt's own id, rides along so a reattaching client can tell
 // which of its prompts arrived.
-func (r *LoadRecovery) bufferPrompt(sessionID string, blocks []json.RawMessage, clientID string) {
+func (r *LoadRecovery) bufferPrompt(sessionID string, blocks []json.RawMessage, clientID, promptID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, block := range blocks {
@@ -215,6 +222,7 @@ func (r *LoadRecovery) bufferPrompt(sessionID string, blocks []json.RawMessage, 
 		if err == nil {
 			r.seq[sessionID] = seq
 			r.appendHistoryLocked(sessionID, string(frame), true, seq)
+			r.history[sessionID][len(r.history[sessionID])-1].promptID = promptID
 		}
 	}
 }
@@ -222,7 +230,7 @@ func (r *LoadRecovery) bufferPrompt(sessionID string, blocks []json.RawMessage, 
 // catchUp returns sid's buffered updates numbered after afterSeq, oldest
 // first, and the session's head seq. gap reports that the buffer cannot fill
 // the client's gap: another epoch (a restarted pump), updates it needs were
-// evicted, or a seq this epoch never assigned.
+// evicted, an update could not be numbered, or a seq this epoch never assigned.
 func (r *LoadRecovery) catchUp(sid, epoch string, afterSeq int64) (frames []string, head int64, gap bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -230,7 +238,15 @@ func (r *LoadRecovery) catchUp(sid, epoch string, afterSeq int64) (frames []stri
 	if epoch != r.epoch || afterSeq < r.evicted[sid] || afterSeq > head {
 		return nil, head, true
 	}
+	for _, invalid := range r.rejected[sid] {
+		if afterSeq >= invalid.from && afterSeq <= invalid.through {
+			return nil, head, true
+		}
+	}
 	for _, f := range r.history[sid] {
+		if f.seq == 0 && f.gapBoundary > afterSeq {
+			return nil, head, true
+		}
 		if f.seq > afterSeq {
 			frames = append(frames, f.line)
 		}
@@ -247,7 +263,7 @@ func (r *LoadRecovery) appendHistoryLocked(sid, line string, user bool, seq int6
 		r.histSize = make(map[string]int)
 		r.userFrames = make(map[string]int)
 	}
-	r.history[sid] = append(r.history[sid], historyFrame{line: line, user: user, seq: seq})
+	r.history[sid] = append(r.history[sid], historyFrame{line: line, user: user, seq: seq, gapBoundary: r.seq[sid] + 1})
 	r.histSize[sid] += len(line)
 	if user {
 		r.userFrames[sid]++
@@ -276,7 +292,11 @@ func (r *LoadRecovery) dropOldestLocked(sid string) {
 	dropped := r.history[sid][0]
 	r.history[sid] = r.history[sid][1:]
 	r.histSize[sid] -= len(dropped.line)
-	r.evicted[sid] = max(r.evicted[sid], dropped.seq)
+	boundary := dropped.seq
+	if boundary == 0 {
+		boundary = dropped.gapBoundary
+	}
+	r.evicted[sid] = max(r.evicted[sid], boundary)
 	if dropped.user {
 		r.userFrames[sid]--
 	}
@@ -355,4 +375,55 @@ func rewriteResponseID(cached []byte, id json.RawMessage) ([]byte, bool) {
 		return nil, false
 	}
 	return out, true
+}
+
+// forgetPrompt removes synthetic user messages when the agent did not accept them.
+// Once agent updates follow a prompt, keep its user boundary even on an error
+// reply, or replay would fold the partial output into the preceding turn.
+// Keep a gap boundary because a client may already hold their sequence numbers.
+func (r *LoadRecovery) forgetPrompt(sid, promptID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	frames := r.history[sid]
+	if len(frames) == 0 {
+		return
+	}
+	found := false
+	for _, f := range frames {
+		if f.promptID == promptID && promptID != "" {
+			found = true
+		}
+		if found && f.promptID == "" {
+			return
+		}
+	}
+	kept := frames[:0]
+	for _, f := range frames {
+		if f.promptID != promptID || promptID == "" {
+			kept = append(kept, f)
+			continue
+		}
+		r.histSize[sid] -= len(f.line)
+		r.userFrames[sid]--
+		r.invalidatePromptLocked(sid, f.seq)
+	}
+	r.history[sid] = kept
+}
+
+// invalidatePromptLocked remembers cursors that could already contain the
+// removed message. Earlier cursors never saw it; later ones can follow a load
+// that repaired the transcript. Caller holds mu.
+func (r *LoadRecovery) invalidatePromptLocked(sid string, seq int64) {
+	if r.rejected == nil {
+		r.rejected = make(map[string][]cursorRange)
+	}
+	ranges := r.rejected[sid]
+	for len(ranges) > 0 && ranges[0].through < r.evicted[sid] {
+		ranges = ranges[1:]
+	}
+	for len(ranges) > 0 && ranges[len(ranges)-1].through >= seq-1 {
+		seq = min(seq, ranges[len(ranges)-1].from)
+		ranges = ranges[:len(ranges)-1]
+	}
+	r.rejected[sid] = append(ranges, cursorRange{from: seq, through: r.seq[sid]})
 }

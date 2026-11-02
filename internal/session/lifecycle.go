@@ -882,11 +882,11 @@ func (rs *RuntimeSession) reapExpired(maxDisc time.Duration) {
 				discTime = lastStdout
 			}
 			grace := maxDisc
-			if sess.pump.AwaitingClient() || len(sess.pump.LiveTurns()) > 0 {
+			if sess.pump.AwaitingClient() {
 				// A prompt the user has not answered yet is likely why they will
 				// come back (the push told them); keep the agent waiting longer.
-				// A running turn too: a long silent tool call must not be reaped
-				// mid-turn, while the cap still reclaims a hung agent.
+				// A running turn without a client request uses the silence bound
+				// above, so a hung agent cannot occupy a slot for a whole day.
 				grace = max(grace, awaitingClientGrace)
 			}
 			if now.Sub(discTime) > grace {

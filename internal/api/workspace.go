@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/pairing"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/session"
@@ -105,6 +106,17 @@ func (s *Server) handleWorkspaceFile(w http.ResponseWriter, r *http.Request) {
 	}
 	if info.IsDir() {
 		writeError(w, http.StatusBadRequest, "path is a directory")
+		return
+	}
+	s.serveWorkspaceFile(w, abs, rel, info)
+}
+
+func (s *Server) serveWorkspaceFile(w http.ResponseWriter, abs, rel string, info os.FileInfo) {
+	// An 8 MiB blob expands to roughly 11 MiB of JSON. Give mobile links a
+	// bounded transfer window beyond the server's general 20-second deadline.
+	if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(2 * time.Minute)); err != nil && !errors.Is(err, http.ErrNotSupported) {
+		s.logger.Error("set workspace file write deadline", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to prepare file transfer")
 		return
 	}
 	data, err := workspace.ReadFileLimited(abs, maxWorkspaceFileBytes)

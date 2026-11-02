@@ -111,6 +111,7 @@ func (p *StdioPump) handleStdoutLine(line string) {
 	p.observeACPState(f)
 	p.recordOutcome(f)
 	p.applyLoadRecovery(f)
+	p.acp.acceptSession(f)
 	p.notifyFrame(f)
 	p.forward(f)
 }
@@ -120,6 +121,9 @@ func (p *StdioPump) handleStdoutLine(line string) {
 // agent swallowed a failed LLM call, replaces the frame with a JSON-RPC error
 // so the client sees the turn fail instead of an empty success.
 func (p *StdioPump) observeACPState(f *frame) {
+	if f.isReply && f.origin.method == "session/prompt" && f.probe.Error != nil {
+		p.forgetPrompt(f.origin.promptSession, f.origin.promptClientID, responseIDKey(*f.probe.ID))
+	}
 	p.acp.observeInitialize(f.probe, f.raw)
 	p.acp.observeSessionID(f.probe)
 	p.acp.bindPendingCwd(f.probe)

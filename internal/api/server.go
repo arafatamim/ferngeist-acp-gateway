@@ -98,6 +98,8 @@ type Server struct {
 // v2: connecting starts the agent — POST /v1/agents/{id}/connect replaces
 // POST /v1/agents/{id}/start and POST /v1/runtimes/{id}/connect, whose
 // responses the client must read. See docs/changelog.md.
+// Backward-compatible prompt delivery and catch-up corrections retain v2;
+// see the explicit semantic-versioning exception in docs/changelog.md.
 const ProtocolVersion = "v2"
 
 // Security and request limits.

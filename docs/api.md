@@ -345,6 +345,7 @@ opened or loaded on this runtime returns `404`.
     ```
   - Files larger than 8 MiB are truncated; `truncated` is `true` and `size` is
     the full on-disk file size (the payload `text`/`blob` is capped at 8 MiB).
+    File transfers have a two-minute write deadline to accommodate mobile links.
     Recognized image MIME types other than SVG return base64 blobs even without
     NUL bytes. Other files use the same NUL-byte heuristic as git; text SVG
     remains text. `mimeType` is a best-effort guess from the file extension and
@@ -1204,9 +1205,15 @@ prompt runs, and always fire on each tool call that completes or fails.
     ```
     `headSeq` is the session's latest number. `turnActive` reports a prompt
     still awaiting its reply, which `turnStartedAt` says when the gateway
-    received. `gap: true` means no updates were replayed because the buffer
+    received, in UTC. `gap: true` means no updates were replayed because the buffer
     cannot fill the gap (another epoch, updates already evicted past the 8 MiB
-    cap, or an `afterSeq` past `headSeq`); the client then sends `session/load`.
+    cap, an update after the cursor that could not be numbered, a cursor that may contain a
+    rejected prompt removed from replay, or an `afterSeq` past `headSeq`);
+    the client then sends `session/load`. A gap reply does not consume a kept
+    turn result or redeliver unanswered agent requests; those wait for the load.
+    Ownership is established by a successful session/new, session/load or
+    session/resume reply (including a recovered already-loaded response), not
+    merely by sending a request with a cwd.
     A resume for a session the runtime does not hold goes to the agent, and its
     reply carries no `ferngeist/catchUp`: treat that as a gap.
   - **Exactly-once prompts.** A `session/prompt` may carry
@@ -1217,7 +1224,11 @@ prompt runs, and always fire on each tool call that completes or fails.
     session; a prompt repeating one is not sent to the agent and gets
     `{"code":-32050,"message":"prompt already delivered","data":{"clientId":"..."}}`,
     which the client treats as sent: the original turn may still be running.
-    Prompts without a clientId are forwarded as before.
+    An explicit JSON-RPC error from the agent releases that prompt's clientId,
+    so it can be retried. Its buffered user message is removed only if no agent
+    updates followed it; after partial output it remains as the turn boundary.
+    A gateway rewrite of an empty successful turn does
+    not release it. Prompts without a clientId are forwarded as before.
   - A request is answered on the connection that sent it. The reply to a
     request from a connection that has since been superseded is withheld (a
     prompt's turn then ends with `_ferngeist/turn_ended`), as are the
@@ -1372,7 +1383,8 @@ the 503 body includes `"code":"codexbar_not_found"` alongside
 `"error":"quotas unavailable"`. Other collection failures return the error
 without that code. If CodexBar returns an invalid provider list, the code is
 `codexbar_invalid_response`. A previously collected snapshot remains available
-on failure.
+on failure. Failed collections are retried no sooner than one minute later,
+including when no snapshot exists yet; concurrent callers share one collection.
 CodexBar must be installed on the gateway's PATH and configured for the daemon's
 OS account; provider availability depends on its credentials and platform.
 A provider that fails is retained with `usage: null` and `error: {"kind":"provider"}`;

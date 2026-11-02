@@ -34,14 +34,20 @@ func (rs *RuntimeSession) holding(agentID, deviceID, acpSessionID string) *Sessi
 		return nil
 	}
 	rs.mu.Lock()
-	defer rs.mu.Unlock()
-	var newest *Session
+	candidates := make([]*Session, 0, len(rs.sessions))
 	for _, sess := range rs.sessions {
+		candidates = append(candidates, sess)
+	}
+	rs.mu.Unlock()
+	// Inspect pumps after releasing the registry, as snapshots do: one busy
+	// pump must not block registry operations for unrelated sessions.
+	var newest *Session
+	for _, sess := range candidates {
 		sess.mu.Lock()
 		live := sess.AgentID == agentID && sess.DeviceID == deviceID &&
 			(sess.Status == StatusActive || sess.Status == StatusDisconnected)
 		sess.mu.Unlock()
-		if live && sess.pump.AcpCwdFor(acpSessionID) != "" &&
+		if live && sess.pump.acp.holds(acpSessionID) &&
 			(newest == nil || sess.CreatedAt.After(newest.CreatedAt)) {
 			newest = sess
 		}

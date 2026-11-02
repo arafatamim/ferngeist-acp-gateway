@@ -1941,14 +1941,14 @@ func TestReapExpiredReapsIdleAgent(t *testing.T) {
 	waitProcessStopped(t, sess)
 }
 
-func TestReapExpiredKeepsSilentRunningTurnUntilCap(t *testing.T) {
+func TestReapExpiredBoundsSilentRunningTurn(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		silent time.Duration
 		reaped bool
 	}{
-		{"within cap", time.Hour, false},
-		{"past cap", awaitingClientGrace + time.Hour, true},
+		{"within silence bound", 5 * time.Minute, false},
+		{"past silence bound", 16 * time.Minute, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rs, store, agent, _, ctx := setupTest(t, Config{})
@@ -2039,7 +2039,7 @@ func TestPumpReplaysInitializeAfterCaching(t *testing.T) {
 
 	// Before the agent responds there is nothing to replay: the first
 	// initialize must reach the agent.
-	if p.replayInitialize(initReq) {
+	if p.replayInitialize(0, initReq) {
 		t.Fatal("first initialize must not be replayed (no cached response yet)")
 	}
 
@@ -2053,13 +2053,13 @@ func TestPumpReplaysInitializeAfterCaching(t *testing.T) {
 	}
 
 	// Non-initialize frames are never intercepted.
-	if p.replayInitialize(parseClientFrame([]byte(`{"jsonrpc":"2.0","id":"7","method":"session/load","params":{}}`))) {
+	if p.replayInitialize(0, parseClientFrame([]byte(`{"jsonrpc":"2.0","id":"7","method":"session/load","params":{}}`))) {
 		t.Error("non-initialize frame must not be replayed")
 	}
 
 	// A reconnecting client's duplicate initialize is intercepted (handled even
 	// with no attached client conn).
-	if !p.replayInitialize(parseClientFrame([]byte(`{"jsonrpc":"2.0","id":"42","method":"initialize","params":{}}`))) {
+	if !p.replayInitialize(0, parseClientFrame([]byte(`{"jsonrpc":"2.0","id":"42","method":"initialize","params":{}}`))) {
 		t.Error("duplicate initialize must be replayed from cache")
 	}
 }

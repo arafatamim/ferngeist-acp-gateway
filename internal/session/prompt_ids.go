@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"slices"
 	"sync"
-
-	"github.com/coder/websocket"
 )
 
 // clientIDMetaKey carries a prompt's client-chosen id, in session/prompt's
@@ -53,8 +51,8 @@ func (d *deliveredPrompts) claim(sessionID, clientID string) bool {
 	return true
 }
 
-// release forgets clientID, a prompt that never reached the agent, so the
-// client's resend is delivered.
+// release forgets clientID after a failed write or explicit agent rejection,
+// so the client's resend is delivered.
 func (d *deliveredPrompts) release(sessionID, clientID string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -74,15 +72,9 @@ func (p *StdioPump) dropDuplicatePrompt(gen int64, f *clientFrame) bool {
 	}
 	p.logger.Info("dropping repeated prompt", "runtime_id", p.runtimeID,
 		"acpSessionId", f.Params.SessionID, "clientId", f.Params.Meta.ClientID)
-	p.clientMu.Lock()
-	var evict *websocket.Conn
-	if gen == p.connGen && p.client != nil && p.writerQ != nil {
-		evict = p.queueLocked([]string{promptDeliveredFrame(f.ID, f.Params.Meta.ClientID)})
-	}
-	p.clientMu.Unlock()
-	if evict != nil {
-		_ = evict.CloseNow()
-	}
+	p.queueClientReply(gen, func() []string {
+		return []string{promptDeliveredFrame(f.ID, f.Params.Meta.ClientID)}
+	})
 	return true
 }
 
@@ -97,4 +89,13 @@ func promptDeliveredFrame(id json.RawMessage, clientID string) string {
 		},
 	})
 	return string(out)
+}
+
+// forgetPrompt releases delivery evidence and removes replay frames for a failed
+// prompt only if no agent updates followed it.
+func (p *StdioPump) forgetPrompt(sessionID, clientID, requestID string) {
+	p.prompts.release(sessionID, clientID)
+	if p.loadRecovery != nil {
+		p.loadRecovery.forgetPrompt(sessionID, requestID)
+	}
 }

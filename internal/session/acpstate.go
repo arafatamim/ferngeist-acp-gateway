@@ -1,12 +1,10 @@
 package session
 
 import (
-	"context"
 	"encoding/json"
 	"sync"
 
 	"github.com/coder/acp-go-sdk"
-	"github.com/coder/websocket"
 )
 
 // This file holds the ACP state the frame pipeline (pipeline.go) maintains:
@@ -53,6 +51,9 @@ type acpState struct {
 	// ponytail: never pruned, bounded by the sessions one agent process opens.
 	cwdBySession map[string]string
 	pendingCwd   map[string]string
+	// held records only sessions accepted by the agent, independently of cwd
+	// observed on inbound requests that the agent may still reject.
+	held map[string]bool
 
 	// Swallowed-failure detection. Some agents (e.g. Opencode) never send a
 	// JSON-RPC error for a failed LLM call — they return a success with
@@ -164,6 +165,33 @@ func (s *acpState) bindPendingCwd(probe frameProbe) {
 		s.cwdBySession = make(map[string]string)
 	}
 	s.cwdBySession[probe.Result.SessionID] = cwd
+}
+
+// acceptSession records ownership after a successful open/load/resume reply.
+// A recovered "already loaded" reply also proves the agent holds the session.
+func (s *acpState) acceptSession(f *frame) {
+	if !f.isReply || (!f.resumed && f.probe.Error != nil) {
+		return
+	}
+	sid := f.origin.loadSession
+	if f.origin.method == "session/new" && f.probe.Result != nil {
+		sid = f.probe.Result.SessionID
+	}
+	if sid == "" {
+		return
+	}
+	s.mu.Lock()
+	if s.held == nil {
+		s.held = make(map[string]bool)
+	}
+	s.held[sid] = true
+	s.mu.Unlock()
+}
+
+func (s *acpState) holds(sessionID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.held[sessionID]
 }
 
 // observeInbound records what one client→agent frame says: the ACP session id it
@@ -324,7 +352,7 @@ func (p *StdioPump) initResponseCached() bool {
 // returns true so the caller does not forward a duplicate `initialize` to the
 // agent. It returns false for non-initialize frames, or for the first
 // `initialize` (no cache yet), which must reach the agent normally.
-func (p *StdioPump) replayInitialize(f *clientFrame) bool {
+func (p *StdioPump) replayInitialize(gen int64, f *clientFrame) bool {
 	if f.Method != "initialize" {
 		return false
 	}
@@ -339,16 +367,6 @@ func (p *StdioPump) replayInitialize(f *clientFrame) bool {
 		return false // malformed cache: fall back to forwarding to the agent
 	}
 
-	p.clientMu.Lock()
-	client := p.client
-	p.clientMu.Unlock()
-	if client != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), acpWebSocketWriteTimeout)
-		err := client.Write(ctx, websocket.MessageText, out)
-		cancel()
-		if err != nil {
-			p.logger.Warn("replay initialize write failed", "error", err)
-		}
-	}
+	p.queueClientReply(gen, func() []string { return []string{string(out)} })
 	return true
 }

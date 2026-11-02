@@ -1,9 +1,13 @@
 package session
 
 import (
+	"bytes"
 	"encoding/json"
 	"maps"
+	"strings"
 	"time"
+
+	"github.com/go-json-experiment/json/jsontext"
 )
 
 // This file holds catch-up resume: a reattaching client names the last update
@@ -44,29 +48,26 @@ type catchUpResult struct {
 // answered; a superseded connection's resume is dropped.
 func (p *StdioPump) answerCatchUp(gen int64, f *clientFrame) bool {
 	req, sid := f.Params.Meta.CatchUp, f.Params.SessionID
-	if f.Method != "session/resume" || req == nil || f.ID == nil || p.loadRecovery == nil || p.AcpCwdFor(sid) == "" {
+	if f.Method != "session/resume" || req == nil || f.ID == nil || p.loadRecovery == nil || !p.acp.holds(sid) {
 		return false
 	}
 	p.acp.observeInbound(f)
 
-	p.clientMu.Lock()
-	if gen != p.connGen || p.client == nil || p.writerQ == nil {
-		p.clientMu.Unlock()
-		return true
-	}
-	// Under clientMu, which also covers numbering a live update and queueing
-	// it: no update is sent twice or out of order across the replay.
-	frames, head, gap := p.loadRecovery.catchUp(sid, req.Epoch, req.AfterSeq)
-	res := catchUpResult{Epoch: p.loadRecovery.epoch, HeadSeq: head, Gap: gap}
-	if startedAt, ok := p.reqIDs.promptStartedAt(sid); ok {
-		res.TurnActive, res.TurnStartedAt = true, &startedAt
-	}
-	frames = p.restoreLocked(sid, append(frames, catchUpReplyFrame(f.ID, res)))
-	evict := p.queueLocked(frames)
-	p.clientMu.Unlock()
-	if evict != nil {
-		_ = evict.CloseNow()
-	}
+	p.queueClientReply(gen, func() []string {
+		// Under clientMu, which also covers numbering a live update and queueing
+		// it: no update is sent twice or out of order across the replay.
+		frames, head, gap := p.loadRecovery.catchUp(sid, req.Epoch, req.AfterSeq)
+		res := catchUpResult{Epoch: p.loadRecovery.epoch, HeadSeq: head, Gap: gap}
+		if startedAt, ok := p.reqIDs.promptStartedAt(sid); ok {
+			startedAt = startedAt.UTC()
+			res.TurnActive, res.TurnStartedAt = true, &startedAt
+		}
+		frames = append(frames, catchUpReplyFrame(f.ID, res))
+		if !gap {
+			frames = p.restoreLocked(sid, frames)
+		}
+		return frames
+	})
 	return true
 }
 
@@ -82,33 +83,84 @@ func catchUpReplyFrame(id json.RawMessage, res catchUpResult) string {
 
 // withUpdateMeta merges add into a session/update's params.update._meta,
 // keeping the agent's own keys. ok is false, with line unchanged, when the
-// frame has no object update to carry them.
+// frame has no object update to carry them. The frame was already validated by
+// parseFrameProbe before record calls this helper.
 func withUpdateMeta(line string, add map[string]json.RawMessage) (string, bool) {
-	var msg, params, update, meta map[string]json.RawMessage
-	if json.Unmarshal([]byte(line), &msg) != nil || json.Unmarshal(msg["params"], &params) != nil ||
-		json.Unmarshal(params["update"], &update) != nil || update == nil {
+	// jsontext reads a bytes.Buffer directly, without copying large tool output.
+	// Match encoding/json's acceptance of malformed Unicode in opaque content.
+	dec := jsontext.NewDecoder(bytes.NewBuffer([]byte(line)), jsontext.AllowDuplicateNames(true), jsontext.AllowInvalidUTF8(true))
+	bounds, ok := updateMetaBounds(dec, 0)
+	if !ok {
 		return line, false
 	}
-	if raw, ok := update["_meta"]; ok && json.Unmarshal(raw, &meta) != nil {
+	var meta map[string]json.RawMessage
+	if bounds.hasMeta && json.Unmarshal([]byte(line[bounds.metaStart:bounds.metaEnd]), &meta) != nil {
 		return line, false
 	}
 	if meta == nil {
 		meta = make(map[string]json.RawMessage, len(add))
 	}
 	maps.Copy(meta, add)
-	var err error
-	if update["_meta"], err = json.Marshal(meta); err != nil {
-		return line, false
-	}
-	if params["update"], err = json.Marshal(update); err != nil {
-		return line, false
-	}
-	if msg["params"], err = json.Marshal(params); err != nil {
-		return line, false
-	}
-	out, err := json.Marshal(msg)
+	raw, err := json.Marshal(meta)
 	if err != nil {
 		return line, false
 	}
-	return string(out), true
+	if bounds.hasMeta {
+		return line[:bounds.metaStart] + string(raw) + line[bounds.metaEnd:], true
+	}
+	// Insert before the update's closing brace, retaining opaque payloads
+	// byte-for-byte instead of re-encoding all three enclosing objects.
+	prefix := `"_meta":`
+	if strings.TrimSpace(line[bounds.start+1:bounds.end-1]) != "" {
+		prefix = "," + prefix
+	}
+	return line[:bounds.end-1] + prefix + string(raw) + line[bounds.end-1:], true
+}
+
+type updateMetaSpan struct {
+	start, end         int
+	metaStart, metaEnd int
+	hasMeta            bool
+}
+
+// updateMetaBounds returns the last occurrence's byte range, matching
+// encoding/json when an object repeats a key. Its caller passes validated JSON.
+// One traversal finds params/update/_meta without rescanning enclosing values.
+func updateMetaBounds(dec *jsontext.Decoder, depth int) (span updateMetaSpan, found bool) {
+	if dec.PeekKind() != '{' {
+		if err := dec.SkipValue(); err != nil {
+			return updateMetaSpan{}, false
+		}
+		return updateMetaSpan{}, false
+	}
+	if token, err := dec.ReadToken(); err != nil || token.Kind() != '{' {
+		return updateMetaSpan{}, false
+	}
+	start := int(dec.InputOffset()) - 1
+	for dec.PeekKind() != '}' {
+		token, err := dec.ReadToken()
+		if err != nil {
+			return updateMetaSpan{}, false
+		}
+		name := token.String()
+		if depth < 2 && name == [2]string{"params", "update"}[depth] {
+			span, found = updateMetaBounds(dec, depth+1)
+			continue
+		}
+		raw, err := dec.ReadValue()
+		if err != nil {
+			return updateMetaSpan{}, false
+		}
+		if depth == 2 && name == "_meta" {
+			span.metaEnd = int(dec.InputOffset())
+			span.metaStart, span.hasMeta = span.metaEnd-len(raw), true
+		}
+	}
+	if _, err := dec.ReadToken(); err != nil {
+		return updateMetaSpan{}, false
+	}
+	if depth == 2 {
+		span.start, span.end, found = start, int(dec.InputOffset()), true
+	}
+	return span, found
 }

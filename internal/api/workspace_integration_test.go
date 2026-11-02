@@ -976,6 +976,37 @@ func TestWorkspaceFileImageReadLimit(t *testing.T) {
 	}
 }
 
+func TestWorkspaceFileTransferOutlastsServerWriteTimeout(t *testing.T) {
+	proj := t.TempDir()
+	env := newWorkspaceEnv(t, proj)
+	data := bytes.Repeat([]byte{0xff}, 8<<20)
+	if err := os.WriteFile(filepath.Join(proj, "image.png"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewUnstartedServer(env.h.server.Handler())
+	srv.Config.WriteTimeout = time.Millisecond
+	srv.Start()
+	t.Cleanup(srv.Close)
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL+"/v1/runtimes/"+env.h.runtimeID+"/files?path=image.png", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+env.h.token)
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var body blobReadResponse
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("file transfer truncated: %v", err)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(body.Blob)
+	if err != nil || resp.StatusCode != http.StatusOK || !bytes.Equal(decoded, data) || body.Truncated {
+		t.Fatalf("status=%d decoded=%d truncated=%v error=%v", resp.StatusCode, len(decoded), body.Truncated, err)
+	}
+}
+
 func TestWorkspaceImageWithoutNULBytesReturnsBlob(t *testing.T) {
 	proj := t.TempDir()
 	env := newWorkspaceEnv(t, proj)

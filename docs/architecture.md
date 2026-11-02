@@ -57,7 +57,7 @@ The pump buffers each ACP session's `session/update` history (bounded, 8 MiB, tr
 3. The client reconnects and calls `session/load` on the agent. If the agent rejects the duplicate as already loaded — it still holds the session — the gateway restores it itself: an explicit `_ferngeist/resumed` notification, then the buffered history, then a synthesized `session/load` success. The signal tells the client that the restore came from the gateway, not the agent (see [docs/api.md](api.md#acp-bridge)).
 4. Or the client sends a catch-up `session/resume` naming the last update number it holds. Every buffered update carries a per-session `ferngeist/seq` under a per-pump epoch, numbered and queued under the pump's client lock so the gateway can answer the resume itself with exactly the updates after that number. Any gap it cannot fill sends the client back to `session/load`.
 
-A disconnected session is reaped after `SESSION_MAX_DISCONNECTED_SECONDS` measured from its last disconnect or agent output, extended to 24 hours while the agent waits on the client or runs a turn, so a long silent tool call is not reaped mid-turn.
+A disconnected session is reaped after `SESSION_MAX_DISCONNECTED_SECONDS` measured from its last disconnect or agent output, extended to 24 hours while the agent waits on an unanswered client request. A running turn with no such request uses the normal silence bound, so a stalled prompt cannot retain a session slot and sleep inhibitor for a whole day.
 
 ## Session lifecycle
 
