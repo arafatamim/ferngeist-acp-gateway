@@ -23,15 +23,18 @@ func catchUpOf(t *testing.T, frame string) (id string, res catchUpResult) {
 	var reply struct {
 		ID     json.RawMessage `json:"id"`
 		Result struct {
-			Meta map[string]catchUpResult `json:"_meta"`
+			Meta map[string]json.RawMessage `json:"_meta"`
 		} `json:"result"`
 	}
 	if err := json.Unmarshal([]byte(frame), &reply); err != nil {
 		t.Fatalf("catch-up reply %s: %v", frame, err)
 	}
-	res, ok := reply.Result.Meta[catchUpMetaKey]
+	raw, ok := reply.Result.Meta[catchUpMetaKey]
 	if !ok {
 		t.Fatalf("reply carries no %s: %s", catchUpMetaKey, frame)
+	}
+	if err := json.Unmarshal(raw, &res); err != nil {
+		t.Fatalf("catch-up metadata %s: %v", raw, err)
 	}
 	return string(reply.ID), res
 }
@@ -136,16 +139,63 @@ func TestRejectedPromptInvalidatesOnlyCursorsThatCouldContainIt(t *testing.T) {
 	onFrame(t, r, updateFrame("ses_a", "before"))                     // seq 1
 	r.OnOutbound(parseClientFrame(promptWithClientID(2, "rejected"))) // seq 2
 	r.forgetPrompt("ses_a", "2")
-	onFrame(t, r, updateFrame("ses_a", "after")) // seq 3
+	onFrame(t, r, updateFrame("ses_a", "after")) // seq 4; seq 3 is the repaired cursor
 	for _, tc := range []struct {
 		after int64
 		gap   bool
 		count int
-	}{{0, false, 2}, {1, false, 1}, {2, true, 0}, {3, false, 0}} {
+	}{{0, false, 2}, {1, false, 1}, {2, true, 0}, {3, false, 1}, {4, false, 0}} {
 		frames, head, gap := r.catchUp("ses_a", r.epoch, tc.after)
-		if gap != tc.gap || len(frames) != tc.count || head != 3 {
+		if gap != tc.gap || len(frames) != tc.count || head != 4 {
 			t.Errorf("after %d: frames=%d head=%d gap=%v; want frames=%d gap=%v", tc.after, len(frames), head, gap, tc.count, tc.gap)
 		}
+	}
+}
+
+func TestRejectedPromptLoadProvidesUsableCatchUpCursor(t *testing.T) {
+	for _, retained := range []bool{false, true} {
+		t.Run(strconv.FormatBool(retained), func(t *testing.T) {
+			r := newTestLoadRecovery()
+			if retained {
+				onFrame(t, r, updateFrame("ses_a", "before"))
+			}
+			r.OnOutbound(loadRequest("1", "ses_a"))
+			onFrame(t, r, `{"jsonrpc":"2.0","id":1,"result":{"modes":{"currentModeId":"chat"},"_meta":{"agent":"kept"}}}`)
+			r.OnOutbound(parseClientFrame(promptWithClientID(2, "rejected")))
+			r.forgetPrompt("ses_a", "2")
+			oldCursor := int64(1)
+			if retained {
+				oldCursor = 2
+			}
+			if _, _, gap := r.catchUp("ses_a", r.epoch, oldCursor); !gap {
+				t.Fatal("cursor containing rejected prompt must require a load")
+			}
+			r.OnOutbound(loadRequest("3", "ses_a"))
+			replay, handled := onFrame(t, r, `{"jsonrpc":"2.0","id":3,"error":{"message":"already loaded"}}`)
+			wantFrames := 2
+			if retained {
+				wantFrames = 3
+			}
+			if !handled || len(replay) != wantFrames {
+				t.Fatalf("load replay = %q, handled=%v", replay, handled)
+			}
+			if retained && replay[1] != numberedUpdateFrame("ses_a", "before", 1) {
+				t.Fatalf("load changed retained history: %s", replay[1])
+			}
+			_, cursor := catchUpOf(t, replay[len(replay)-1])
+			if cursor.HeadSeq <= oldCursor || cursor.Epoch != r.epoch {
+				t.Fatalf("load did not provide a fresh cursor: %+v", cursor)
+			}
+			if !strings.Contains(replay[len(replay)-1], `"agent":"kept"`) || !strings.Contains(replay[len(replay)-1], `"currentModeId":"chat"`) {
+				t.Fatalf("load lost cached agent metadata: %s", replay[len(replay)-1])
+			}
+			if frames, _, gap := r.catchUp("ses_a", cursor.Epoch, cursor.HeadSeq); gap || len(frames) != 0 {
+				t.Fatalf("repaired transcript still requires a load: frames=%q gap=%v", frames, gap)
+			}
+			if _, _, gap := r.catchUp("ses_a", r.epoch, oldCursor); !gap {
+				t.Fatal("load made an unrepaired client's cursor valid")
+			}
+		})
 	}
 }
 

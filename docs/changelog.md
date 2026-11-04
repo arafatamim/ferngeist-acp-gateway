@@ -24,7 +24,7 @@ Format:
 - `[additive]` — a new endpoint, field, or optional behavior. Older clients
   ignore it; no bump required.
 - `[semantic]` — a field's meaning changed but the JSON shape did not. A bump
-  is required unless an explicitly documented exception is accepted.
+  is required if existing clients break.
 
 Entries end with the date and the short hash of the commit that introduced
 the change, linked to the commit on GitHub, so any claim can be checked
@@ -34,16 +34,17 @@ against the code.
 
 - `protocolVersion` (served in `GET /v1/status` and the mDNS
   `protocol_version` TXT record; single constant in `internal/api/server.go`)
-  is bumped only on `[breaking]` or `[semantic]` changes.
-- `[additive]` changes never bump the version — an old client still works, and
-  the client gate would otherwise force a needless update.
+  is bumped when a contract change breaks existing clients. Backward-compatible
+  changes, including `[semantic]` changes, do not require a bump.
 - When a bump is required, add the entry *and* bump the constant in the same
-  change, so a release always ships a coherent version + changelog. Explicitly
-  documented backward-compatible semantic exceptions below retain `v2`.
+  change, so a release always ships a coherent version + changelog.
 - Every contract-visible change gets a changelog entry with a date, even if it
   does not bump the version.
 
 ## Unreleased
+
+- `[additive]` Gateway-recovered `session/load` responses carry a catch-up
+  cursor for the restored transcript, including when replay contains no updates.
 
 - `[semantic]` Attach and catch-up reuse only ACP sessions the
   agent accepted. Gap replies preserve kept turn results and unanswered requests

@@ -108,10 +108,10 @@ func TestRecoverAlreadyLoaded(t *testing.T) {
 	}
 }
 
-// TestRecoverFallsBackToNullResult verifies that when no first-load response was
+// TestRecoverWithoutCachedResponseProvidesCursor verifies that when no first-load response was
 // cached (e.g. the agent was already loaded before this pump observed a success),
-// recovery still produces a valid null-result success rather than surfacing the error.
-func TestRecoverFallsBackToNullResult(t *testing.T) {
+// recovery still produces a success with an empty transcript's cursor rather than surfacing the error.
+func TestRecoverWithoutCachedResponseProvidesCursor(t *testing.T) {
 	r := newTestLoadRecovery()
 	const sid = "ses_xyz"
 
@@ -124,15 +124,9 @@ func TestRecoverFallsBackToNullResult(t *testing.T) {
 	if len(frames) != 2 {
 		t.Fatalf("expected a resume notice plus a synthesized success, got %d: %v", len(frames), frames)
 	}
-	var got struct {
-		ID     json.Number     `json:"id"`
-		Result json.RawMessage `json:"result"`
-	}
-	if err := json.Unmarshal([]byte(frames[1]), &got); err != nil {
-		t.Fatalf("fallback success is not valid JSON: %v", err)
-	}
-	if got.ID.String() != "7" || string(got.Result) != "null" {
-		t.Fatalf("expected {id:7, result:null}, got %s", frames[0])
+	id, cursor := catchUpOf(t, frames[1])
+	if id != "7" || cursor.Epoch != r.epoch || cursor.HeadSeq != 0 {
+		t.Fatalf("fallback success lacks its empty transcript cursor: %s", frames[1])
 	}
 }
 

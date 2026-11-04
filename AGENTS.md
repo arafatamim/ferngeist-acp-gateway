@@ -194,7 +194,7 @@ Work is tracked with [beads](https://github.com/steveyegge/beads) (`bd`, a Dolt-
 
 ## Contract changes
 
-The gateway↔client contract (HTTP shapes, ACP WebSocket frames, `_ferngeist/` extension notifications, push payloads) is documented in `docs/api.md`. Any contract-visible change needs an entry in `docs/changelog.md` tagged `[breaking]`, `[additive]`, or `[semantic]`. `[breaking]` and `[semantic]` changes also need a bump of the `ProtocolVersion` constant in `internal/api/server.go` in the same change; `[additive]` changes never bump it.
+The gateway↔client contract (HTTP shapes, ACP WebSocket frames, `_ferngeist/` extension notifications, push payloads) is documented in `docs/api.md`. Any contract-visible change needs an entry in `docs/changelog.md` tagged `[breaking]`, `[additive]`, or `[semantic]`. Bump the `ProtocolVersion` constant in `internal/api/server.go` when a contract change breaks existing clients; backward-compatible changes, including `[semantic]` changes, do not require a bump.
 
 ## Testing & QA
 

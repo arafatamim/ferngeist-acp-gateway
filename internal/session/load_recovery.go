@@ -51,6 +51,11 @@ type cursorRange struct {
 	from, through int64
 }
 
+type loadCursor struct {
+	Epoch   string `json:"epoch"`
+	HeadSeq int64  `json:"headSeq"`
+}
+
 // historyFrame is one buffered session/update; user marks a user_message_chunk
 // and seq is its ferngeist/seq, 0 for a frame that could not be numbered.
 type historyFrame struct {
@@ -98,13 +103,6 @@ func (r *LoadRecovery) OnOutbound(f *clientFrame) {
 // — and reports handled=true so the caller suppresses the original error.
 // Otherwise the frame passes through unchanged.
 func (r *LoadRecovery) OnFrame(line string, probe frameProbe, ok bool) ([]string, bool) {
-	r.mu.Lock()
-	noPending := len(r.pendingLoads) == 0
-	r.mu.Unlock()
-	if noPending {
-		return nil, false
-	}
-
 	if !ok || probe.ID == nil || len(*probe.ID) == 0 {
 		return nil, false
 	}
@@ -149,9 +147,10 @@ func (r *LoadRecovery) OnFrame(line string, probe frameProbe, ok bool) ([]string
 		frames = append(frames, frame.line)
 	}
 	cached := r.response[sid]
+	cursor := loadCursor{Epoch: r.epoch, HeadSeq: r.seq[sid]}
 	r.mu.Unlock()
 
-	success, ok := synthesizeLoadSuccess(cached, *probe.ID)
+	success, ok := synthesizeLoadSuccess(cached, *probe.ID, cursor)
 	if !ok {
 		return nil, false // could not build a safe success; surface the original error
 	}
@@ -310,19 +309,39 @@ func responseIDKey(id json.RawMessage) string {
 
 // synthesizeLoadSuccess builds the session/load success response a reconnecting
 // client expects. It reuses the cached first-load response when available
-// (preserving any modes/models the agent returned), rewriting only the id;
-// otherwise it falls back to a null result, which the ACP client accepts.
-func synthesizeLoadSuccess(cached []byte, id json.RawMessage) (string, bool) {
+// (preserving any modes/models the agent returned), rewriting the id and merging cursor metadata;
+// otherwise it starts with an empty result. The cursor lets a client resume
+// after replacing its transcript even when the replay contains no updates.
+func synthesizeLoadSuccess(cached []byte, id json.RawMessage, cursor loadCursor) (string, bool) {
+	resp := make(map[string]json.RawMessage)
 	if len(cached) > 0 {
-		if out, ok := rewriteResponseID(cached, id); ok {
-			return string(out), true
+		if err := json.Unmarshal(cached, &resp); err != nil || resp == nil {
+			return "", false
 		}
 	}
-	out, err := json.Marshal(map[string]json.RawMessage{
-		"jsonrpc": json.RawMessage(`"2.0"`),
-		"id":      id,
-		"result":  json.RawMessage(`null`),
-	})
+	result := make(map[string]json.RawMessage)
+	if raw := resp["result"]; len(raw) > 0 {
+		if err := json.Unmarshal(raw, &result); err != nil {
+			return "", false
+		}
+	}
+	if result == nil {
+		result = make(map[string]json.RawMessage)
+	}
+	meta := make(map[string]json.RawMessage)
+	if raw := result["_meta"]; len(raw) > 0 {
+		if err := json.Unmarshal(raw, &meta); err != nil {
+			return "", false
+		}
+	}
+	if meta == nil {
+		meta = make(map[string]json.RawMessage)
+	}
+	meta[catchUpMetaKey], _ = json.Marshal(cursor) // fixed scalar fields cannot fail
+	result["_meta"], _ = json.Marshal(meta)        // decoded RawMessages remain valid JSON
+	resp["result"], _ = json.Marshal(result)       // decoded RawMessages remain valid JSON
+	resp["jsonrpc"], resp["id"] = json.RawMessage(`"2.0"`), id
+	out, err := json.Marshal(resp)
 	if err != nil {
 		return "", false
 	}
@@ -408,6 +427,11 @@ func (r *LoadRecovery) forgetPrompt(sid, promptID string) {
 		r.invalidatePromptLocked(sid, f.seq)
 	}
 	r.history[sid] = kept
+	if len(kept) < len(frames) {
+		// Reserve a cursor beyond the rejected range for a repaired transcript;
+		// reusing the old head would make its next catch-up require another load.
+		r.seq[sid]++
+	}
 }
 
 // invalidatePromptLocked remembers cursors that could already contain the

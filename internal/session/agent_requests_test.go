@@ -159,7 +159,7 @@ func TestAgentRequestRedeliveredAfterRecoveredLoad(t *testing.T) {
 	if got[0] != resumedFrame("ses_a", 0, false) {
 		t.Fatalf("resume notice = %s", got[0])
 	}
-	if got[1] != `{"id":1,"jsonrpc":"2.0","result":null}` {
+	if id, _ := catchUpOf(t, got[1]); id != "1" {
 		t.Fatalf("synthesized load success = %s", got[1])
 	}
 	if got[2] != permissionRequest {

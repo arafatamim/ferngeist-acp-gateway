@@ -1177,7 +1177,7 @@ prompt runs, and always fire on each tool call that completes or fails.
     ```json
     {"jsonrpc":"2.0","method":"_ferngeist/resumed","params":{"sessionId":"ses_abc","replayedFrames":42}}
     ```
-    `replayedFrames` `session/update` notifications follow, and then the response to the client's `session/load`: the cached first-load result rewritten with the request's id, or a `null` result when no successful load was cached. `_ferngeist/resumed` means the gateway, not the agent, restored the session, so a client may treat that history and that response as the gateway's resume contract instead of defending against a fabricated agent reply. Clients that do not know the notification ignore it, as ACP requires for unknown notifications. Underscore-prefixed per ACP's extension rule, like `_ferngeist/turn_ended`. When the replay buffer evicted its oldest frames past the 8 MiB cap, the params carry `"truncated": true` (absent otherwise), telling the client earlier history exists that it will not receive.
+    `replayedFrames` `session/update` notifications follow, and then the response to the client's `session/load`: the cached first-load result rewritten with the request's id, or an empty result when no successful load was cached. The result's `_meta["ferngeist/catchUp"]` contains `epoch` and `headSeq`. After successfully replacing its transcript with the replay, the client can use that cursor for its next catch-up, even when no updates were replayed. `_ferngeist/resumed` means the gateway, not the agent, restored the session, so a client may treat that history and that response as the gateway's resume contract instead of defending against a fabricated agent reply. Clients that do not know the notification ignore it, as ACP requires for unknown notifications. Underscore-prefixed per ACP's extension rule, like `_ferngeist/turn_ended`. When the replay buffer evicted its oldest frames past the 8 MiB cap, the params carry `"truncated": true` (absent otherwise), telling the client earlier history exists that it will not receive.
   - On reconnect, a prompt issued on an earlier connection cannot be answered with a JSON-RPC result, because the id it would carry was never issued on the new connection; its turn ends with a `_ferngeist/turn_ended` notification instead (see `docs/changelog.md`).
   - When a prompt finishes while no client is attached, its reply is dropped and there is nothing left to route — so the gateway keeps the turn's outcome and replays it to the next connection as an ACP extension notification placed **before** the `session/load` (or `session/resume`) reply:
     ```json
@@ -1186,7 +1186,9 @@ prompt runs, and always fire on each tool call that completes or fails.
     A new `session/prompt` for the session clears the kept result, so a stale outcome never lands on a later turn. `session/resume` restores like `session/load`: unanswered agent requests are re-sent after its reply too. Clients that do not know the notification ignore it, as ACP requires for unknown notifications. Underscore-prefixed per ACP's extension rule, like `_ferngeist/turn_ended`.
   - Every `session/update` the gateway forwards or buffers carries
     `params.update._meta["ferngeist/seq"]`: a number counting the ACP session's
-    updates from 1, without gaps, merged into any `_meta` the agent sent. It is
+    updates from 1, merged into any `_meta` the agent sent. The gateway may
+    reserve a sequence number after a rejected prompt to identify repaired
+    transcripts, leaving a gap in update numbers. The number is
     on the update, not `params._meta`, because the Kotlin ACP SDK drops
     notification-level `_meta` for updates arriving during a prompt. Numbers
     restart with every agent process; the runtime's `epoch` (from
