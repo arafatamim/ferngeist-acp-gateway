@@ -105,10 +105,14 @@ func (rs *RuntimeSession) create(ctx context.Context, agent catalog.Agent, devic
 		logger:             rs.logger,
 		appendLog:          rs.runtimeSvc.AppendLog,
 		onPushNotification: onPushNotification,
-		onTurnFinished:     rs.outcomes.Record,
-		ProgressInterval:   rs.cfg.ProgressInterval,
-		frameLog:           rs.frameLog,
-		loadRecovery:       newLoadRecovery(rs.logger),
+		onTurnFinished: func(st turns.Status) {
+			rs.outcomes.Record(st)
+			rs.feed.Changed()
+		},
+		reqIDs:           requestIDs{turnsChanged: rs.feed.Changed},
+		ProgressInterval: rs.cfg.ProgressInterval,
+		frameLog:         rs.frameLog,
+		loadRecovery:     newLoadRecovery(rs.logger),
 	}
 
 	go pump.StdoutDrainLoop(pumpCtx)
@@ -736,15 +740,9 @@ func (rs *RuntimeSession) awaitExit(sess *Session) {
 	}
 }
 
-// TurnSnapshot is every known turn, running or finished, at one instant.
-type TurnSnapshot struct {
-	ObservedAt time.Time      `json:"observedAt"`
-	Turns      []turns.Status `json:"turns"`
-}
-
 // TurnSnapshot returns the running turns of every live session, across all
 // devices, merged over the outcomes of finished ones.
-func (rs *RuntimeSession) TurnSnapshot() TurnSnapshot {
+func (rs *RuntimeSession) TurnSnapshot() turns.Snapshot {
 	// Snapshot pumps so the registry lock is released before taking their locks.
 	rs.mu.Lock()
 	pumps := make([]*StdioPump, 0, len(rs.sessions))
@@ -759,7 +757,7 @@ func (rs *RuntimeSession) TurnSnapshot() TurnSnapshot {
 	for _, pump := range pumps {
 		live = append(live, pump.LiveTurns()...)
 	}
-	return TurnSnapshot{ObservedAt: observedAt, Turns: rs.outcomes.Snapshot(live)}
+	return turns.Snapshot{ObservedAt: observedAt, Turns: rs.outcomes.Snapshot(live)}
 }
 
 // ListByDevice returns summaries of all sessions owned by a device.

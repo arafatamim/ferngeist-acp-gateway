@@ -3,10 +3,12 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -263,6 +265,8 @@ func assertCompletedTurnTiming(t *testing.T, h *resilientTestHarness, conn *webs
 	assertTurnTiming(t, h, done)
 }
 
+// The stream shares GET /v1/turns' auth gate: every rejection happens before the
+// upgrade, as an ordinary HTTP response.
 func TestTurnsRefusesUnauthorizedOrUnavailable(t *testing.T) {
 	baseDir := t.TempDir()
 	store, err := storage.Open(filepath.Join(baseDir, "pairings.db"))
@@ -280,22 +284,516 @@ func TestTurnsRefusesUnauthorizedOrUnavailable(t *testing.T) {
 	server := newTestServerWithStore(baseDir, store)
 	readToken := pairDevice(t, server)
 
-	for _, tc := range []struct {
-		name, token string
-		want        int
-	}{
-		{"no credential", "", http.StatusUnauthorized},
-		{"no read scope", controlOnly, http.StatusForbidden},
-		{"no session service", readToken, http.StatusServiceUnavailable},
-	} {
-		req := httptest.NewRequest(http.MethodGet, "/v1/turns", nil)
-		if tc.token != "" {
-			req.Header.Set("Authorization", "Bearer "+tc.token)
+	for _, path := range []string{"/v1/turns", "/v1/turns/stream"} {
+		for _, tc := range []struct {
+			name, token string
+			want        int
+		}{
+			{"no credential", "", http.StatusUnauthorized},
+			{"no read scope", controlOnly, http.StatusForbidden},
+			{"no session service", readToken, http.StatusServiceUnavailable},
+		} {
+			req := httptest.NewRequest(http.MethodGet, path, nil)
+			if tc.token != "" {
+				req.Header.Set("Authorization", "Bearer "+tc.token)
+			}
+			rec := httptest.NewRecorder()
+			server.Handler().ServeHTTP(rec, req)
+			if rec.Code != tc.want {
+				t.Errorf("%s %s: status %d, want %d (%s)", path, tc.name, rec.Code, tc.want, rec.Body.String())
+			}
 		}
+	}
+}
+
+// --- Turn status stream ---
+
+type turnStreamFrame struct {
+	Type             string         `json:"type"`
+	GatewayStartedAt time.Time      `json:"gatewayStartedAt"`
+	ObservedAt       time.Time      `json:"observedAt"`
+	Turns            []turns.Status `json:"turns"`
+	Upserts          []turns.Status `json:"upserts"`
+	Removed          []turns.Key    `json:"removed"`
+}
+
+// newTurnStreamServer attaches a session service, pairs one device and starts
+// an HTTP listener, the three things an open stream needs.
+func newTurnStreamServer(t *testing.T, server *Server) (*session.RuntimeSession, pairCompleteResponse, *httptest.Server) {
+	t.Helper()
+	rs := attachTestSessionService(t, server)
+	device := pairDeviceResponse(t, server)
+	httpSrv := httptest.NewServer(server.Handler())
+	t.Cleanup(httpSrv.Close)
+	return rs, device, httpSrv
+}
+
+// dialTurnStream opens GET /v1/turns/stream with a pairing bearer token.
+func dialTurnStream(t *testing.T, httpSrv *httptest.Server, token string) *websocket.Conn {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	header := http.Header{}
+	header.Set("Authorization", "Bearer "+token)
+	url := "ws" + strings.TrimPrefix(httpSrv.URL, "http") + "/v1/turns/stream"
+	conn, _, err := websocket.Dial(ctx, url, &websocket.DialOptions{HTTPHeader: header})
+	if err != nil {
+		t.Fatalf("websocket.Dial(%s) error = %v", url, err)
+	}
+	t.Cleanup(func() { _ = conn.CloseNow() })
+	return conn
+}
+
+func readTurnStreamFrame(t *testing.T, conn *websocket.Conn) (turnStreamFrame, string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, data, err := conn.Read(ctx)
+	if err != nil {
+		t.Fatalf("conn.Read() error = %v", err)
+	}
+	var frame turnStreamFrame
+	if err := json.Unmarshal(data, &frame); err != nil {
+		t.Fatalf("Unmarshal(%s) error = %v", string(data), err)
+	}
+	return frame, string(data)
+}
+
+// readTurnStreamOpen reads the first frame and asserts it is the snapshot.
+func readTurnStreamOpen(t *testing.T, conn *websocket.Conn) turnStreamFrame {
+	t.Helper()
+	frame, raw := readTurnStreamFrame(t, conn)
+	if frame.Type != "snapshot" {
+		t.Fatalf("first frame type = %q, want snapshot: %s", frame.Type, raw)
+	}
+	return frame
+}
+
+func readTurnStreamClose(t *testing.T, conn *websocket.Conn) (websocket.StatusCode, string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	_, _, err := conn.Read(ctx)
+	code := websocket.CloseStatus(err)
+	if code == -1 {
+		t.Fatalf("conn.Read() error = %v, want a close frame", err)
+	}
+	var closeErr websocket.CloseError
+	if errors.As(err, &closeErr) {
+		return code, closeErr.Reason
+	}
+	return code, ""
+}
+
+// awaitTurnUpsert reads changes frames until one upserts a turn matching want.
+func awaitTurnUpsert(t *testing.T, conn *websocket.Conn, want func(turns.Status) bool) turns.Status {
+	t.Helper()
+	for range 32 {
+		frame, raw := readTurnStreamFrame(t, conn)
+		if frame.Type != "changes" {
+			t.Fatalf("frame type = %q, want changes: %s", frame.Type, raw)
+		}
+		if len(frame.Upserts) == 0 {
+			t.Fatalf("changes frame with no upserts: %s", raw)
+		}
+		if !strings.Contains(raw, `"upserts":`) || !strings.Contains(raw, `"removed":`) {
+			t.Fatalf("changes frame omits an array: %s", raw)
+		}
+		for _, st := range frame.Upserts {
+			if want(st) {
+				return st
+			}
+		}
+	}
+	t.Fatal("no matching upsert arrived")
+	return turns.Status{}
+}
+
+// A shutting-down gateway refuses new streams before the upgrade, so the client
+// backs off instead of holding a socket that will never carry a snapshot.
+func TestTurnStreamRefusesAfterShutdown(t *testing.T) {
+	server := newTestServer()
+	_, device, _ := newTurnStreamServer(t, server)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := server.Shutdown(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/turns/stream", nil)
+	req.Header.Set("Authorization", "Bearer "+device.Token)
+	rec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("stream after shutdown = %d, want 503 (%s)", rec.Code, rec.Body.String())
+	}
+}
+
+// Streams opening while Shutdown runs must never Add to the handler group
+// concurrently with its Wait. Under -race this catches the misuse often, not
+// always: it is a regression probe, not a proof.
+func TestTurnStreamShutdownRacesNewStreams(t *testing.T) {
+	server := newTestServer()
+	_, device, _ := newTurnStreamServer(t, server)
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for range 32 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for range 20 {
+				req := httptest.NewRequest(http.MethodGet, "/v1/turns/stream", nil)
+				req.Header.Set("Authorization", "Bearer "+device.Token)
+				server.Handler().ServeHTTP(httptest.NewRecorder(), req)
+			}
+		}()
+	}
+	close(start)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := server.Shutdown(ctx); err != nil {
+		t.Fatal(err)
+	}
+	wg.Wait()
+}
+
+// The first frame is the GET /v1/turns body plus a type, with the same
+// gatewayStartedAt, so a client can seed its state from either.
+func TestTurnStreamOpensWithTheTurnsSnapshot(t *testing.T) {
+	server := newTestServer()
+	_, device, httpSrv := newTurnStreamServer(t, server)
+	body, _ := getTurns(t, server, device.Token)
+
+	conn := dialTurnStream(t, httpSrv, device.Token)
+	frame, raw := readTurnStreamFrame(t, conn)
+	if frame.Type != "snapshot" {
+		t.Fatalf("first frame = %s", raw)
+	}
+	if !frame.GatewayStartedAt.Equal(body.GatewayStartedAt) {
+		t.Fatalf("stream gatewayStartedAt = %v, GET /v1/turns = %v", frame.GatewayStartedAt, body.GatewayStartedAt)
+	}
+	if frame.ObservedAt.IsZero() || frame.ObservedAt.Location() != time.UTC {
+		t.Fatalf("observedAt = %v", frame.ObservedAt)
+	}
+	if !strings.Contains(raw, `"turns":[]`) {
+		t.Fatalf("empty snapshot must carry turns as an array: %s", raw)
+	}
+}
+
+// A turn another device starts reaches this device's stream: running with the
+// approval its agent waits on, then its outcome. No request content crosses.
+func TestTurnStreamCarriesAnotherDevicesTurn(t *testing.T) {
+	gate := make(chan struct{}, 4)
+	llm := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-gate:
+		case <-r.Context().Done():
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(llm.Close)
+	t.Cleanup(func() { close(gate) })
+	t.Setenv("FERNGEIST_MOCK_LLM_ENDPOINT", llm.URL)
+	t.Setenv("FERNGEIST_MOCK_PERMISSION", "1")
+	baseDir := t.TempDir()
+	buildMockAgent(t, baseDir)
+	server := newTestServerWithBaseDir(baseDir)
+	rs, reader, httpSrv := newTurnStreamServer(t, server)
+	writer := pairDevice(t, server)
+
+	conn := dialTurnStream(t, httpSrv, reader.Token)
+	if frame := readTurnStreamOpen(t, conn); len(frame.Turns) != 0 {
+		t.Fatalf("fresh stream snapshot = %+v", frame.Turns)
+	}
+
+	connected := connectAgent(t, server, writer, "mock-acp")
+	pump, err := rs.GetPump(connected.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame := `{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":{"sessionId":"chat-a","prompt":[]}}`
+	if err := pump.WriteToAgent(0, []byte(frame)); err != nil {
+		t.Fatal(err)
+	}
+	running := awaitTurnUpsert(t, conn, func(st turns.Status) bool {
+		return st.SessionID == "chat-a" && len(st.Attention) > 0
+	})
+	if running.State != turns.StateRunning || strings.Join(running.Attention, ",") != turns.AttentionPermission ||
+		running.GatewaySessionID != connected.SessionID || running.RuntimeID != connected.RuntimeID {
+		t.Fatalf("running upsert = %+v", running)
+	}
+
+	gate <- struct{}{}
+	done := awaitTurnUpsert(t, conn, func(st turns.Status) bool {
+		return st.SessionID == "chat-a" && st.State != turns.StateRunning
+	})
+	if done.State != turns.StateSucceeded || done.StopReason != "end_turn" || len(done.Attention) != 0 {
+		t.Fatalf("finished upsert = %+v", done)
+	}
+}
+
+// An open stream notices a credential that stopped validating on its next write
+// and closes with 4401, carrying the auth code the client branches on.
+func TestTurnStreamClosesWhenTheCredentialIsRevoked(t *testing.T) {
+	baseDir := t.TempDir()
+	buildMockAgent(t, baseDir)
+	server := newTestServerWithBaseDir(baseDir)
+	rs, device, httpSrv := newTurnStreamServer(t, server)
+
+	conn := dialTurnStream(t, httpSrv, device.Token)
+	readTurnStreamOpen(t, conn)
+	connected := connectAgent(t, server, device.Token, "mock-acp")
+	pump, err := rs.GetPump(connected.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.pairing.RevokeDevice(device.DeviceID); err != nil {
+		t.Fatal(err)
+	}
+	// The prompt is only here to make the feed publish a change; the handler
+	// must revalidate before it writes that change.
+	if err := pump.WriteToAgent(0, []byte(`{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":{"sessionId":"chat-a","prompt":[]}}`)); err != nil {
+		t.Fatal(err)
+	}
+
+	code, reason := readTurnStreamClose(t, conn)
+	if code != 4401 || reason != credentialInvalid {
+		t.Fatalf("close = %d %q, want 4401 %q", code, reason, credentialInvalid)
+	}
+}
+
+// An idle stream is revalidated on a timer, so revocation does not wait for
+// traffic that may never come.
+func TestTurnStreamRevalidatesAnIdleStream(t *testing.T) {
+	server := newTestServer()
+	_, device, httpSrv := newTurnStreamServer(t, server)
+	server.streamRecheck = 20 * time.Millisecond
+	conn := dialTurnStream(t, httpSrv, device.Token)
+	readTurnStreamOpen(t, conn)
+
+	if _, err := server.pairing.RevokeDevice(device.DeviceID); err != nil {
+		t.Fatal(err)
+	}
+	code, reason := readTurnStreamClose(t, conn)
+	if code != 4401 || reason != credentialInvalid {
+		t.Fatalf("close = %d %q, want 4401 %q", code, reason, credentialInvalid)
+	}
+}
+
+// The client never sends data: a text frame closes with 1008, and one over the
+// 32 KiB read limit with 1009.
+func TestTurnStreamClosesOnAClientDataFrame(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		payload []byte
+		want    websocket.StatusCode
+	}{
+		{"under the read limit", []byte(`{"hello":true}`), websocket.StatusPolicyViolation},
+		{"over the read limit", []byte(strings.Repeat("x", 33*1024)), websocket.StatusMessageTooBig},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, device, httpSrv := newTurnStreamServer(t, newTestServer())
+			conn := dialTurnStream(t, httpSrv, device.Token)
+			readTurnStreamOpen(t, conn)
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			// A rejected write is fine: the close frame still arrives.
+			_ = conn.Write(ctx, websocket.MessageText, tc.payload)
+			if code, _ := readTurnStreamClose(t, conn); code != tc.want {
+				t.Fatalf("close = %d, want %d", code, tc.want)
+			}
+		})
+	}
+}
+
+// Shutdown closes every open stream with 1001 and waits for the handlers, so a
+// client reconnects instead of seeing a bare 1006 from a dropped socket.
+func TestTurnStreamClosesWith1001OnShutdown(t *testing.T) {
+	server := newTestServer()
+	rs, device, httpSrv := newTurnStreamServer(t, server)
+	conn := dialTurnStream(t, httpSrv, device.Token)
+	readTurnStreamOpen(t, conn)
+
+	done := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		done <- server.Shutdown(ctx)
+	}()
+	code, reason := readTurnStreamClose(t, conn)
+	if code != websocket.StatusGoingAway || reason != "gateway shutting down" {
+		t.Fatalf("close = %d %q", code, reason)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("Shutdown() error = %v", err)
+	}
+	if got := rs.TurnFeed().Stats().Subscribers; got != 0 {
+		t.Fatalf("subscriptions after shutdown = %d, want 0", got)
+	}
+}
+
+// A device's fifth stream closes its oldest with 4409 once the new one has its
+// snapshot; the other three keep running.
+func TestTurnStreamSupersedesTheDevicesOldestWith4409(t *testing.T) {
+	server := newTestServer()
+	rs, device, httpSrv := newTurnStreamServer(t, server)
+	streams := make([]*websocket.Conn, 0, 5)
+	for range 5 {
+		conn := dialTurnStream(t, httpSrv, device.Token)
+		readTurnStreamOpen(t, conn)
+		streams = append(streams, conn)
+	}
+
+	if code, _ := readTurnStreamClose(t, streams[0]); code != 4409 {
+		t.Fatalf("oldest stream close = %d, want 4409", code)
+	}
+	if got := rs.TurnFeed().Stats().Subscribers; got != 4 {
+		t.Fatalf("subscriptions = %d, want 4", got)
+	}
+}
+
+// The 257th subscription is refused before the upgrade, and the refusal leaves
+// nothing behind: once the cap clears, a stream opens.
+func TestTurnStreamAnswers503AtTheGlobalCap(t *testing.T) {
+	server := newTestServer()
+	rs, device, httpSrv := newTurnStreamServer(t, server)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	held := make([]*turns.Subscription, 0, 256)
+	defer func() {
+		for _, sub := range held {
+			sub.Close()
+		}
+	}()
+	for range 256 {
+		_, sub, err := rs.TurnFeed().Subscribe(ctx, "dev-other")
+		if err != nil {
+			t.Fatalf("Subscribe() error = %v", err)
+		}
+		held = append(held, sub)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/turns/stream", nil)
+	req.Header.Set("Authorization", "Bearer "+device.Token)
+	rec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("stream at the cap = %d, want 503 (%s)", rec.Code, rec.Body.String())
+	}
+
+	for _, sub := range held {
+		sub.Close()
+	}
+	held = nil
+	conn := dialTurnStream(t, httpSrv, device.Token)
+	readTurnStreamOpen(t, conn)
+}
+
+// The 9th concurrent snapshot build waits for a slot and gives up with 503;
+// the refusal releases the slot it never took.
+func TestTurnStreamAnswers503WhenSnapshotSlotsAreExhausted(t *testing.T) {
+	server := newTestServer()
+	_, device, _ := newTurnStreamServer(t, server)
+	for range turnStreamSnapshotSlots {
+		server.streamSlots <- struct{}{}
+	}
+	server.streamSnapshotTimeout = 25 * time.Millisecond
+
+	getStream := func() int {
+		req := httptest.NewRequest(http.MethodGet, "/v1/turns/stream", nil)
+		req.Header.Set("Authorization", "Bearer "+device.Token)
 		rec := httptest.NewRecorder()
 		server.Handler().ServeHTTP(rec, req)
-		if rec.Code != tc.want {
-			t.Errorf("%s: status %d, want %d (%s)", tc.name, rec.Code, tc.want, rec.Body.String())
+		return rec.Code
+	}
+	if got := getStream(); got != http.StatusServiceUnavailable {
+		t.Fatalf("stream without a slot = %d, want 503", got)
+	}
+	for range turnStreamSnapshotSlots {
+		<-server.streamSlots
+	}
+	if len(server.streamSlots) != 0 {
+		t.Fatalf("stacked slots after a refused stream = %d", len(server.streamSlots))
+	}
+	// With a slot free the request reaches the upgrade, which a plain GET fails.
+	if got := getStream(); got != http.StatusUpgradeRequired {
+		t.Fatalf("stream with a slot = %d, want %d", got, http.StatusUpgradeRequired)
+	}
+}
+
+// A request that authenticates but never upgrades leaves a live stream alone,
+// even from the same device at its stream limit.
+func TestTurnStreamFailedUpgradeEvictsNothing(t *testing.T) {
+	server := newTestServer()
+	rs, device, httpSrv := newTurnStreamServer(t, server)
+	for range 4 {
+		conn := dialTurnStream(t, httpSrv, device.Token)
+		readTurnStreamOpen(t, conn)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/turns/stream", nil)
+	req.Header.Set("Authorization", "Bearer "+device.Token)
+	rec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusUpgradeRequired {
+		t.Fatalf("plain GET = %d, want %d", rec.Code, http.StatusUpgradeRequired)
+	}
+	if got := rs.TurnFeed().Stats().Subscribers; got != 4 {
+		t.Fatalf("subscriptions after a failed upgrade = %d, want 4", got)
+	}
+}
+
+// The diagnostics summary reports the feed's health beside runtime state, so a
+// feed that stops sampling is visible without a new endpoint.
+func TestTurnStreamStatsReachDiagnostics(t *testing.T) {
+	server := newTestServer()
+	rs, device, httpSrv := newTurnStreamServer(t, server)
+	conn := dialTurnStream(t, httpSrv, device.Token)
+	readTurnStreamOpen(t, conn)
+
+	stats := rs.TurnFeed().Stats()
+	req := httptest.NewRequest(http.MethodGet, "/v1/diagnostics/summary", nil)
+	req.Header.Set("Authorization", "Bearer "+device.Token)
+	rec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("diagnostics summary = %d: %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		TurnStream turnStreamSummary `json:"turnStream"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.TurnStream.Open != 1 || stats.Subscribers != 1 {
+		t.Fatalf("open streams: diagnostics %d, feed %d", body.TurnStream.Open, stats.Subscribers)
+	}
+	if body.TurnStream.Samples == 0 || body.TurnStream.Samples != stats.Samples {
+		t.Fatalf("samples: diagnostics %d, feed %d", body.TurnStream.Samples, stats.Samples)
+	}
+	if !body.TurnStream.LastSampleAt.Equal(stats.LastSampleAt) {
+		t.Fatalf("lastSampleAt: diagnostics %v, feed %v", body.TurnStream.LastSampleAt, stats.LastSampleAt)
+	}
+}
+
+// Every way the feed ends a subscription maps to the close code its client acts
+// on. 4408 is checked here, not end to end: a client that stops reading cannot
+// fill the feed's queue, because the kernel's socket buffers absorb the
+// handler's small frames. The supersede test covers the same close path live.
+func TestTurnStreamClosesASlowConsumerWith4408(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		want websocket.StatusCode
+	}{
+		{turns.ErrSlowConsumer, 4408},
+		{turns.ErrSuperseded, 4409},
+		{turns.ErrStopped, websocket.StatusGoingAway},
+		{errors.New("other"), websocket.StatusInternalError},
+	} {
+		if code, _ := turnStreamClose(tc.err); code != tc.want {
+			t.Errorf("turnStreamClose(%v) = %d, want %d", tc.err, code, tc.want)
 		}
 	}
 }

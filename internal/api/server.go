@@ -88,6 +88,18 @@ type Server struct {
 	rateLimiter *pairingRateLimiter    // protects pairing endpoints from abuse
 	attempts    *pairingAttemptTracker // tracks failed pairing attempts for lockout
 	proofNonces *proofNonceTracker     // prevents replay of credential proofs
+
+	// streamSlots bounds concurrent turn snapshot builds and their buffers
+	// (C5); streamStop is closed by Shutdown so open streams send 1001 instead
+	// of dying with the process. streamMu orders a handler's Add against that
+	// close, so Wait never runs concurrently with an Add from zero.
+	streamSlots           chan struct{}
+	streamMu              sync.Mutex
+	streamStop            chan struct{}
+	stopStreams           sync.Once
+	streamHandlers        sync.WaitGroup
+	streamSnapshotTimeout time.Duration // test seam for the snapshot slot budget
+	streamRecheck         time.Duration // test seam for the credential recheck
 }
 
 // ProtocolVersion identifies the current gateway-to-client protocol version.
@@ -246,6 +258,11 @@ func NewServer(deps Deps) *Server {
 		sessionSvc:      deps.Session,
 		projects:        deps.Projects,
 		pushSvc:         deps.Push,
+
+		streamSlots:           make(chan struct{}, turnStreamSnapshotSlots),
+		streamStop:            make(chan struct{}),
+		streamSnapshotTimeout: turnStreamSnapshotTimeout,
+		streamRecheck:         turnStreamRecheck,
 	}
 
 	mux, adminMux := server.routes()
@@ -284,6 +301,7 @@ func (s *Server) routes() (*http.ServeMux, *http.ServeMux) {
 	mux.HandleFunc("GET /v1/quotas", s.handleQuotas)
 	mux.HandleFunc("/v1/agents", s.handleAgents)
 	mux.HandleFunc("GET /v1/turns", s.handleTurns)
+	mux.HandleFunc("GET /v1/turns/stream", s.handleTurnStream)
 	mux.HandleFunc("GET /v1/diagnostics/summary", s.handleDiagnosticsSummary)
 	mux.HandleFunc("GET /v1/diagnostics/export", s.handleDiagnosticsExport)
 	mux.HandleFunc("POST /v1/auth/refresh", s.handleAuthRefresh)
@@ -388,14 +406,36 @@ func (s *Server) ListenAndServe() error {
 	return firstErr
 }
 
-// Shutdown stops both HTTP servers, then the project lister's warm agents.
+// Shutdown stops the turn streams, drains both HTTP servers, then the project
+// lister's warm agents. Streams are joined before the drain because
+// http.Server.Shutdown does not close hijacked connections: without the join the
+// handler never writes the 1001 close frame and the client sees 1006.
 func (s *Server) Shutdown(ctx context.Context) error {
+	s.streamMu.Lock()
+	s.stopStreams.Do(func() { close(s.streamStop) })
+	s.streamMu.Unlock()
+	s.waitTurnStreams(ctx)
 	err := errors.Join(s.httpServer.Shutdown(ctx), s.adminServer.Shutdown(ctx))
 	// After the drain, so no listing parks a process once its pool is stopped.
 	if s.projects != nil {
 		s.projects.Close()
 	}
 	return err
+}
+
+// waitTurnStreams joins the stream handlers, bounded by ctx: a handler stuck in
+// a write waits at most its own deadline, and the daemon's shutdown context
+// bounds the whole wait.
+func (s *Server) waitTurnStreams(ctx context.Context) {
+	joined := make(chan struct{})
+	go func() {
+		defer close(joined)
+		s.streamHandlers.Wait()
+	}()
+	select {
+	case <-joined:
+	case <-ctx.Done():
+	}
 }
 
 // Handler returns the public API handler.

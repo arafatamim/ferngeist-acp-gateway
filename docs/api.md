@@ -1075,12 +1075,193 @@ clean. Worktrees outlive the chats that use them: they are removed only on an ex
     the least recently changed is dropped. No expiry: judge staleness by
     `changedAt`. An entry that is absent or was dropped is unknown, never
     success. Turns run outside the gateway (an agent's own CLI) are not visible.
-  - Delivery is pull-only; pushes remain hints to refresh.
+  - Delivery: pull this endpoint, or subscribe to `GET /v1/turns/stream`;
+    pushes remain hints to refresh.
   - Error responses:
     - `401` — invalid or missing device credential
     - `403` — missing `read` scope
     - `404` — the gateway predates this endpoint
     - `503` — session service not available
+
+### Turn status stream
+
+`GET /v1/turns/stream` streams the [`GET /v1/turns`](#turns) snapshot and every
+change to it over a WebSocket, so a client never polls for turn status. The turn
+object, its closed sets, ordering, timing and retention are the ones documented
+under [Turns](#turns).
+
+#### C1. Transport and endpoint
+
+- `GET /v1/turns/stream`, upgraded to a WebSocket (RFC 6455). Same host and port
+  as the REST API: `ws://` where the gateway is `http`, `wss://` where it is
+  `https`.
+- One direction of data: gateway to client. The client never sends data frames;
+  any client data frame closes the connection with `1008`, and one larger than
+  the 32 KiB read limit closes it with `1009` (C5).
+- Every gateway data frame is a text frame holding one JSON object with a `type`
+  member. Clients ignore unknown members and skip frames whose `type` they do
+  not know.
+
+#### C2. Authentication and visibility
+
+- Identical to `GET /v1/turns`: `Authorization: Bearer <token>` plus the proof
+  headers that endpoint requires (see
+  [Authentication and scopes](#authentication-and-scopes)), signed over method
+  `GET` and path `/v1/turns/stream` (no query). Requires the `read` scope.
+- Checked on the upgrade request, before the switch to WebSocket. Rejections are
+  ordinary HTTP responses with the JSON error envelope and auth `code` table of
+  [Errors](#errors):
+
+  | Status | Meaning | Client action |
+  |---|---|---|
+  | `101` | Upgraded | Read the snapshot. |
+  | `401` | Auth rejected (`code` as in the auth table) | As the auth table says (`proof_expired`: learn the clock, re-sign once). |
+  | `403` | `credential_scope` | Do not retry. |
+  | `404` | The gateway predates this endpoint | Fall back to polling `GET /v1/turns` on the client's existing refresh triggers. |
+  | `503` | Session service unavailable, or the gateway's stream or snapshot capacity is reached | Retry with backoff. |
+
+- Device-wide, exactly like `GET /v1/turns`: any paired device with `read` sees
+  every paired device's turns. No device IDs, prompt content, request payloads
+  or error messages.
+- The credential is re-validated before every write and at least every 30 s. A
+  credential that stopped being valid (expired, revoked, scope lost) closes the
+  stream with `4401`, the close reason carrying the auth `code`
+  (`credential_expired`, `credential_invalid`, `credential_grace_expired`,
+  `credential_scope`).
+
+#### C3. Messages
+
+**`snapshot`**: exactly one, always the first message. Same members and meaning
+as the `GET /v1/turns` body, plus `type`:
+
+```json
+{"type":"snapshot","gatewayStartedAt":"2026-11-04T08:00:00Z","observedAt":"2026-11-04T09:12:03.104381Z","turns":[
+  {"agentId":"claude","sessionId":"ses_a","gatewaySessionId":"gs_1","runtimeId":"rt_1",
+   "state":"running","attention":[],"startedAt":"2026-11-04T09:08:00.5Z","changedAt":"2026-11-04T09:08:00.5Z"},
+  {"agentId":"claude","sessionId":"ses_b","gatewaySessionId":"gs_2","runtimeId":"rt_2",
+   "state":"succeeded","attention":[],"startedAt":"2026-11-04T08:40:00Z","changedAt":"2026-11-04T08:52:10Z","stopReason":"end_turn"}]}
+```
+
+- `gatewayStartedAt`, `observedAt` and the turn object are exactly those of
+  `GET /v1/turns` (above). The closed sets are restated here so this section
+  stands alone:
+  - `state` is one of `running`, `succeeded`, `failed`, `cancelled`, `unknown`;
+    `unknown` is never success.
+  - `attention` is a sorted, distinct subset of `permission` and `elicitation`,
+    non-empty only while `running`.
+  - `stopReason` appears only when the agent sent one. `changedAt` is when the
+    entry's state last changed: the prompt start for `running`, the turn's end
+    otherwise. An attention change alone does not move it.
+  - One entry per `(agentId, gatewaySessionId, sessionId)`, sorted by `agentId`,
+    `sessionId`, `gatewaySessionId`. A running prompt hides the previous outcome
+    of its entry.
+  - Retention: the latest outcome per entry, up to 4096 daemon-wide, least
+    recently changed dropped. An entry that is absent or was dropped is unknown.
+- `gatewayStartedAt` is fixed for the life of a connection. A gateway restart
+  ends the connection; the next connection's snapshot carries the new value.
+
+**`changes`**: zero or more, after the snapshot.
+
+```json
+{"type":"changes","observedAt":"2026-11-04T09:12:41.009Z",
+ "upserts":[
+  {"agentId":"claude","sessionId":"ses_a","gatewaySessionId":"gs_1","runtimeId":"rt_1",
+   "state":"running","attention":["permission"],"startedAt":"2026-11-04T09:08:00.5Z","changedAt":"2026-11-04T09:08:00.5Z"}],
+ "removed":[]}
+```
+
+```json
+{"type":"changes","observedAt":"2026-11-04T09:15:02.77Z",
+ "upserts":[
+  {"agentId":"claude","sessionId":"ses_a","gatewaySessionId":"gs_1","runtimeId":"rt_1",
+   "state":"succeeded","attention":[],"startedAt":"2026-11-04T09:08:00.5Z","changedAt":"2026-11-04T09:15:02.769Z","stopReason":"end_turn"}],
+ "removed":[{"agentId":"codex","gatewaySessionId":"gs_7","sessionId":"ses_q"}]}
+```
+
+- An entry is identified by its key `(agentId, gatewaySessionId, sessionId)`.
+- `upserts`: full turn objects, same shape as in `turns`, for every key that is
+  new or whose content differs in any member (an attention change alone counts)
+  from what this connection last received. The client replaces the entry for
+  that key.
+- `removed`: keys this connection holds that the gateway no longer reports (a
+  prompt whose write to the agent failed, an outcome evicted at the 4096 cap).
+  The entry becomes absent, which means unknown.
+- Both arrays are always present and at least one is non-empty. A sample that
+  finds no difference publishes nothing at all: an empty `changes` message is
+  never sent, and no `observedAt` is published for it. Each array is sorted like
+  `turns`.
+- `observedAt` is the gateway time when sampling for this message began. Clients
+  use it as the new base for elapsed and completion ages, exactly like a
+  snapshot's `observedAt`, and advance ages between messages with local
+  monotonic time.
+
+**Client state rule.** Start from `snapshot.turns`, keyed. For each `changes`,
+apply `removed`, then `upserts`. The result is what `GET /v1/turns` would answer
+at that message's `observedAt` (with the same non-atomic-sampling caveat
+`GET /v1/turns` documents).
+
+#### C4. Ordering and delivery
+
+- A state feed, not an event log: no sequence numbers, no replay, no resume.
+  Every connection starts with a full snapshot.
+- Within one connection frames arrive in gateway order, and each `changes`
+  reflects a sample taken after the previous message's.
+- The gateway coalesces changes on a fixed cadence: the first poke that finds no
+  sample scheduled starts a 100 ms timer, and pokes arriving before it fires do
+  not move it. Samples therefore start at most once per 100 ms, and a change is
+  sampled within 100 ms of the mutation that produced it. The window is an
+  implementation value, not a network deadline.
+- Intermediate states can be skipped: a turn that starts and ends between two
+  samples appears only as its outcome; an attention raised and answered between
+  samples may never appear.
+- Convergence: after the last change, it is published within one coalescing
+  window. Independently of pokes, the gateway re-samples every 30 s while a
+  stream is open, so a missed signal delays a change by at most that long, never
+  indefinitely.
+- No ordering across connections or devices.
+
+#### C5. Liveness, limits and close codes
+
+- Keepalive is WebSocket ping/pong. The gateway pings every 30 s and closes a
+  peer whose ping goes unanswered for 10 s unless that peer completed a write
+  within the last 30 s (a long snapshot still draining is alive, not dead).
+  Clients ping too and treat a missed pong as a dead connection. There is no
+  application-level heartbeat: silence means nothing changed.
+- **The state is valid only while the connection is open.** On close or failure,
+  for any reason, the client discards everything it holds for that gateway
+  (unknown) until the next snapshot arrives.
+- Limits: at most 4 open streams per paired device (a 5th closes that device's
+  oldest with `4409`, once the 5th has received its snapshot); at most 256 per
+  gateway (beyond that, `503` before the upgrade). At most 16 unsent messages per
+  connection after its snapshot (beyond that, `4408`, sent ahead of anything
+  still queued). A connection that has not yet received its snapshot is not
+  subject to that bound: its changes are consolidated into at most one catch-up
+  message, never queued one per sample.
+  The snapshot message has a 20 s write deadline, the same budget
+  `GET /v1/turns` gets; every later frame has 10 s. A write that misses its
+  deadline closes the connection (`1006`). A snapshot at the 4096-outcome cap is
+  about 1.1 MiB (4096 entries at 271 bytes each with 12-character ids; measured
+  on a synthetic frame, so longer real ids raise it). A client must accept a
+  frame that large.
+
+| Close code | Meaning | Client action |
+|---|---|---|
+| `1000` | Client closed it | None. |
+| `1001` | Gateway shutting down | Reconnect with backoff. |
+| `1006` (no close frame) | Network loss, dead peer | Reconnect with backoff. |
+| `1008` | Client sent a data frame | Client bug; do not retry blindly. |
+| `1009` | Client sent a data frame over the 32 KiB read limit | Same as `1008`. |
+| `1011` | Gateway internal error | Reconnect with backoff. |
+| `4401` | Credential no longer valid; reason = auth `code` | Per the auth table; reconnect only once the credential changed. |
+| `4408` | Client fell behind (slow consumer) | Reconnect at once; a fresh snapshot follows. |
+| `4409` | Superseded by a newer stream from the same device | Do not reconnect. |
+
+#### C6. Version
+
+- The endpoint has no capability field, and `protocolVersion` does not signal it:
+  a gateway that predates the endpoint answers `404` before the upgrade, the
+  same signal `GET /v1/turns` and `GET /v1/projects` use. The client falls back
+  to polling `GET /v1/turns` (C2).
 
 ### Push notification registration
 

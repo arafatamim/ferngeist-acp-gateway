@@ -2395,7 +2395,7 @@ func registerPrompt(sess *Session, acpID string) string {
 	return string(sess.pump.reqIDs.outbound(0, parseClientFrame([]byte(frame))))
 }
 
-func turnStates(snap TurnSnapshot) map[string]string {
+func turnStates(snap turns.Snapshot) map[string]string {
 	got := map[string]string{}
 	for _, st := range snap.Turns {
 		got[st.GatewaySessionID+"/"+st.SessionID] = st.State
@@ -2494,5 +2494,298 @@ func TestTeardownCancelsPendingTurnsOnlyForThatSession(t *testing.T) {
 				t.Fatalf("turns = %v, want %v", got, want)
 			}
 		})
+	}
+}
+
+// --- Turn feed hooks ---
+
+// sessionUpsert waits for the next change and returns the upsert carrying
+// gatewaySessionID/sessionID.
+func sessionUpsert(t *testing.T, sub *turns.Subscription, gatewaySessionID, sessionID string) turns.Status {
+	t.Helper()
+	change := nextFeedChange(t, sub)
+	for _, st := range change.Upserts {
+		if st.GatewaySessionID == gatewaySessionID && st.SessionID == sessionID {
+			return st
+		}
+	}
+	t.Fatalf("change = %+v, want an upsert for %s/%s", change, gatewaySessionID, sessionID)
+	return turns.Status{}
+}
+
+// subscribeReady takes a subscription and marks its snapshot written, then
+// closes it with the test.
+func subscribeReady(t *testing.T, feed *turns.Feed, deviceID string) *turns.Subscription {
+	t.Helper()
+	_, sub, err := feed.Subscribe(context.Background(), deviceID)
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	sub.Ready()
+	t.Cleanup(sub.Close)
+	return sub
+}
+
+// nextFeedChange waits for the next change, failing the test if none arrives.
+func nextFeedChange(t *testing.T, sub *turns.Subscription) turns.Change {
+	t.Helper()
+	select {
+	case change, ok := <-sub.Changes():
+		if !ok {
+			t.Fatalf("subscription ended: %v", sub.Err())
+		}
+		return change
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for a turn change")
+		return turns.Change{}
+	}
+}
+
+// newFeedPump wires a bare pump to a feed the way RuntimeSession does, for
+// mutation paths that need a broken agent stdin. The snapshot merges the pump's
+// live turns over the store exactly as RuntimeSession.TurnSnapshot does.
+func newFeedPump(t *testing.T) (*StdioPump, *turns.Feed, *turns.Store) {
+	t.Helper()
+	store := turns.NewStore()
+	p := newPump()
+	feed := turns.NewFeed(func() turns.Snapshot {
+		return turns.Snapshot{ObservedAt: time.Now().UTC(), Turns: store.Snapshot(p.LiveTurns())}
+	})
+	p.onTurnFinished = func(st turns.Status) {
+		store.Record(st)
+		feed.Changed()
+	}
+	p.reqIDs.turnsChanged = feed.Changed
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		feed.Run(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+	return p, feed, store
+}
+
+// Every turn mutation reaches the feed through the real pump: a prompt starts
+// running, raises attention, has it answered, and finishes.
+func TestTurnFeedFollowsAPromptThroughAttentionToItsOutcome(t *testing.T) {
+	rs, store, agent, _, ctx := setupTest(t, Config{})
+	defer rs.Shutdown()
+	defer store.Close()
+
+	sess, _, err := rs.Create(ctx, agent, "dev-a", nil)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sub := subscribeReady(t, rs.TurnFeed(), "dev-a")
+
+	promptID := agentIDOf(t, []byte(registerPrompt(sess, "ses_a")))
+	if st := sessionUpsert(t, sub, sess.ID, "ses_a"); st.State != turns.StateRunning || len(st.Attention) != 0 {
+		t.Fatalf("after prompt = %+v, want running without attention", st)
+	}
+
+	sess.pump.handleStdoutLine(permissionRequest)
+	if st := sessionUpsert(t, sub, sess.ID, "ses_a"); !slices.Equal(st.Attention, []string{turns.AttentionPermission}) {
+		t.Fatalf("after permission = %+v, want permission attention", st)
+	}
+
+	sess.pump.reqIDs.outbound(0, parseClientFrame([]byte(`{"jsonrpc":"2.0","id":7,"result":{"outcome":{"outcome":"selected","optionId":"allow"}}}`)))
+	if st := sessionUpsert(t, sub, sess.ID, "ses_a"); len(st.Attention) != 0 {
+		t.Fatalf("after answer = %+v, want attention cleared", st)
+	}
+
+	sess.pump.handleStdoutLine(agentReply(promptID, `"result":{"stopReason":"end_turn"}`))
+	if st := sessionUpsert(t, sub, sess.ID, "ses_a"); st.State != turns.StateSucceeded || string(st.StopReason) != "end_turn" {
+		t.Fatalf("after reply = %+v, want succeeded", st)
+	}
+}
+
+// A crash and an intentional close each reach the feed with their own outcome.
+func TestTurnFeedReportsCrashAndCancelOutcomes(t *testing.T) {
+	t.Run("crash", func(t *testing.T) {
+		rs, store, agent, _, ctx := setupTest(t, Config{})
+		defer rs.Shutdown()
+		defer store.Close()
+
+		sess, _, err := rs.Create(ctx, agent, "dev-a", nil)
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		sub := subscribeReady(t, rs.TurnFeed(), "dev-a")
+		registerPrompt(sess, "ses_a")
+		if st := sessionUpsert(t, sub, sess.ID, "ses_a"); st.State != turns.StateRunning {
+			t.Fatalf("before crash = %+v, want running", st)
+		}
+
+		_ = sess.proc.Cmd.Process.Kill()
+		if st := sessionUpsert(t, sub, sess.ID, "ses_a"); st.State != turns.StateFailed {
+			t.Fatalf("after crash = %+v, want failed", st)
+		}
+	})
+
+	t.Run("close", func(t *testing.T) {
+		rs, store, agent, _, ctx := setupTest(t, Config{})
+		defer rs.Shutdown()
+		defer store.Close()
+
+		sess, _, err := rs.Create(ctx, agent, "dev-a", nil)
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		sub := subscribeReady(t, rs.TurnFeed(), "dev-a")
+		registerPrompt(sess, "ses_a")
+		if st := sessionUpsert(t, sub, sess.ID, "ses_a"); st.State != turns.StateRunning {
+			t.Fatalf("before close = %+v, want running", st)
+		}
+
+		if err := rs.Close(ctx, sess.ID, "dev-a"); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+		if st := sessionUpsert(t, sub, sess.ID, "ses_a"); st.State != turns.StateCancelled {
+			t.Fatalf("after close = %+v, want cancelled", st)
+		}
+	})
+}
+
+// A prompt whose write to the agent fails never stays visible as running.
+func TestTurnFeedRemovesAPromptWhoseWriteFailed(t *testing.T) {
+	p, feed, _ := newFeedPump(t)
+	p.agentID, p.sessionID, p.runtimeID = "agent", "gs", "rt"
+	r, w := io.Pipe()
+	p.proc = &runtime.Process{Stdin: w}
+	defer r.Close()
+	sub := subscribeReady(t, feed, "dev-a")
+
+	written := make(chan error, 1)
+	go func() {
+		written <- p.WriteToAgent(0, []byte(`{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":{"sessionId":"ses_a","prompt":[]}}`))
+	}()
+
+	// The write is blocked on the pipe while the feed publishes the turn.
+	if st := sessionUpsert(t, sub, "gs", "ses_a"); st.State != turns.StateRunning {
+		t.Fatalf("before failed write = %+v, want running", st)
+	}
+	_ = r.Close()
+	if err := <-written; err == nil {
+		t.Fatal("write to a closed pipe succeeded")
+	}
+
+	change := nextFeedChange(t, sub)
+	want := turns.Key{AgentID: "agent", GatewaySessionID: "gs", SessionID: "ses_a"}
+	if !slices.Contains(change.Removed, want) || len(change.Upserts) != 0 {
+		t.Fatalf("change = %+v, want removed %+v", change, want)
+	}
+}
+
+// The 4097th outcome evicts the least recently changed one, which the stream
+// reports as removed.
+func TestTurnFeedReportsTheOutcomeEvictedAtTheCap(t *testing.T) {
+	rs, store, agent, _, ctx := setupTest(t, Config{})
+	defer rs.Shutdown()
+	defer store.Close()
+
+	sess, _, err := rs.Create(ctx, agent, "dev-a", nil)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// shortcut: turns.maxOutcomes is 4096 and unexported; keep in sync.
+	const outcomesCap = 4096
+	base := time.Unix(1_700_000_000, 0).UTC()
+	for i := 0; i < outcomesCap; i++ {
+		at := base.Add(time.Duration(i) * time.Second)
+		rs.outcomes.Record(turns.Status{
+			AgentID: "agent", SessionID: fmt.Sprintf("ses_%04d", i), GatewaySessionID: "gs",
+			RuntimeID: "rt", State: turns.StateSucceeded, Attention: []string{},
+			StartedAt: at, ChangedAt: at,
+		})
+	}
+	sub := subscribeReady(t, rs.TurnFeed(), "dev-a")
+
+	newest := base.Add(outcomesCap * time.Second)
+	sess.pump.onTurnFinished(turns.Status{
+		AgentID: "agent", SessionID: "ses_new", GatewaySessionID: "gs",
+		RuntimeID: "rt", State: turns.StateSucceeded, Attention: []string{},
+		StartedAt: newest, ChangedAt: newest,
+	})
+
+	change := nextFeedChange(t, sub)
+	want := turns.Key{AgentID: "agent", GatewaySessionID: "gs", SessionID: "ses_0000"}
+	if !slices.Contains(change.Removed, want) {
+		t.Fatalf("removed = %+v, want %+v", change.Removed, want)
+	}
+	if len(change.Upserts) != 1 || change.Upserts[0].SessionID != "ses_new" {
+		t.Fatalf("upserts = %+v, want the new outcome", change.Upserts)
+	}
+}
+
+// The 65th open agent request evicts the permission request, narrowing the
+// turn's attention.
+func TestTurnFeedNarrowsAttentionWhenTheRequestCapEvictsOne(t *testing.T) {
+	rs, store, agent, _, ctx := setupTest(t, Config{})
+	defer rs.Shutdown()
+	defer store.Close()
+
+	sess, _, err := rs.Create(ctx, agent, "dev-a", nil)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sub := subscribeReady(t, rs.TurnFeed(), "dev-a")
+	registerPrompt(sess, "ses_a")
+	sessionUpsert(t, sub, sess.ID, "ses_a")
+
+	sess.pump.handleStdoutLine(permissionRequest)
+	if st := sessionUpsert(t, sub, sess.ID, "ses_a"); !slices.Equal(st.Attention, []string{turns.AttentionPermission}) {
+		t.Fatalf("after permission = %+v, want permission attention", st)
+	}
+
+	// Fill the request list to the cap; the permission request is oldest.
+	for i := 0; i < maxPendingAgentRequests-1; i++ {
+		sess.pump.handleStdoutLine(fmt.Sprintf(
+			`{"jsonrpc":"2.0","id":%d,"method":"fs/read_text_file","params":{"sessionId":"ses_a","path":"/tmp/x"}}`, 1000+i))
+	}
+	sess.pump.handleStdoutLine(`{"jsonrpc":"2.0","id":9999,"method":"fs/read_text_file","params":{"sessionId":"ses_a","path":"/tmp/y"}}`)
+
+	if st := sessionUpsert(t, sub, sess.ID, "ses_a"); len(st.Attention) != 0 {
+		t.Fatalf("after eviction = %+v, want attention narrowed", st)
+	}
+}
+
+// A prompt that never reaches the agent leaves the chat's previous outcome in
+// place instead of an absent entry.
+func TestTurnFeedReUpsertsThePreviousOutcomeWhenAPromptIsDiscarded(t *testing.T) {
+	p, feed, store := newFeedPump(t)
+	p.agentID, p.sessionID, p.runtimeID = "agent", "gs", "rt"
+
+	earlier := time.Unix(1_700_000_000, 0).UTC()
+	store.Record(turns.Status{
+		AgentID: "agent", SessionID: "ses_a", GatewaySessionID: "gs", RuntimeID: "rt",
+		State: turns.StateSucceeded, Attention: []string{}, StartedAt: earlier, ChangedAt: earlier,
+	})
+
+	r, w := io.Pipe()
+	p.proc = &runtime.Process{Stdin: w}
+	defer r.Close()
+	sub := subscribeReady(t, feed, "dev-a")
+
+	written := make(chan error, 1)
+	go func() {
+		written <- p.WriteToAgent(0, []byte(`{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":{"sessionId":"ses_a","prompt":[]}}`))
+	}()
+	if st := sessionUpsert(t, sub, "gs", "ses_a"); st.State != turns.StateRunning {
+		t.Fatalf("before failed write = %+v, want running", st)
+	}
+	_ = r.Close()
+	if err := <-written; err == nil {
+		t.Fatal("write to a closed pipe succeeded")
+	}
+
+	change := nextFeedChange(t, sub)
+	if len(change.Removed) != 0 || len(change.Upserts) != 1 ||
+		change.Upserts[0].State != turns.StateSucceeded || !change.Upserts[0].ChangedAt.Equal(earlier) {
+		t.Fatalf("change = %+v, want the previous outcome re-upserted", change)
 	}
 }

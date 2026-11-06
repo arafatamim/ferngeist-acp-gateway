@@ -13,7 +13,16 @@ import (
 
 // diagnosticsSummaryResponse provides a compact health overview for monitoring.
 type diagnosticsSummaryResponse struct {
-	Runtime runtime.Summary `json:"runtime"`
+	Runtime    runtime.Summary   `json:"runtime"`
+	TurnStream turnStreamSummary `json:"turnStream"`
+}
+
+// turnStreamSummary is the turn feed's health: a lastSampleAt that stops
+// advancing while open is non-zero means the feed is not sampling.
+type turnStreamSummary struct {
+	Open         int       `json:"open"`
+	Samples      uint64    `json:"samples"`
+	LastSampleAt time.Time `json:"lastSampleAt"`
 }
 
 // diagnosticsExportResponse is the full diagnostic bundle exported for bug reports.
@@ -52,8 +61,19 @@ func (s *Server) handleDiagnosticsSummary(w http.ResponseWriter, r *http.Request
 	}
 
 	writeJSON(w, http.StatusOK, diagnosticsSummaryResponse{
-		Runtime: s.runtime.Summary(),
+		Runtime:    s.runtime.Summary(),
+		TurnStream: s.turnStreamSummary(),
 	})
+}
+
+// turnStreamSummary reads the turn feed's counters. A gateway without a session
+// service has no feed to report.
+func (s *Server) turnStreamSummary() turnStreamSummary {
+	if s.sessionSvc == nil {
+		return turnStreamSummary{}
+	}
+	stats := s.sessionSvc.TurnFeed().Stats()
+	return turnStreamSummary{Open: stats.Subscribers, Samples: stats.Samples, LastSampleAt: stats.LastSampleAt}
 }
 
 // handleDiagnosticsExport produces a compact bug-report bundle. It includes

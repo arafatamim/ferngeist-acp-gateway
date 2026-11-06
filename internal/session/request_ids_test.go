@@ -2,6 +2,9 @@ package session
 
 import (
 	"encoding/json"
+	"fmt"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -112,5 +115,60 @@ func TestRequestIDsPassAgentRequestRepliesThrough(t *testing.T) {
 	reply := []byte(`{"jsonrpc":"2.0","id":0,"result":{"outcome":{"outcome":"cancelled"}}}`)
 	if out := ids.outbound(1, parseClientFrame(reply)); string(out) != string(reply) {
 		t.Fatalf("a reply to the agent's own request must pass unchanged, got %s", out)
+	}
+}
+
+// Every operation that moves liveTurns must poke the feed: a missed poke leaves
+// open streams stale until the backstop. Each step snapshots liveTurns around
+// one call and fails if the turns moved without a poke.
+func TestRequestIDsSignalEveryTurnMove(t *testing.T) {
+	pokes := 0
+	ids := requestIDs{turnsChanged: func() { pokes++ }}
+	live := func() []liveTurn {
+		turns := ids.liveTurns()
+		slices.SortFunc(turns, func(a, b liveTurn) int { return strings.Compare(a.sessionID, b.sessionID) })
+		return turns
+	}
+	step := func(name string, op func()) {
+		t.Helper()
+		before, pokesBefore := live(), pokes
+		op()
+		if !reflect.DeepEqual(before, live()) && pokes == pokesBefore {
+			t.Errorf("%s moved liveTurns without poking the feed", name)
+		}
+	}
+	prompt := func(gen int64, clientID int, sessionID string) string {
+		return agentIDOf(t, ids.outbound(gen, parseClientFrame(fmt.Appendf(nil,
+			`{"jsonrpc":"2.0","id":%d,"method":"session/prompt","params":{"sessionId":%q,"prompt":[]}}`, clientID, sessionID))))
+	}
+	track := func(line string) { ids.trackAgentRequest(replyProbe(t, line), line, 1) }
+	reply := func(agentID string) {
+		line := `{"jsonrpc":"2.0","id":` + agentID + `,"result":{"stopReason":"end_turn"}}`
+		ids.reply(1, replyProbe(t, line), []string{line})
+	}
+
+	var promptA, promptB string
+	step("prompt starts", func() { promptA = prompt(1, 1, "ses_a") })
+	step("second chat starts", func() { promptB = prompt(1, 2, "ses_b") })
+	step("permission raised", func() {
+		track(`{"jsonrpc":"2.0","id":7,"method":"session/request_permission","params":{"sessionId":"ses_a","options":[]}}`)
+	})
+	step("permission answered", func() {
+		ids.outbound(1, parseClientFrame([]byte(`{"jsonrpc":"2.0","id":7,"result":{}}`)))
+	})
+	step("elicitation raised", func() {
+		track(`{"jsonrpc":"2.0","id":"e1","method":"elicitation/create","params":{"requestId":` + promptB + `,"mode":"form","message":"?","requestedSchema":{}}}`)
+	})
+	step("cap evicts the elicitation", func() {
+		for i := range maxPendingAgentRequests {
+			track(fmt.Sprintf(`{"jsonrpc":"2.0","id":"f%d","method":"fs/read_text_file","params":{"sessionId":"ses_b"}}`, i))
+		}
+	})
+	step("prompt replied", func() { reply(promptA) })
+	unsent := prompt(1, 3, "ses_c")
+	step("unsent prompt discarded", func() { ids.discard(json.RawMessage(unsent)) })
+	step("session torn down", func() { ids.takePrompts() })
+	if got := live(); len(got) != 0 {
+		t.Fatalf("live turns after teardown = %+v, want none", got)
 	}
 }

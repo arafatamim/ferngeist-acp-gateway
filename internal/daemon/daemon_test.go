@@ -241,65 +241,35 @@ func TestRun_shuts_down_on_context_cancellation(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test")
 	}
+	for _, lan := range []string{"0", "1"} {
+		t.Run("lan="+lan, func(t *testing.T) {
+			t.Setenv("FERNGEIST_GATEWAY_LISTEN_ADDR", "127.0.0.1:0")
+			t.Setenv("FERNGEIST_GATEWAY_ADMIN_ADDR", "127.0.0.1:0")
+			t.Setenv("FERNGEIST_GATEWAY_STATE_DB", filepath.Join(t.TempDir(), "state.db"))
+			t.Setenv("FERNGEIST_GATEWAY_LOG_DIR", t.TempDir())
+			t.Setenv("FERNGEIST_GATEWAY_MANAGED_BIN_DIR", t.TempDir())
+			t.Setenv("FERNGEIST_GATEWAY_ENABLE_LAN", lan)
+			t.Setenv("FERNGEIST_GATEWAY_UPDATE_CHECK_ENABLED", "0")
 
-	t.Setenv("FERNGEIST_GATEWAY_LISTEN_ADDR", "127.0.0.1:0")
-	t.Setenv("FERNGEIST_GATEWAY_ADMIN_ADDR", "127.0.0.1:0")
-	t.Setenv("FERNGEIST_GATEWAY_STATE_DB", filepath.Join(t.TempDir(), "state.db"))
-	t.Setenv("FERNGEIST_GATEWAY_LOG_DIR", t.TempDir())
-	t.Setenv("FERNGEIST_GATEWAY_MANAGED_BIN_DIR", t.TempDir())
-	t.Setenv("FERNGEIST_GATEWAY_ENABLE_LAN", "0")
-	t.Setenv("FERNGEIST_GATEWAY_UPDATE_CHECK_ENABLED", "0")
+			ctx, cancel := context.WithCancel(context.Background())
 
-	ctx, cancel := context.WithCancel(context.Background())
+			errCh := make(chan error, 1)
+			go func() {
+				errCh <- Run(ctx, config.BuildInfo{Version: "test"})
+			}()
 
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- Run(ctx, config.BuildInfo{Version: "test"})
-	}()
+			time.Sleep(200 * time.Millisecond)
+			cancel()
 
-	time.Sleep(100 * time.Millisecond)
-	cancel()
-
-	select {
-	case err := <-errCh:
-		if err != nil {
-			t.Logf("Run returned: %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for Run to complete")
-	}
-}
-
-func TestRun_shuts_down_cleanly_with_lan_enabled(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test")
-	}
-
-	t.Setenv("FERNGEIST_GATEWAY_LISTEN_ADDR", "127.0.0.1:0")
-	t.Setenv("FERNGEIST_GATEWAY_ADMIN_ADDR", "127.0.0.1:0")
-	t.Setenv("FERNGEIST_GATEWAY_STATE_DB", filepath.Join(t.TempDir(), "state.db"))
-	t.Setenv("FERNGEIST_GATEWAY_LOG_DIR", t.TempDir())
-	t.Setenv("FERNGEIST_GATEWAY_MANAGED_BIN_DIR", t.TempDir())
-	t.Setenv("FERNGEIST_GATEWAY_ENABLE_LAN", "1")
-	t.Setenv("FERNGEIST_GATEWAY_UPDATE_CHECK_ENABLED", "0")
-
-	ctx, cancel := context.WithCancel(context.Background())
-
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- Run(ctx, config.BuildInfo{Version: "test"})
-	}()
-
-	time.Sleep(200 * time.Millisecond)
-	cancel()
-
-	select {
-	case err := <-errCh:
-		if err != nil {
-			t.Logf("Run returned: %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for Run to complete")
+			select {
+			case err := <-errCh:
+				if err != nil {
+					t.Logf("Run returned: %v", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("timed out waiting for Run to complete")
+			}
+		})
 	}
 }
 

@@ -35,6 +35,20 @@ type requestIDs struct {
 	// The agent's own requests (permission, fs/*, terminal/*) the client has not
 	// answered yet, oldest first. See trackAgentRequest.
 	agentReqs []agentRequest
+
+	// turnsChanged reports that the running turns or their attention may have
+	// moved. The feed samples on it. Every method that writes pending or
+	// agentReqs calls changed once it unlocks, whether or not the write is
+	// visible: the feed coalesces pokes, so a spare one costs a channel send,
+	// while a missed one leaves a stream stale until the backstop.
+	turnsChanged func()
+}
+
+// changed reports that the turn state visible through liveTurns may have moved.
+func (r *requestIDs) changed() {
+	if r.turnsChanged != nil {
+		r.turnsChanged()
+	}
 }
 
 // maxPendingAgentRequests bounds agentReqs. An agent has a handful of requests
@@ -118,6 +132,7 @@ func (r *requestIDs) outbound(gen int64, f *clientFrame) []byte {
 	r.pending[agentID] = origin
 	r.byOwner[origin.owner] = agentID
 	r.mu.Unlock()
+	r.changed()
 
 	f.ID = json.RawMessage(agentID)
 	f.fields["id"] = f.ID
@@ -177,13 +192,14 @@ func (r *requestIDs) trackAgentRequest(probe frameProbe, line string, deliveredG
 		req.sessionID = probe.Params.SessionID
 	}
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	r.setAttentionLocked(&req, probe)
 	r.dropAgentRequestLocked(req.key)
 	if len(r.agentReqs) >= maxPendingAgentRequests {
 		r.agentReqs = r.agentReqs[1:]
 	}
 	r.agentReqs = append(r.agentReqs, req)
+	r.mu.Unlock()
+	r.changed()
 }
 
 // setAttentionLocked marks a request that waits on a human. An elicitation
@@ -208,17 +224,23 @@ func (r *requestIDs) setAttentionLocked(req *agentRequest, probe frameProbe) {
 // error) answers.
 func (r *requestIDs) answerAgentRequest(id json.RawMessage) {
 	r.mu.Lock()
-	r.dropAgentRequestLocked(responseIDKey(id))
+	ok := r.dropAgentRequestLocked(responseIDKey(id))
 	r.mu.Unlock()
+	if ok {
+		r.changed()
+	}
 }
 
-func (r *requestIDs) dropAgentRequestLocked(key string) {
+// dropAgentRequestLocked forgets the agent request with key and reports whether
+// there was one.
+func (r *requestIDs) dropAgentRequestLocked(key string) bool {
 	for i, req := range r.agentReqs {
 		if req.key == key {
 			r.agentReqs = append(r.agentReqs[:i], r.agentReqs[i+1:]...)
-			return
+			return true
 		}
 	}
+	return false
 }
 
 func (r *requestIDs) dropSessionAgentRequestsLocked(sessionID string) {
@@ -305,7 +327,6 @@ func maxTime(a, b time.Time) time.Time {
 // after this no longer correlates.
 func (r *requestIDs) takePrompts() []pendingRequest {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	var prompts []pendingRequest
 	for id, req := range r.pending {
 		if req.promptSession != "" {
@@ -313,6 +334,10 @@ func (r *requestIDs) takePrompts() []pendingRequest {
 			delete(r.pending, id)
 			delete(r.byOwner, req.owner)
 		}
+	}
+	r.mu.Unlock()
+	if len(prompts) > 0 {
+		r.changed()
 	}
 	return prompts
 }
@@ -322,11 +347,15 @@ func (r *requestIDs) takePrompts() []pendingRequest {
 func (r *requestIDs) discard(agentID json.RawMessage) {
 	key := responseIDKey(agentID)
 	r.mu.Lock()
-	if origin, ok := r.pending[key]; ok {
+	origin, ok := r.pending[key]
+	if ok {
 		delete(r.pending, key)
 		delete(r.byOwner, origin.owner)
 	}
 	r.mu.Unlock()
+	if ok {
+		r.changed()
+	}
 }
 
 func (r *requestIDs) hasAgentRequests() bool {
@@ -403,6 +432,7 @@ func (r *requestIDs) reply(currentGen int64, probe frameProbe, frames []string) 
 	if !ok {
 		return frames
 	}
+	r.changed()
 
 	if origin.gen != currentGen {
 		if origin.promptSession == "" {

@@ -2,7 +2,9 @@
 // GET /v1/turns: the wire shape, the classification of a finished prompt reply,
 // and the daemon-wide store of finished outcomes. Live state (running prompts,
 // pending human requests) is not stored here; the session layer reads it from
-// its pumps at snapshot time and merges it over the store.
+// its pumps at snapshot time and merges it over the store. Feed serves
+// GET /v1/turns/stream: it re-samples that snapshot when the session layer
+// signals a change and pushes each difference to subscribers.
 package turns
 
 import (

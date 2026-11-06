@@ -137,6 +137,10 @@ type RuntimeSession struct {
 	// the session and process that produced them.
 	outcomes *turns.Store
 
+	// feed publishes snapshot changes to GET /v1/turns/stream subscribers. It is
+	// owned here because this layer owns every mutation it reports.
+	feed *turns.Feed
+
 	cancelReaper context.CancelFunc // shuts down the reaper goroutine on Close
 }
 
@@ -200,11 +204,19 @@ func NewRuntimeSession(logger *slog.Logger, store *storage.SQLiteStore, runtimeS
 		rs.cfg.ProgressInterval = defaultProgressInterval
 	}
 	rs.inbound = newInboundWriter(store)
+	// The feed samples this service's snapshot and runs on the reaper's
+	// context, so Shutdown stops it with no stop path of its own.
+	rs.feed = turns.NewFeed(rs.TurnSnapshot)
 	ctx, cancel := context.WithCancel(context.Background())
 	rs.cancelReaper = cancel
 	go rs.reaperLoop(ctx)
+	go rs.feed.Run(ctx)
 	return rs
 }
+
+// TurnFeed returns the daemon's turn change feed, the source a stream handler
+// subscribes to. It ships no HTTP surface by itself.
+func (rs *RuntimeSession) TurnFeed() *turns.Feed { return rs.feed }
 
 func generateID() string {
 	b := make([]byte, 16)
