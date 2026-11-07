@@ -47,12 +47,12 @@ against the code.
   `GET /v1/turns` snapshot over a WebSocket, then each change as a `changes`
   message. A client that cannot use it keeps polling `GET /v1/turns`, which is
   unchanged. `protocolVersion` remains `v2`.
-  (2026-11-04, [`91275f7`](https://github.com/arafatamim/ferngeist-acp-gateway/commit/91275f7))
+  (2026-11-06, [`5953084`](https://github.com/arafatamim/ferngeist-acp-gateway/commit/5953084))
 
 - `[semantic]` A turn stream closed with `4408` (slow consumer) or `4409`
   (superseded) gets the close ahead of any changes still queued for it, not
   after them. The JSON shape is unchanged.
-  (2026-11-04, [`45110fc`](https://github.com/arafatamim/ferngeist-acp-gateway/commit/45110fc))
+  (2026-11-06, [`5953084`](https://github.com/arafatamim/ferngeist-acp-gateway/commit/5953084))
 
 - `[additive]` Gateway-recovered `session/load` responses carry a catch-up
   cursor for the restored transcript, including when replay contains no updates.
