@@ -1,3 +1,97 @@
+## [1.4.0] - 2026-11-07
+
+### 🚀 Features
+
+- *(caffeine)* Keep the host awake while an agent turn runs (#8)
+- *(quota)* Report CodexBar plan quotas
+- *(workspace)* Support bounded image file reads
+- *(session)* Resume chats seamlessly with catch-up and one-call attach
+- *(quota)* Cache snapshots and enrich provider metadata (#10)
+- *(api)* Stream turn status over WebSocket
+
+### 🐛 Bug Fixes
+
+- *(quota)* Expose provider billing balances
+- *(quota)* Identify codexbar collection errors
+- *(session)* Complete seamless chat resume
+- *(session)* Restore catch-up after rejected prompts
+- *(acquire)* Extract complete registry archives
+- *(acquire)* Launch native npm bins directly
+
+### 📚 Documentation
+
+- *(changelog)* Point turn-stream entries at squashed commit
+
+### 🧪 Testing
+
+- *(turns)* Verify elapsed status timestamp contract
+## [1.3.0] - 2026-10-30
+
+### 🚀 Features
+
+- *(packaging)* Ship man pages in packages and archives
+- *(worktree)* Finish a worktree — rebase, merge and push
+- *(worktree)* Read API — chats, one worktree, repo refs
+- *(worktree)* Create from a remote branch or PR, adopt existing ones
+- *(push)* Include the worktree branch in the push payload
+- *(storage)* Record each worktree folder once
+- *(api)* Report which chat folders no longer exist on disk
+- *(worktree)* Flag worktrees whose work has landed on their base
+- *(worktree)* List and operate on every git worktree
+- *(api)* Stop an agent for the calling device only
+- *(runtime)* Spawn processes outside the runtime registry
+- *(session)* Report each session's ACP session ids
+- *(projects)* List agent chats for the project-first home
+- *(projects)* Report running turns across paired devices
+- *(projects)* Evict idle listing agents under memory pressure
+- *(catalog)* Bundle agent logo fallbacks
+- *(turns)* Report turn status and outcomes via GET /v1/turns
+
+### 🐛 Bug Fixes
+
+- *(api)* Refuse browser requests on the admin listener
+- *(acquire)* Extract agent archives and refresh changed binaries
+- *(workspace)* Keep a worktree when its dirty check fails
+- *(session)* Close two stale-read races in session lifecycle
+- *(worktree)* Count list ahead from the merge-base, not the fixed base commit
+- *(worktree)* Refuse to delete a worktree a running chat uses as its cwd
+- *(worktree)* Give git worktree add its own two minute limit and clean up after it
+- *(worktree)* Harden adopt, create and push against data loss and races
+- *(worktree)* Prefer a local branch over PR shorthand for a base
+- *(worktree)* Extend the push write deadline beyond the server default
+- *(worktree)* Measure an unmanaged worktree from the local trunk
+- *(lint)* Resolve the five CI lint findings
+- *(architecture)* Compose persistence-backed services in the daemon
+- *(workspace)* Return an empty changed array for clean status
+- *(projects)* Cancel abandoned queued listings
+- *(projects)* Reclaim expired listing payloads
+- *(pairing)* Use the live tunnel URL for pairing
+- *(remote)* Protect host tunnel provisioning and honor private mode
+- *(remote)* Isolate embedded node state and migrate existing identities
+- *(release)* Install apt repository tooling
+
+### 🚜 Refactor
+
+- *(worktree)* Move UnmanagedWorktree json tags to the api response type
+- *(worktree)* Split base resolution out of the worktree service
+
+### 📚 Documentation
+
+- Add AGENTS.md and the agent-facing docs
+- Strengthen repository architecture and cutover guidance
+
+### ⚡ Performance
+
+- *(worktree)* List worktrees concurrently, and report behind
+- *(worktree)* Reuse the service branch lookup for push notifications
+
+### 🧪 Testing
+
+- *(projects)* Measure listing latency and memory
+
+### ⚙️ Miscellaneous Tasks
+
+- *(lint)* Set up golangci-lint, go-arch-lint, CI and AGENTS.md
 ## [1.2.0] - 2026-10-19
 
 ### 🚀 Features
@@ -26,9 +120,11 @@
 - Add DeepWiki badge
 - *(changelog)* Point clock skew entry at its commit on main
 - *(changelog)* Record the git log base for plain checkouts
+- *(changelog)* Release v1.2.0
 - *(changelog)* Point git diff gzip entry at its commit on main
 - Cover the expanded workspace surface
 - *(configuration)* Document NAME and LOG_LEVEL, drop the retired reaper interval
+- *(changelog)* Release v1.2.0
 
 ### ⚡ Performance
 
@@ -62,6 +158,7 @@
 - *(changelog)* Link turn_result and truncated entries to their commits
 - *(changelog)* Point entry links at the commits on main
 - Rewrite README around app setup and the client API
+- *(changelog)* Release v1.1.0
 
 ### 🧪 Testing
 
@@ -92,6 +189,10 @@
 - *(api)* Move workspace/worktree logic to internal/workspace, share custom-agent handlers, add Deps
 - *(storage)* Split sqlite.go by area; numbered user_version migrations
 - *(runtime,session)* [**breaking**] Connecting starts the agent; drop lease, exit callbacks, ProcessManager
+
+### 📚 Documentation
+
+- *(changelog)* Release v1.0.0
 ## [0.13.0] - 2026-10-10
 
 ### 🚀 Features
@@ -112,6 +213,153 @@
 ### 💼 Other
 
 - Update ferngeist-gateway formula to v0.12.0
+
+### 📚 Documentation
+
+- *(changelog)* Release v0.13.0
+## [0.12.0] - 2026-10-07
+
+### 🚀 Features
+
+- *(session)* Support ACP elicitations
+- *(push)* Deliver notifications over Web Push instead of FCM
+
+### 🐛 Bug Fixes
+
+- *(service)* Treat systemd "unit not loaded" as a fresh install
+- *(update)* Make self-update safe across platforms
+- *(daemon)* Skip update notifications for package-manager builds
+- *(service)* Fix install, stop and reinstall on Linux, macOS and Windows
+- *(packaging)* Keep user settings across package upgrades
+- *(service)* Detect Task Scheduler access denial on any Windows language
+- *(session)* Deliver agent requests missed while the client was away
+- *(session)* Reap unattached sessions and stop false crash pushes
+- *(session)* Stop spurious and duplicate agent notifications
+- *(push)* Give the update notice its own category
+
+### 💼 Other
+
+- Update ferngeist-gateway formula to v0.11.3
+
+### 📚 Documentation
+
+- *(changelog)* Name v0.12.0 as the latest tagged release
+
+### 🧪 Testing
+
+- *(service)* Seed the service binary in the self-copy install test
+## [0.11.3] - 2026-10-05
+
+### 🐛 Bug Fixes
+
+- *(session)* Bound the client queue by bytes and disconnect instead of dropping
+- *(api)* Don't close a websocket while its client is still draining
+- *(session)* Keep reattached clients' transcripts and turns intact
+
+### 💼 Other
+
+- Update ferngeist-gateway formula to v0.11.2
+
+### 📚 Documentation
+
+- Record the reconnect, backlog and turn_ended contract changes
+- *(changelog)* Name v0.11.3 as the latest tagged release
+## [0.11.2] - 2026-09-30
+
+### 💼 Other
+
+- Update ferngeist-gateway formula to v0.11.1
+- Forward registry agent icon through /v1/agents
+
+### 📚 Documentation
+
+- *(changelog)* Name v0.11.2 as the latest tagged release
+## [0.11.1] - 2026-09-23
+
+### 💼 Other
+
+- Update ferngeist-gateway formula to v0.11.0
+- Evict expired attach tokens with amortized sweep and cap
+- Bound runtime_failures, index failed_at, enable WAL
+- Bound pairing rate-limiter buckets with sweep and cap
+- O(1) credential lookup, amortized nonce sweep, cached proof keys
+- Cache refresh results with TTL and explicit invalidation
+- Prune terminal state, cap logs, split Summary lock
+- Single-parse pump, async frame log, close-safe inbound
+- Shut down cleanly on all exit paths; guard suites with goleak
+## [0.11.0] - 2026-09-17
+
+### 🚀 Features
+
+- *(custom-agents)* Client-manageable custom agents with CLI management
+
+### 🐛 Bug Fixes
+
+- *(api)* Return 409 runtime_lease_held on resilient connect conflict
+
+### 💼 Other
+
+- Update ferngeist-gateway formula to v0.10.0
+
+### 📚 Documentation
+
+- *(changelog)* Name v0.10.0 as the latest tagged release
+## [0.10.0] - 2026-09-12
+
+### 🚀 Features
+
+- *(runtime)* Track a set of runtimes per agent
+- *(session)* Allow parallel sessions for the same agent
+- *(api)* Add new:true, runtimes list, and stop-all for agents
+
+### 🐛 Bug Fixes
+
+- *(session)* Surface swallowed LLM failures as JSON-RPC errors
+
+### 💼 Other
+
+- Update ferngeist-gateway formula to v0.9.3
+
+### 📚 Documentation
+
+- Document multi-session per agent
+## [0.9.3] - 2026-08-19
+
+### 🐛 Bug Fixes
+
+- *(update)* Extract windows binary by its .exe name
+- *(remote)* Report provisioned public URL in status without restart
+- *(linux)* Register per-user daemon service from package install; avoid ETXTBSY on reinstall
+
+### 💼 Other
+
+- Update ferngeist-gateway formula to v0.9.2
+- Update ferngeist-gateway formula to v0.9.3
+
+### 📚 Documentation
+
+- *(remote)* State that the public URL appears live after tailscale login
+
+### 🧪 Testing
+
+- *(linux)* Match systemctl subcommand tokens in install test
+
+### ⚙️ Miscellaneous Tasks
+
+- *(lint)* Add golangci-lint config and squash pre-existing findings
+## [0.9.2] - 2026-08-18
+
+### 🐛 Bug Fixes
+
+- *(windows)* Keep daemon alive across console close, close install console promptly
+
+### 💼 Other
+
+- Update ferngeist-gateway formula to v0.9.1
+
+### 📚 Documentation
+
+- Regenerate changelog for v0.9.1
 ## [0.9.1] - 2026-08-17
 
 ### 🐛 Bug Fixes
