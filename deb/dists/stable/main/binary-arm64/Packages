@@ -1,0 +1,90 @@
+Package: ferngeist-gateway
+Architecture: amd64
+Version: 1.2.0
+Priority: optional
+Maintainer: Ferngeist Maintainers <maintainers@ferngeist.local>
+Installed-Size: 34125
+Filename: pool/main/f/ferngeist-gateway/ferngeist-gateway_1.2.0_amd64.deb
+Size: 13405642
+MD5sum: 6cb2334b837d54238fbce152e7734580
+SHA1: 4a2ca0761f2a244cbf6c27a48d1a2ebc3aafdd7f
+SHA256: 64680720eea0d795f9a10308f280d98694990656cacbcb96a8343c8509fb6b84
+SHA512: a13dafe116feed5e73008275d8e92a415c40fe27a5f87c053a9047a596a45c73947274857402ab8be9428835eb0c4564eca7f111b2d43d244d34745f3b0e4068
+Homepage: https://github.com/arafatamim/ferngeist-acp-gateway
+Description: Self-hosted backend service for ACP-compatible agents
+
+Package: ferngeist-gateway
+Architecture: arm64
+Version: 1.2.0
+Priority: optional
+Maintainer: Ferngeist Maintainers <maintainers@ferngeist.local>
+Installed-Size: 32005
+Filename: pool/main/f/ferngeist-gateway/ferngeist-gateway_1.2.0_arm64.deb
+Size: 12292202
+MD5sum: 2dc3edf6ebf0529c7f485fd7dbe37ab6
+SHA1: 6fbe3f8c8ded3581416d48512941a09ee9f124b7
+SHA256: 04a4701b50fb3172ff35a35bec23ed24c0ae4f70c44a99e0a9105936cd3b4610
+SHA512: 223f083cef7903b902f536fe27b97b5daf5997f708355e8b99d7b9b44e5d21761a20dcfa7285c8767a60120c3fd3240c849e6b273b97e4971d468eb42ba32645
+Homepage: https://github.com/arafatamim/ferngeist-acp-gateway
+Description: Self-hosted backend service for ACP-compatible agents
+
+Package: ferngeist-gateway
+Architecture: amd64
+Version: 1.3.0
+Priority: optional
+Maintainer: Ferngeist Maintainers <maintainers@ferngeist.local>
+Installed-Size: 34636
+Filename: pool/main/f/ferngeist-gateway/ferngeist-gateway_1.3.0_amd64.deb
+Size: 13602504
+MD5sum: 834644dac37dda1e71f3b679b236e4ed
+SHA1: e984ec97cfbeb268467f7ac348e33d95ecb897c1
+SHA256: ed8583af77a16c3dd7cdade7f1610b5289e8ab5fec0bfd30385d1b0e87017d04
+SHA512: 20551f9eb5b2fa53682ef35ffc0ed61664d77e3f48909930b1e92789a0eab2766ab87483ea6bf0da26a39040f30ffed8591b2f2400b3ce07217d0b0e05a80922
+Homepage: https://github.com/arafatamim/ferngeist-acp-gateway
+Description: Self-hosted backend service for ACP-compatible agents
+
+Package: ferngeist-gateway
+Architecture: arm64
+Version: 1.3.0
+Priority: optional
+Maintainer: Ferngeist Maintainers <maintainers@ferngeist.local>
+Installed-Size: 32424
+Filename: pool/main/f/ferngeist-gateway/ferngeist-gateway_1.3.0_arm64.deb
+Size: 12476612
+MD5sum: e4f33cc2dfd9eec18381cddbd790906f
+SHA1: 6594ef573b282f6cc9adf4014371c98ef38b66a6
+SHA256: 3364cbb76be2d0bd080cc1d43130e148bb56afcce3dfad261d3ad4ba1f260b59
+SHA512: 36ea6b6bdf53bab0d157829ba0929802f4d6f8a0e3df2ca9e11b03f498edd55c6f791a4ff3da67c471e499d5c00ec37d0e4d1f0d7b551b1ada5baed0e4394f37
+Homepage: https://github.com/arafatamim/ferngeist-acp-gateway
+Description: Self-hosted backend service for ACP-compatible agents
+
+Package: ferngeist-gateway
+Architecture: amd64
+Version: 1.4.0
+Priority: optional
+Maintainer: Ferngeist Maintainers <maintainers@ferngeist.local>
+Installed-Size: 34941
+Filename: pool/main/f/ferngeist-gateway/ferngeist-gateway_1.4.0_amd64.deb
+Size: 13722866
+MD5sum: 0932047ff8beb6832a163ef06ce99a9b
+SHA1: 7c6f558ae6dd8007ab79884caec7605c6e12e3e2
+SHA256: cad0ec0c19be473bcc49bbb9d8542cb672af2ab14c4a116a66ad4e5e6707afe6
+SHA512: e74bd77017f17b9d661259bd887b2a24ca3424844d2d23e17432a21ed7c020fe12ffd7ade4aa786faf7e78a38ee0c5e33e3c9c500f2497811b90ca766aa73a35
+Homepage: https://github.com/arafatamim/ferngeist-acp-gateway
+Description: Self-hosted backend service for ACP-compatible agents
+
+Package: ferngeist-gateway
+Architecture: arm64
+Version: 1.4.0
+Priority: optional
+Maintainer: Ferngeist Maintainers <maintainers@ferngeist.local>
+Installed-Size: 32681
+Filename: pool/main/f/ferngeist-gateway/ferngeist-gateway_1.4.0_arm64.deb
+Size: 12586388
+MD5sum: 1c099d9a88dc47de2f12eeac60379ef9
+SHA1: de950cc26159ce335bfc3c65ae0ebf08b546caff
+SHA256: 2db9cacb3c23600025ea2851394d873ac866dce15acf67d280b538d6521e327d
+SHA512: fc503110a047c5f321583c05d535801b811be4336f48afa70387f2909545fb26670884d417ca46ebdcbba1018e1d4739714855b12ec8590d05a7853013f85aa3
+Homepage: https://github.com/arafatamim/ferngeist-acp-gateway
+Description: Self-hosted backend service for ACP-compatible agents
+
