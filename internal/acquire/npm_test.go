@@ -1,9 +1,11 @@
 package acquire
 
 import (
+	"bytes"
 	"io"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	goruntime "runtime"
 	"slices"
@@ -157,5 +159,62 @@ func TestPruneNpmKeepsNewestCompleteInstall(t *testing.T) {
 		if _, err := os.Stat(dir); (err == nil) != want {
 			t.Errorf("%s kept = %v, want %v", filepath.Base(dir), err == nil, want)
 		}
+	}
+}
+
+func TestEnsureNpmLaunchesNativeBinsDirectly(t *testing.T) {
+	bin := fakePath(t, "npm", "node")
+	native, err := os.ReadFile(os.Args[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name               string
+		symlink, noRuntime bool
+	}{
+		{name: "direct"},
+		{name: "symlink", symlink: true},
+		{name: "runtime unavailable", noRuntime: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.noRuntime {
+				fakePath(t, "npm")
+			}
+			i := newNpmInstaller(t, JSRuntimeNode)
+			dir := filepath.Join(i.managedDir, "npm", "@acme+agent@1.2.3")
+			pkg := filepath.Join(dir, "node_modules", "@acme", "agent")
+			if err := os.MkdirAll(pkg, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(pkg, "package.json"), []byte(`{"bin":"agent"}`), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, npmCompleteMarker), nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(pkg, "agent")
+			target := path
+			if tc.symlink {
+				target = filepath.Join(pkg, "agent-native")
+			}
+			if err := os.WriteFile(target, native, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if tc.symlink {
+				if err := os.Symlink("agent-native", path); err != nil {
+					t.Fatal(err)
+				}
+			}
+			agent := fakeNpmAgent(fakeSpec)
+			agent.Launch.Args[len(agent.Launch.Args)-1] = "-test.run=^$"
+			got := i.EnsureNpm(agent)
+			if got.Launch.Command != path || !slices.Equal(got.Launch.Args, []string{"-test.run=^$"}) {
+				t.Fatalf("launch = %q %q, want native %q (runtime %q)", got.Launch.Command, got.Launch.Args, path, bin)
+			}
+			out, err := exec.Command(got.Launch.Command, got.Launch.Args...).CombinedOutput()
+			if err != nil || !bytes.Contains(out, []byte("PASS")) {
+				t.Fatalf("native launch: output %q, error %v", out, err)
+			}
+		})
 	}
 }

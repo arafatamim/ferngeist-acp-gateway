@@ -1,10 +1,12 @@
 package acquire
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path"
@@ -39,8 +41,8 @@ func (i *Installer) SetJSRuntime(mode string) {
 	i.mu.Unlock()
 }
 
-// EnsureNpm rewrites an `npm exec` launch to run the agent's bin script
-// directly on bun or node from a gateway-managed install of its package. The
+// EnsureNpm rewrites an `npm exec` launch to run the agent's bin from a
+// gateway-managed install, using bun or node for JavaScript. The
 // npm exec wrapper is a second node process that idles for the agent's whole
 // life (~108MB) and adds 0.3-1.2s to every launch.
 //
@@ -63,19 +65,82 @@ func (i *Installer) EnsureNpm(agent catalog.Agent) catalog.Agent {
 	i.mu.Lock()
 	mode := i.jsRuntime
 	i.mu.Unlock()
-	runtimePath := lookupJSRuntime(mode)
-	if runtimePath == "" {
+	if mode == JSRuntimeNpm {
 		return agent
 	}
+	runtimePath := lookupJSRuntime(mode)
 	dir := filepath.Join(i.managedDir, "npm", npmDirName(name, version))
 	script, err := npmBinScript(dir, name)
 	if err != nil {
-		i.installNpmInBackground(agent.ID, spec, name, dir)
+		if runtimePath != "" {
+			i.installNpmInBackground(agent.ID, spec, name, dir)
+		}
+		return agent
+	}
+	javascript, err := npmBinIsJavaScript(script)
+	if err != nil {
+		return agent
+	}
+	if !javascript {
+		agent.Launch.Command = script
+		agent.Launch.Args = args[sep+1:]
+		return agent
+	}
+	if runtimePath == "" {
 		return agent
 	}
 	agent.Launch.Command = runtimePath
 	agent.Launch.Args = append([]string{script}, args[sep+1:]...)
 	return agent
+}
+
+// npmBinIsJavaScript follows npm bin symlinks and recognizes executable binaries
+// and scripts with non-JavaScript interpreters before choosing a JS runtime.
+func npmBinIsJavaScript(name string) (bool, error) {
+	file, err := os.Open(name)
+	if err != nil {
+		return false, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return false, err
+	}
+	if !info.Mode().IsRegular() {
+		return false, fmt.Errorf("npm bin %q is not a regular file", name)
+	}
+	buf := make([]byte, 512)
+	n, err := io.ReadFull(file, buf)
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		return false, err
+	}
+	buf = buf[:n]
+	if bytes.Contains(buf, []byte{0}) {
+		return false, nil
+	}
+	if !bytes.HasPrefix(buf, []byte("#!")) {
+		return true, nil
+	}
+	line, _, _ := bytes.Cut(buf, []byte("\n"))
+	fields := strings.Fields(string(line[2:]))
+	if len(fields) == 0 {
+		return false, nil
+	}
+	if filepath.Base(fields[0]) == "env" {
+		fields = fields[1:]
+		for len(fields) > 0 && strings.HasPrefix(fields[0], "-") {
+			fields = fields[1:]
+		}
+	}
+	if len(fields) == 0 {
+		return false, nil
+	}
+	switch filepath.Base(fields[0]) {
+	case "node", "nodejs", "bun":
+		return true, nil
+	default:
+		return false, nil
+	}
 }
 
 // lookupJSRuntime resolves mode to an executable path, or "" to keep npm exec.
