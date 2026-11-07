@@ -95,12 +95,25 @@ func TestEnsureExtractsArchives(t *testing.T) {
 	tw := tar.NewWriter(gz)
 	_ = tw.WriteHeader(&tar.Header{Name: "dist/agent", Mode: 0o755, Size: int64(len(payload))})
 	_, _ = tw.Write(payload)
+	_ = tw.WriteHeader(&tar.Header{Name: "dist/lib/data", Mode: 0o644, Size: 4})
+	_, _ = tw.Write([]byte("data"))
+	if os.PathSeparator != '\\' {
+		_ = tw.WriteHeader(&tar.Header{Name: "dist/link", Typeflag: tar.TypeSymlink, Linkname: "lib/data"})
+	}
 	_ = tw.Close()
 	_ = gz.Close()
 	var zipBuf bytes.Buffer
 	zw := zip.NewWriter(&zipBuf)
 	entry, _ := zw.Create("dist/agent")
 	_, _ = entry.Write(payload)
+	entry, _ = zw.Create("dist/lib/data")
+	_, _ = entry.Write([]byte("data"))
+	if os.PathSeparator != '\\' {
+		linkHeader := &zip.FileHeader{Name: "dist/link"}
+		linkHeader.SetMode(os.ModeSymlink | 0o777)
+		entry, _ = zw.CreateHeader(linkHeader)
+		_, _ = entry.Write([]byte("lib/data"))
+	}
 	_ = zw.Close()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -132,6 +145,15 @@ func TestEnsureExtractsArchives(t *testing.T) {
 			got, err := os.ReadFile(agent.Launch.Command)
 			if err != nil {
 				t.Fatalf("read installed binary: %v", err)
+			}
+			if data, err := os.ReadFile(filepath.Join(filepath.Dir(agent.Launch.Command), "lib", "data")); err != nil || string(data) != "data" {
+				t.Fatalf("sibling data = %q, error = %v", data, err)
+			}
+			if os.PathSeparator != '\\' {
+				link, err := os.Readlink(filepath.Join(filepath.Dir(agent.Launch.Command), "link"))
+				if err != nil || link != "lib/data" {
+					t.Fatalf("symlink = %q, error = %v", link, err)
+				}
 			}
 			if !bytes.Equal(got, payload) {
 				t.Fatalf("installed %d bytes of archive data, want extracted entry", len(got))
@@ -188,5 +210,67 @@ func TestEnsureUpdatesOnRegistryVersionChange(t *testing.T) {
 	status = http.StatusInternalServerError
 	if got, changed := ensure("3.0.0"); got != "v2" || changed {
 		t.Fatalf("failed update = %q changed=%v, want installed v2 kept", got, changed)
+	}
+}
+
+func TestEnsureRejectsUnsafeOrIncompleteArchives(t *testing.T) {
+	for _, tc := range []struct {
+		name, entry, link string
+		truncated         bool
+	}{
+		{name: "traversal", entry: "../outside"},
+		{name: "symlink escape", entry: "escape", link: "../../outside"},
+		{name: "truncated", entry: "sibling", truncated: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			gz := gzip.NewWriter(&buf)
+			tw := tar.NewWriter(gz)
+			if err := tw.WriteHeader(&tar.Header{Name: "agent", Mode: 0o755, Size: 1}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := tw.Write([]byte("x")); err != nil {
+				t.Fatal(err)
+			}
+			header := &tar.Header{Name: tc.entry, Mode: 0o644, Size: 1}
+			if tc.link != "" {
+				header.Typeflag = tar.TypeSymlink
+				header.Linkname = tc.link
+				header.Size = 0
+			}
+			if err := tw.WriteHeader(header); err != nil {
+				t.Fatal(err)
+			}
+			if header.Size > 0 {
+				if _, err := tw.Write([]byte("x")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := tw.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if err := gz.Close(); err != nil {
+				t.Fatal(err)
+			}
+			data := buf.Bytes()
+			if tc.truncated {
+				data = data[:len(data)-5]
+			}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(data) }))
+			defer server.Close()
+			managed := t.TempDir()
+			installer := New(slog.New(slog.NewTextHandler(io.Discard, nil)), managed, nil)
+			agent := catalog.Agent{ID: "agent", Launch: catalog.LaunchConfig{Mode: "external"}, Registry: catalog.RegistryInfo{CurrentBinaryPath: "agent", CurrentBinaryArchiveURL: server.URL + "/agent.tar.gz"}}
+			if _, _, err := installer.Ensure(context.Background(), agent); err == nil {
+				t.Fatal("Ensure succeeded for unsafe or incomplete archive")
+			}
+			entries, err := os.ReadDir(filepath.Join(managed, "agent"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 0 {
+				t.Fatalf("failed extraction left install entries: %v", entries)
+			}
+		})
 	}
 }
