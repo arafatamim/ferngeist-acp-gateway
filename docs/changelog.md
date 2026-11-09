@@ -43,6 +43,21 @@ against the code.
 
 ## Unreleased
 
+- `[semantic]` The runtime-scoped Git routes are deprecated in favor of
+  `/v1/projects/git/...`. They remain available for existing clients and are
+  planned for removal in protocol v3. Runtime file and file-list routes are not
+  deprecated.
+  (2026-11-08, unreleased)
+
+- `[additive]` Session-free `GET /v1/projects/git/{status,diff,log,refs}`,
+  `/v1/projects/git/commits/{sha}`, and `/v1/projects/files` accept exactly one
+  absolute checkout-root `cwd` and require `read` scope. Paired clients may
+  select any checkout readable by the gateway OS user; file paths remain
+  confined to that checkout. Existing runtime workspace routes retain
+  `acpSessionId` selection and reject `cwd`; project routes reject
+  `acpSessionId`. Response shapes and `protocolVersion` are unchanged.
+  (2026-11-08, unreleased)
+
 - `[additive]` `GET /v1/turns/stream` (`read` scope) streams the
   `GET /v1/turns` snapshot over a WebSocket, then each change as a `changes`
   message. A client that cannot use it keeps polling `GET /v1/turns`, which is

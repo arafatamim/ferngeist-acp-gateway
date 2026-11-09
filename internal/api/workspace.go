@@ -58,11 +58,18 @@ type gitStatusResponse struct {
 	CompareCommit string `json:"compareCommit,omitempty"`
 }
 
-// resolveWorkspaceCwd resolves a runtime's ACP project directory via the session
+// resolveWorkspaceCwd resolves a selected checkout or a runtime's ACP project directory via the session
 // layer, mapping session-layer errors to HTTP statuses. Returns the absolute
 // cwd on success. The optional ?acpSessionId= picks one ACP session's project
 // when the agent hosts several; without it the most recently opened one wins.
 func (s *Server) resolveWorkspaceCwd(w http.ResponseWriter, r *http.Request, runtimeID string) (string, bool) {
+	if r.PathValue("workspaceKind") == "project" {
+		return s.resolveProjectCwd(w, r)
+	}
+	if r.URL.Query().Has("cwd") {
+		writeError(w, http.StatusBadRequest, "cwd is only supported on project routes")
+		return "", false
+	}
 	acpSessionID := strings.TrimSpace(r.URL.Query().Get("acpSessionId"))
 	cwd, err := s.sessionSvc.WorkingDir(runtimeID, acpSessionID)
 	switch {
@@ -75,6 +82,29 @@ func (s *Server) resolveWorkspaceCwd(w http.ResponseWriter, r *http.Request, run
 		writeError(w, http.StatusInternalServerError, "failed to resolve agent working directory")
 	}
 	return "", false
+}
+
+// projectWorkspace identifies the selector explicitly while sharing the read handlers.
+func (s *Server) projectWorkspace(handler http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		r.SetPathValue("workspaceKind", "project")
+		handler(w, r)
+	}
+}
+
+func (s *Server) resolveProjectCwd(w http.ResponseWriter, r *http.Request) (string, bool) {
+	q := r.URL.Query()
+	values := q["cwd"]
+	if q.Has("acpSessionId") || len(values) != 1 || values[0] == "" {
+		writeError(w, http.StatusBadRequest, "exactly one cwd and no acpSessionId are required")
+		return "", false
+	}
+	cwd, err := workspace.CheckoutRoot(r.Context(), values[0])
+	if err != nil {
+		writeWorkspaceError(w, err)
+		return "", false
+	}
+	return cwd, true
 }
 
 const maxWorkspaceFileBytes = 8 << 20

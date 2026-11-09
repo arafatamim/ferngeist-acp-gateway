@@ -92,9 +92,18 @@ The workspace endpoints (`/v1/runtimes/{id}/files`, `/files/list`, `/git/status`
 `/git/diff`, `/git/log`, `/git/refs`, `/git/commits/{sha}`) let a paired client
 read files and git state inside the project the agent is working on.
 
+The session-free `/v1/projects/git/{status,diff,log,refs}`,
+`/v1/projects/git/commits/{sha}`, and `/v1/projects/files` routes accept an
+absolute checkout-root `cwd` without an ACP session. **Any paired client with
+`read` scope can select any checkout the gateway OS user can read.** The root
+check rejects subdirectories and bare repositories and canonicalizes symlinks;
+it is not an authorization allowlist. Relative file paths remain confined to
+that canonical checkout. Project routes reject `acpSessionId`, and runtime
+routes reject `cwd`, so selectors cannot silently override one another.
+
 - **Auth:** all of them require the `read` scope (same gate as runtime logs).
 - **Read-only:** no endpoint writes — no file writes, no `git add`/`commit`.
-- **Path confinement:** file, listing, and diff access is confined to the ACP
+- **Path confinement:** runtime file, listing, and diff access is confined to the ACP
   **project directory** captured from the client's `session/new`
   (`params.cwd`, re-captured from `session/load` on resume). Absolute paths,
   `..` traversal, and symlink escapes are rejected with `400`; the root and the

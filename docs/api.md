@@ -271,8 +271,8 @@ through the CLI: `ferngeist-gateway agents add|list|update|rm`
 
 ### Workspace browsing
 
-The workspace endpoints are **read-only** views into the code the agent is
-currently working on. They are anchored to the **project directory the client
+The workspace endpoints are **read-only** views into a checkout. Runtime-scoped
+routes are anchored to the **project directory the client
 opened in the agent** — captured from the ACP `session/new` request's
 `params.cwd` as it flows through the gateway (and re-captured from
 `session/load`, which Ferngeist sends when resuming a session) — not to the
@@ -303,11 +303,51 @@ except that `/git/log` still reports the worktree's `baseCommit` next to the
 compare range (see below).
 
 One agent can host several ACP sessions, each with its own `cwd`. Every
-workspace endpoint accepts an optional `acpSessionId=<id>` query parameter (the
+runtime workspace endpoint accepts an optional `acpSessionId=<id>` query parameter (the
 ACP session id from `session/new` or `session/load`, not the gateway session id)
 to read that session's project. Without it, the endpoints use the most recently
 opened or loaded session's directory. An `acpSessionId` the gateway has not seen
 opened or loaded on this runtime returns `404`.
+
+#### Session-free project browsing
+
+A paired client with `read` scope can browse a checkout without an agent,
+runtime, or ACP session:
+
+- `GET /v1/projects/git/status?cwd=<absolute-checkout-root>`
+- `GET /v1/projects/git/diff?cwd=<absolute-checkout-root>`
+- `GET /v1/projects/git/log?cwd=<absolute-checkout-root>`
+- `GET /v1/projects/git/refs?cwd=<absolute-checkout-root>`
+- `GET /v1/projects/git/commits/{sha}?cwd=<absolute-checkout-root>`
+- `GET /v1/projects/files?cwd=<absolute-checkout-root>&path=<relative-path>`
+
+For example, `/v1/projects/files?cwd=%2Fhome%2Falice%2Fapp&path=README.md`.
+These routes share the response shapes, limits, managed-worktree behavior, and
+query parameters documented for the corresponding runtime routes below:
+`compare` for status/diff/log; `path`, `commit`, and `oldPath` for diff;
+`head`, `skip`, `limit`, and `beyond` for log. File paths stay confined to the
+selected checkout, including traversal and symlink escape checks.
+
+Exactly one nonempty, absolute `cwd` is required. It must select the root of
+an existing non-bare checkout (main or linked worktree); a root symlink is
+canonicalized. Missing, empty, repeated, relative, or NUL-containing `cwd`, a
+subdirectory, a file, a bare repository, or any `acpSessionId` parameter returns
+`400`. A missing checkout returns `404`; a non-repository or Git failure returns
+`422`. Runtime routes retain their session selection and reject any `cwd`
+parameter with `400`, including when `acpSessionId` is also present.
+
+**Trust boundary:** any paired client with `read` scope can select any checkout
+the gateway OS user can read. Checkout validation is not an authorization
+allowlist. There is no project-scoped `/files/list` route.
+
+#### Runtime workspace responses
+
+The runtime-scoped Git routes below (`refs`, `status`, `diff`, `log`, and
+`commits/{sha}`) are **deprecated**. Use the corresponding
+`/v1/projects/git/...` routes for new clients. The runtime Git routes remain
+available for existing clients and are planned for removal in protocol v3. The
+runtime file and file-list routes are not deprecated and remain available for
+non-Git projects.
 
 - `GET /v1/runtimes/{runtimeId}/files?path=<rel>`
   - Reads a file inside the runtime's project directory.

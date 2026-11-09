@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"mime"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
@@ -39,6 +40,48 @@ const GitCommandTimeout = 15 * time.Second
 // ErrPathEscapesRoot is returned by ResolveWithinRoot when a requested path is
 // absolute, contains a traversal, or resolves through a symlink outside root.
 var ErrPathEscapesRoot = errors.New("path escapes the agent's working directory")
+
+// CheckoutRoot validates that cwd selects a non-bare checkout root and returns
+// its canonical path. Checkout selection is not an authorization allowlist.
+func CheckoutRoot(ctx context.Context, cwd string) (string, error) {
+	if !filepath.IsAbs(cwd) || strings.ContainsRune(cwd, 0) {
+		return "", errStatus(http.StatusBadRequest, "cwd must be an absolute checkout path")
+	}
+	root, err := filepath.EvalSymlinks(cwd)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", errStatus(http.StatusNotFound, "checkout not found")
+	}
+	if err != nil {
+		return "", errStatus(http.StatusUnprocessableEntity, "resolve checkout: "+err.Error())
+	}
+	info, err := os.Stat(root)
+	if err != nil {
+		return "", errStatus(http.StatusUnprocessableEntity, "stat checkout: "+err.Error())
+	}
+	if !info.IsDir() {
+		return "", errStatus(http.StatusBadRequest, "cwd must be a directory")
+	}
+	bare, err := RunGit(ctx, root, "rev-parse", "--is-bare-repository")
+	if err != nil {
+		return "", errStatus(http.StatusUnprocessableEntity, err.Error())
+	}
+	if strings.TrimSpace(bare) != "false" {
+		return "", errStatus(http.StatusBadRequest, "cwd must select a non-bare checkout")
+	}
+	top, err := RunGit(ctx, root, "rev-parse", "--show-toplevel")
+	if err != nil {
+		// A non-bare repo with no work tree here means cwd is inside .git.
+		return "", errStatus(http.StatusBadRequest, "cwd must select the checkout root")
+	}
+	canonicalTop, err := filepath.EvalSymlinks(strings.TrimSuffix(top, "\n"))
+	if err != nil {
+		return "", errStatus(http.StatusUnprocessableEntity, "resolve checkout root: "+err.Error())
+	}
+	if root != canonicalTop {
+		return "", errStatus(http.StatusBadRequest, "cwd must select the checkout root")
+	}
+	return root, nil
+}
 
 // ResolveWithinRoot resolves a relative path against root and returns an
 // absolute path guaranteed to stay inside root. It rejects absolute paths,

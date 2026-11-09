@@ -168,6 +168,17 @@ id, and surfaces it via `RuntimeSession.WorkingDir(runtimeID)`
 working directory — PATH-resolved agents run in the gateway's own cwd, which is
 not the project.
 
+Session-free project routes (`/v1/projects/git/{status,diff,log,refs}`,
+`/v1/projects/git/commits/{sha}`, and `/v1/projects/files`) share these handlers
+and payloads. An explicit route wrapper selects `workspace.CheckoutRoot`
+instead of the session resolver. Exactly one absolute `cwd` selects a non-bare
+checkout root, including a linked worktree; symlinks are canonicalized before
+checking root identity and confining file paths. Subdirectories and conflicting
+selectors are rejected. Runtime routes keep `acpSessionId` selection and reject
+`cwd`; project routes reject `acpSessionId`. No process is started or required.
+A paired client with `read` scope may select any checkout readable by the
+gateway OS user; checkout validation supplies no authorization allowlist.
+
 The workspace handlers live in `internal/api/workspace.go` and are gated behind
 the same `ScopeRead` auth used by `handleRuntimeLogs`. The file and git
 payloads reuse the ACP **v1** schema types vendored in

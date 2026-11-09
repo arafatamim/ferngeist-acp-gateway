@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1028,5 +1029,139 @@ func TestWorkspaceImageWithoutNULBytesReturnsBlob(t *testing.T) {
 	}
 	if body.MimeType == nil || *body.MimeType != "image/jpeg" || body.Size != len(data) || body.Truncated {
 		t.Fatalf("image metadata = %+v", body)
+	}
+}
+
+// Project browsing must work with no ACP session service or running agent.
+func TestProjectWorkspaceReadsCheckoutWithoutSession(t *testing.T) {
+	root := t.TempDir()
+	runGitCLI(t, root, "init", "-q", "-b", "main")
+	runGitCLI(t, root, "config", "user.email", "t@t")
+	runGitCLI(t, root, "config", "user.name", "t")
+	runGitCLI(t, root, "config", "commit.gpgSign", "false")
+	if err := os.WriteFile(filepath.Join(root, "note.txt"), []byte("committed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGitCLI(t, root, "add", "note.txt")
+	runGitCLI(t, root, "commit", "-qm", "first project commit")
+	sha := runGitOut(t, root, "rev-parse", "HEAD")
+	linked := filepath.Join(t.TempDir(), "linked")
+	runGitCLI(t, root, "worktree", "add", "-qb", "linked", linked)
+	server := newTestServer()
+	token := pairDevice(t, server)
+	for _, cwd := range []string{root, linked} {
+		t.Run(filepath.Base(cwd), func(t *testing.T) {
+			if err := os.WriteFile(filepath.Join(cwd, "note.txt"), []byte("working\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cases := []struct{ route, query, want string }{
+				{"git/status", "", `"path":"note.txt"`},
+				{"git/diff", "&path=note.txt", `"newText":"working\n"`},
+				{"git/log", "", "first project commit"},
+				{"git/refs", "", "main"},
+				{"git/commits/" + sha, "", `"path":"note.txt"`},
+				{"git/diff", "&commit=" + sha + "&path=note.txt", `"newText":"committed\n"`},
+				{"files", "&path=note.txt", `"text":"working\n"`},
+			}
+			for _, tc := range cases {
+				rec := projectWorkspaceRequest(server, token, "/v1/projects/"+tc.route+"?cwd="+url.QueryEscape(cwd)+tc.query)
+				if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), tc.want) {
+					t.Errorf("%s%s: status=%d body=%s; want %s", tc.route, tc.query, rec.Code, rec.Body.String(), tc.want)
+				}
+			}
+		})
+	}
+}
+
+func projectWorkspaceRequest(server *Server, token, path string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	rec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, req)
+	return rec
+}
+
+func TestProjectWorkspaceRejectsInvalidSelectorsAndEscapingFiles(t *testing.T) {
+	root := t.TempDir()
+	runGitCLI(t, root, "init", "-q")
+	sub := filepath.Join(root, "sub")
+	if err := os.Mkdir(sub, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	bare := t.TempDir()
+	runGitCLI(t, bare, "init", "--bare", "-q")
+	server := newTestServer()
+	token := pairDevice(t, server)
+	escaped := url.QueryEscape(root)
+	cases := []struct {
+		name, path string
+		status     int
+	}{
+		{"missing", "/v1/projects/git/status", 400},
+		{"empty", "/v1/projects/git/status?cwd=", 400},
+		{"repeated", "/v1/projects/git/status?cwd=" + escaped + "&cwd=" + escaped, 400},
+		{"relative", "/v1/projects/git/status?cwd=relative", 400},
+		{"nul", "/v1/projects/git/status?cwd=" + escaped + "%00", 400},
+		{"project session selector", "/v1/projects/git/status?cwd=" + escaped + "&acpSessionId=", 400},
+		{"runtime cwd selector", "/v1/runtimes/absent/git/status?cwd=" + escaped + "&acpSessionId=chat", 400},
+		{"subdirectory", "/v1/projects/git/status?cwd=" + url.QueryEscape(sub), 400},
+		{"git dir", "/v1/projects/git/status?cwd=" + url.QueryEscape(filepath.Join(root, ".git")), 400},
+		{"bare", "/v1/projects/git/status?cwd=" + url.QueryEscape(bare), 400},
+		{"not found", "/v1/projects/git/status?cwd=" + url.QueryEscape(filepath.Join(root, "missing")), 404},
+		{"not repository", "/v1/projects/git/status?cwd=" + url.QueryEscape(t.TempDir()), 422},
+		{"traversal", "/v1/projects/files?cwd=" + escaped + "&path=../outside", 400},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := projectWorkspaceRequest(server, token, tc.path)
+			if rec.Code != tc.status {
+				t.Fatalf("status=%d body=%s; want %d", rec.Code, rec.Body.String(), tc.status)
+			}
+		})
+	}
+	rec := projectWorkspaceRequest(server, "", "/v1/projects/git/status?cwd="+escaped)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestProjectWorkspaceCanonicalizesRootAndConfinesSymlinks(t *testing.T) {
+	root := t.TempDir()
+	runGitCLI(t, root, "init", "-q")
+	if err := os.WriteFile(filepath.Join(root, "note.txt"), []byte("inside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(root, alias); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	outside := filepath.Join(t.TempDir(), "secret.txt")
+	if err := os.WriteFile(outside, []byte("outside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "escape")); err != nil {
+		t.Fatal(err)
+	}
+	server := newTestServer()
+	token := pairDevice(t, server)
+	rec := projectWorkspaceRequest(server, token, "/v1/projects/files?cwd="+url.QueryEscape(alias)+"&path=note.txt")
+	canonical, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body fileReadResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Code != 200 || body.Text != "inside" || body.Uri != workspace.FileURI(filepath.Join(canonical, "note.txt")) {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	for _, route := range []string{"files", "git/diff"} {
+		rec = projectWorkspaceRequest(server, token, "/v1/projects/"+route+"?cwd="+url.QueryEscape(alias)+"&path=escape")
+		if rec.Code != 400 {
+			t.Errorf("%s escape: status=%d body=%s", route, rec.Code, rec.Body.String())
+		}
 	}
 }
