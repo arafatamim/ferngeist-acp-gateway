@@ -2,6 +2,15 @@
 
 Ferngeist Gateway is configured through environment variables and persisted state.
 
+`daemon install` captures the invoking shell's non-empty `PATH` in the generated
+systemd environment file or launchd plist. This is a snapshot: run `daemon install`
+again from the desired shell environment to refresh it after changing your PATH.
+Existing service installations need reinstalling to capture it. An empty installer
+PATH leaves the service manager's default unchanged.
+
+The daemon uses its inherited PATH without adding installation directories.
+Foreground runs inherit the shell environment directly.
+
 ## Important settings
 
 | Variable | Purpose | Default |

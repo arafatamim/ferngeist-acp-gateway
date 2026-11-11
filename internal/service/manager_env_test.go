@@ -9,6 +9,37 @@ import (
 	"testing"
 )
 
+func TestLinuxServiceEnvironmentCapturesInstallerPath(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		want string
+	}{
+		{"special characters", `/custom tools/bin:/quote"/bin:/back\slash/bin:/$HOME/bin:/100%/bin`, `PATH="/custom tools/bin:/quote\"/bin:/back\\slash/bin:/$HOME/bin:/100%/bin"`},
+		{"empty keeps manager default", "", ""},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("PATH", test.path)
+			paths := linuxPaths{envPath: filepath.Join(t.TempDir(), "daemon.env")}
+			if err := writeLinuxEnvFile(paths, InstallOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			content, err := os.ReadFile(paths.envPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got string
+			if _, value, found := strings.Cut(string(content), "\nPATH="); found {
+				got = "PATH=" + strings.SplitN(value, "\n", 2)[0]
+			}
+			if got != test.want {
+				t.Fatalf("persisted PATH = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestWriteLinuxEnvFileDropsPublicURLForLanOnly(t *testing.T) {
 	paths := linuxPaths{envPath: filepath.Join(t.TempDir(), "daemon.env")}
 

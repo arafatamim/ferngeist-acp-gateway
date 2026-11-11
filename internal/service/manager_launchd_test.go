@@ -1,13 +1,51 @@
 package service
 
 import (
+	"encoding/xml"
 	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 )
+
+func TestLaunchdPlistCapturesInstallerPath(t *testing.T) {
+	for _, path := range []string{`/custom tools/bin:/<&>/bin:/quote"/bin`, ""} {
+		t.Run(path, func(t *testing.T) {
+			t.Setenv("PATH", path)
+			paths := darwinPaths{plistPath: filepath.Join(t.TempDir(), "gateway.plist")}
+			if err := writeDarwinPlist(paths, InstallOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			content, err := os.ReadFile(paths.plistPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var plist struct {
+				Dict struct {
+					Environment struct {
+						Keys   []string `xml:"key"`
+						Values []string `xml:"string"`
+					} `xml:"dict"`
+				} `xml:"dict"`
+			}
+			if err := xml.Unmarshal(content, &plist); err != nil {
+				t.Fatal(err)
+			}
+			var got string
+			i := slices.Index(plist.Dict.Environment.Keys, "PATH")
+			found := i >= 0
+			if found {
+				got = plist.Dict.Environment.Values[i]
+			}
+			if got != path || found != (path != "") {
+				t.Fatalf("plist PATH = %q (present: %t), want %q (present: %t)", got, found, path, path != "")
+			}
+		})
+	}
+}
 
 // TestDarwinManagerType verifies darwin builds select the darwin manager.
 func TestDarwinManagerType(t *testing.T) {

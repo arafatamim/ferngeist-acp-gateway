@@ -342,6 +342,12 @@ func writeLinuxEnvFile(paths linuxPaths, options InstallOptions) error {
 		"FERNGEIST_GATEWAY_LOG_DIR=" + paths.logDir,
 		"FERNGEIST_GATEWAY_MANAGED_BIN_DIR=" + paths.managedBinDir,
 	}
+	if path := os.Getenv("PATH"); path != "" {
+		// EnvironmentFile double quotes preserve whitespace; only backslashes
+		// and quotes need escaping because systemd does not expand variables.
+		path = strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(path)
+		lines = append(lines, `PATH="`+path+`"`)
+	}
 	// A persisted remote URL must not survive into a LAN-only service: it
 	// would otherwise keep advertising the old tailnet URL.
 	if includePublicURL(options) {

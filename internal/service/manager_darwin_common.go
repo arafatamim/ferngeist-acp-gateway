@@ -418,6 +418,9 @@ func darwinEnv(paths darwinPaths, options InstallOptions) []darwinEnvEntry {
 		{"FERNGEIST_GATEWAY_LOG_DIR", paths.logDir},
 		{"FERNGEIST_GATEWAY_MANAGED_BIN_DIR", paths.managedBinDir},
 	}
+	if path := os.Getenv("PATH"); path != "" {
+		env = append(env, darwinEnvEntry{"PATH", path})
+	}
 	// A persisted remote URL must not survive into a LAN-only service: it
 	// would otherwise keep advertising the old tailnet URL.
 	if includePublicURL(options) {
