@@ -96,6 +96,7 @@ func TestLaunchProducesDistinctRuntimes(t *testing.T) {
 }
 
 func TestLaunchAppliesHarnessProfileEnvToTheChild(t *testing.T) {
+	t.Setenv("FERNGEIST_TEST_ENV", "")
 	baseDir := t.TempDir()
 	binDir := filepath.Join(baseDir, "bin")
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
@@ -135,6 +136,31 @@ func TestLaunchAppliesHarnessProfileEnvToTheChild(t *testing.T) {
 				t.Fatalf("agentInfo.env = %q, want %q", got, test.want)
 			}
 		})
+	}
+}
+
+func TestLaunchAppliesHarnessProfileEnvToAClaimedSpare(t *testing.T) {
+	t.Setenv("FERNGEIST_TEST_ENV", "")
+	supervisor := newSpareSupervisor(t)
+	supervisor.SetProfiles(harness.New(harness.Profile{
+		ID:        "mock-acp",
+		LaunchEnv: map[string]string{"FERNGEIST_TEST_ENV": "from-profile"},
+	}))
+
+	launchMock(t, supervisor)
+	spare := waitSpare(t, supervisor, "mock-acp")
+
+	// A normal connect passes no overrides and claims the spare.
+	claimed, err := supervisor.Launch(mockAgent(), nil)
+	if err != nil {
+		t.Fatalf("Launch() error = %v", err)
+	}
+	t.Cleanup(func() { _ = claimed.Stop(2 * time.Second) })
+	if claimed != spare {
+		t.Fatal("Launch did not claim the pre-booted spare")
+	}
+	if got := initializeAgentEnv(t, claimed); got != "from-profile" {
+		t.Fatalf("claimed spare agentInfo.env = %q, want from-profile", got)
 	}
 }
 
