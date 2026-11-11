@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-func TestLinuxServiceEnvironmentCapturesInstallerPath(t *testing.T) {
+func TestLinuxServiceEnvironmentUsesSavedPath(t *testing.T) {
 	tests := []struct {
 		name string
 		path string
@@ -21,7 +21,14 @@ func TestLinuxServiceEnvironmentCapturesInstallerPath(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Setenv("PATH", test.path)
-			paths := linuxPaths{envPath: filepath.Join(t.TempDir(), "daemon.env")}
+			dir := t.TempDir()
+			if err := saveInstallOptions(dir, InstallOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			if test.path != "" {
+				t.Setenv("PATH", "/restricted/bin")
+			}
+			paths := linuxPaths{configDir: dir, envPath: filepath.Join(dir, "daemon.env")}
 			if err := writeLinuxEnvFile(paths, InstallOptions{}); err != nil {
 				t.Fatal(err)
 			}

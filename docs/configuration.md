@@ -2,11 +2,17 @@
 
 Ferngeist Gateway is configured through environment variables and persisted state.
 
-`daemon install` captures the invoking shell's non-empty `PATH` in the generated
-systemd environment file or launchd plist. This is a snapshot: run `daemon install`
-again from the desired shell environment to refresh it after changing your PATH.
-Existing service installations need reinstalling to capture it. An empty installer
-PATH leaves the service manager's default unchanged.
+`daemon install` captures the invoking shell's non-empty `PATH` in the saved
+`install-options.json` settings when no saved PATH exists. The systemd environment
+file, launchd plist, and Windows PowerShell wrapper use this value. Reinstallations
+and package upgrades preserve the saved PATH by default, regardless of
+`--keep-settings`. To refresh it, remove the `Path` field from the saved settings and run
+`daemon install` from the desired shell environment. Existing installations without
+a saved PATH capture it on their next install. An empty installer PATH leaves the
+service manager's default unchanged.
+
+On Windows, `daemon-overrides.ps1` runs after the saved PATH is applied, so a user
+override can replace it.
 
 The daemon uses its inherited PATH without adding installation directories.
 Foreground runs inherit the shell environment directly.

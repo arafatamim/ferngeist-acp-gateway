@@ -11,11 +11,18 @@ import (
 	"testing"
 )
 
-func TestLaunchdPlistCapturesInstallerPath(t *testing.T) {
+func TestLaunchdPlistUsesSavedPath(t *testing.T) {
 	for _, path := range []string{`/custom tools/bin:/<&>/bin:/quote"/bin`, ""} {
 		t.Run(path, func(t *testing.T) {
 			t.Setenv("PATH", path)
-			paths := darwinPaths{plistPath: filepath.Join(t.TempDir(), "gateway.plist")}
+			dir := t.TempDir()
+			if err := saveInstallOptions(dir, InstallOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			if path != "" {
+				t.Setenv("PATH", "/restricted/bin")
+			}
+			paths := darwinPaths{configDir: dir, plistPath: filepath.Join(dir, "gateway.plist")}
 			if err := writeDarwinPlist(paths, InstallOptions{}); err != nil {
 				t.Fatal(err)
 			}

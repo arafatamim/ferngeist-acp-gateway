@@ -59,6 +59,8 @@ type InstallOptions struct {
 	Host      string
 	Port      int
 	PublicURL string
+	// Path is the executable search path captured on first install.
+	Path string
 	// TailscaleMode is written into the service environment; "off" writes
 	// nothing. Valid: "off", "auto", "cli", "tsnet".
 	TailscaleMode string
@@ -148,6 +150,7 @@ func NormalizeInstallOptions(options InstallOptions) InstallOptions {
 		Host:          host,
 		Port:          port,
 		PublicURL:     strings.TrimSpace(options.PublicURL),
+		Path:          options.Path,
 		TailscaleMode: strings.TrimSpace(options.TailscaleMode),
 	}
 }
@@ -279,12 +282,17 @@ func stableExecutable(resolved string) (string, bool) {
 	return opt, true
 }
 
-// installOptionsFile is where Install records the options it was given, so
-// `daemon install --keep-settings` (used by package upgrades) can reapply
-// them instead of resetting the service to package defaults.
+// installOptionsFile records install options and the captured PATH. Reinstalls
+// preserve PATH; `daemon install --keep-settings` also reapplies the other options
+// instead of resetting them to package defaults.
 const installOptionsFile = "install-options.json"
 
 func saveInstallOptions(configDir string, options InstallOptions) error {
+	path, err := servicePath(configDir)
+	if err != nil {
+		return err
+	}
+	options.Path = path
 	data, err := json.MarshalIndent(NormalizeInstallOptions(options), "", "  ")
 	if err != nil {
 		return err
@@ -296,13 +304,29 @@ func saveInstallOptions(configDir string, options InstallOptions) error {
 }
 
 func loadInstallOptions(configDir string) (InstallOptions, bool) {
+	options, err := readInstallOptions(configDir)
+	return options, err == nil
+}
+
+func readInstallOptions(configDir string) (InstallOptions, error) {
 	data, err := os.ReadFile(filepath.Join(configDir, installOptionsFile))
 	if err != nil {
-		return InstallOptions{}, false
+		return InstallOptions{}, fmt.Errorf("read install options: %w", err)
 	}
 	var options InstallOptions
-	if json.Unmarshal(data, &options) != nil {
-		return InstallOptions{}, false
+	if err := json.Unmarshal(data, &options); err != nil {
+		return InstallOptions{}, fmt.Errorf("decode install options: %w", err)
 	}
-	return options, true
+	return options, nil
+}
+
+func servicePath(configDir string) (string, error) {
+	saved, err := readInstallOptions(configDir)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+	if saved.Path != "" {
+		return saved.Path, nil
+	}
+	return os.Getenv("PATH"), nil
 }

@@ -43,9 +43,10 @@ against the code.
 
 ## Unreleased
 
-- `[semantic]` Installing the systemd or launchd service persists the invoking
-  shell's non-empty PATH for agent detection and launches. Reinstalling refreshes
-  this snapshot. (2026-11-11, unreleased)
+- `[semantic]` Installing the systemd, launchd, or Windows scheduled-task service
+  persists the invoking shell's non-empty PATH for agent detection and launches when no saved PATH
+  exists. Reinstalls and package upgrades preserve this snapshot by default.
+  (2026-11-11, unreleased)
 
 - `[semantic]` The runtime-scoped Git routes are deprecated in favor of
   `/v1/projects/git/...`. They remain available for existing clients and are

@@ -408,9 +408,13 @@ func resolveDarwinPaths() (darwinPaths, error) {
 
 type darwinEnvEntry struct{ key, value string }
 
-// darwinEnv is the single ordered environment list shared by the plist (the
-// source of truth, since launchd never reads daemon.plist.env) and the env file.
-func darwinEnv(paths darwinPaths, options InstallOptions) []darwinEnvEntry {
+// darwinEnv is the single ordered environment list shared by the plist (read by
+// launchd) and the informational daemon.plist.env file (not read by launchd).
+func darwinEnv(paths darwinPaths, options InstallOptions) ([]darwinEnvEntry, error) {
+	path, err := servicePath(paths.configDir)
+	if err != nil {
+		return nil, err
+	}
 	env := []darwinEnvEntry{
 		{"FERNGEIST_GATEWAY_LISTEN_ADDR", ListenAddr(options)},
 		{"FERNGEIST_GATEWAY_ENABLE_LAN", darwinBool(!isLoopbackHost(options.Host))},
@@ -418,7 +422,7 @@ func darwinEnv(paths darwinPaths, options InstallOptions) []darwinEnvEntry {
 		{"FERNGEIST_GATEWAY_LOG_DIR", paths.logDir},
 		{"FERNGEIST_GATEWAY_MANAGED_BIN_DIR", paths.managedBinDir},
 	}
-	if path := os.Getenv("PATH"); path != "" {
+	if path != "" {
 		env = append(env, darwinEnvEntry{"PATH", path})
 	}
 	// A persisted remote URL must not survive into a LAN-only service: it
@@ -429,14 +433,18 @@ func darwinEnv(paths darwinPaths, options InstallOptions) []darwinEnvEntry {
 	if remoteModeRequested(options.TailscaleMode) {
 		env = append(env, darwinEnvEntry{"FERNGEIST_GATEWAY_TAILSCALE_MODE", options.TailscaleMode})
 	}
-	return env
+	return env, nil
 }
 
 // writeDarwinEnvFile writes an informational copy of the environment.
 func writeDarwinEnvFile(paths darwinPaths, options InstallOptions) error {
 	options = NormalizeInstallOptions(options)
+	env, err := darwinEnv(paths, options)
+	if err != nil {
+		return err
+	}
 	var content strings.Builder
-	for _, e := range darwinEnv(paths, options) {
+	for _, e := range env {
 		content.WriteString(e.key + "=" + e.value + "\n")
 	}
 	if err := os.WriteFile(paths.envPath, []byte(content.String()), 0o600); err != nil {
@@ -448,8 +456,12 @@ func writeDarwinEnvFile(paths darwinPaths, options InstallOptions) error {
 func writeDarwinPlist(paths darwinPaths, options InstallOptions) error {
 	options = NormalizeInstallOptions(options)
 
+	entries, err := darwinEnv(paths, options)
+	if err != nil {
+		return err
+	}
 	var env strings.Builder
-	for _, e := range darwinEnv(paths, options) {
+	for _, e := range entries {
 		fmt.Fprintf(&env, "\t\t<key>%s</key>\n\t\t<string>%s</string>\n", escapePlist(e.key), escapePlist(e.value))
 	}
 

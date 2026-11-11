@@ -1,9 +1,57 @@
 package service
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestReinstallKeepsCapturedPathWhileUpdatingSettings(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("PATH", "/user tools/bin:/line\nbreak:/quote\"/bin")
+	if err := saveInstallOptions(dir, InstallOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", "/usr/bin:/bin")
+	if err := saveInstallOptions(dir, InstallOptions{Port: 9000}); err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(filepath.Join(dir, "install-options.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saved struct {
+		Path string
+		Port int
+	}
+	if err := json.Unmarshal(content, &saved); err != nil {
+		t.Fatal(err)
+	}
+	if saved.Path != "/user tools/bin:/line\nbreak:/quote\"/bin" || saved.Port != 9000 {
+		t.Fatalf("reinstalled settings = %+v", saved)
+	}
+}
+
+func TestReinstallDoesNotOverwriteMalformedSettings(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "install-options.json")
+	const broken = "{"
+	if err := os.WriteFile(path, []byte(broken), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveInstallOptions(dir, InstallOptions{}); err == nil {
+		t.Fatal("reinstall overwrote undecodable settings")
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != broken {
+		t.Fatalf("saved settings changed after failure: %s", content)
+	}
+}
 
 func TestNormalizeInstallOptionsTailscaleMode(t *testing.T) {
 	got := NormalizeInstallOptions(InstallOptions{TailscaleMode: "auto"})

@@ -328,6 +328,10 @@ func resolveLinuxPaths() (linuxPaths, error) {
 }
 
 func writeLinuxEnvFile(paths linuxPaths, options InstallOptions) error {
+	path, err := servicePath(paths.configDir)
+	if err != nil {
+		return err
+	}
 	options = NormalizeInstallOptions(options)
 	listenAddr := ListenAddr(options)
 	enableLAN := "0"
@@ -342,7 +346,7 @@ func writeLinuxEnvFile(paths linuxPaths, options InstallOptions) error {
 		"FERNGEIST_GATEWAY_LOG_DIR=" + paths.logDir,
 		"FERNGEIST_GATEWAY_MANAGED_BIN_DIR=" + paths.managedBinDir,
 	}
-	if path := os.Getenv("PATH"); path != "" {
+	if path != "" {
 		// EnvironmentFile double quotes preserve whitespace; only backslashes
 		// and quotes need escaping because systemd does not expand variables.
 		path = strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(path)

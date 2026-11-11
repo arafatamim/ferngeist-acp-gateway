@@ -531,6 +531,14 @@ func resolveWindowsPaths() (windowsPaths, error) {
 }
 
 func writeWindowsWrapperScript(paths windowsPaths, options InstallOptions) error {
+	path, err := servicePath(paths.serviceConfigDir)
+	if err != nil {
+		return err
+	}
+	pathLine := ""
+	if path != "" {
+		pathLine = "$env:PATH = '" + escapePowerShellSingleQuoted(path) + "'"
+	}
 	options = NormalizeInstallOptions(options)
 	listenAddr := ListenAddr(options)
 	enableLAN := "0"
@@ -566,6 +574,7 @@ $env:FERNGEIST_GATEWAY_LOG_DIR = $logDir
 $env:FERNGEIST_GATEWAY_MANAGED_BIN_DIR = $managedBinDir
 $env:FERNGEIST_GATEWAY_LISTEN_ADDR = '%s'
 $env:FERNGEIST_GATEWAY_ENABLE_LAN = '%s'
+%s
 %s
 %s
 
@@ -622,6 +631,7 @@ exit $daemon.ExitCode
 		escapePowerShellSingleQuoted(enableLAN),
 		publicURLLine,
 		tailscaleModeLine,
+		pathLine,
 	)
 
 	if err := os.WriteFile(paths.wrapperScriptPath, []byte(content), 0o644); err != nil {

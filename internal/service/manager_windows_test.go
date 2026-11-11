@@ -4,9 +4,65 @@ package service
 
 import (
 	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestWindowsWrapperUsesSavedPathBeforeOverrides(t *testing.T) {
+	powershell, err := exec.LookPath("powershell.exe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	systemDir := filepath.Join(os.Getenv("SystemRoot"), "System32")
+	// The wrapper passes "daemon run"; where.exe searches those names without
+	// executing them, exposing whether the child received the saved PATH.
+	tools := filepath.Join(t.TempDir(), "tools ' $env")
+	if err := os.MkdirAll(tools, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"daemon.exe", "run.exe"} {
+		if err := os.WriteFile(filepath.Join(tools, name), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, override := range []bool{false, true} {
+		t.Run(fmt.Sprintf("override=%t", override), func(t *testing.T) {
+			dir := t.TempDir()
+			t.Setenv("PATH", tools)
+			t.Setenv("PATHEXT", ".EXE")
+			if err := saveInstallOptions(dir, InstallOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", systemDir)
+			paths := windowsPaths{
+				serviceConfigDir: dir, binaryPath: filepath.Join(systemDir, "where.exe"),
+				wrapperScriptPath: filepath.Join(dir, "wrapper.ps1"), overrideScriptPath: filepath.Join(dir, "overrides.ps1"),
+				dataLogsDir: dir, dataManagedBinDir: dir, daemonLogPath: filepath.Join(dir, "daemon.log"),
+			}
+			var overrides string
+			if override {
+				overrides = "$env:PATH = ''\n"
+			}
+			if err := os.WriteFile(paths.overrideScriptPath, []byte(overrides), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := writeWindowsWrapperScript(paths, InstallOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			out, err := exec.Command(powershell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", paths.wrapperScriptPath).CombinedOutput()
+			if override && err == nil {
+				t.Fatal("user override did not replace saved PATH")
+			}
+			if !override && err != nil {
+				t.Fatalf("saved PATH did not reach child: %v\n%s", err, out)
+			}
+		})
+	}
+}
 
 func TestWindowsTaskXML(t *testing.T) {
 	got := windowsTaskXML(`DOM\us&er`, `C:\a b\run.vbs`)
