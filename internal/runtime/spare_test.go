@@ -93,7 +93,7 @@ func TestLaunchWithEnvOverridesNeverUsesSpare(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = proc.Stop(2 * time.Second) })
 	if proc == spare {
-		t.Fatal("a spare runs on the daemon env; an env override must launch cold")
+		t.Fatal("a spare runs on the daemon and profile env; an env override must launch cold")
 	}
 }
 

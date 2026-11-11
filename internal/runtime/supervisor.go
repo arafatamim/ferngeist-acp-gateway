@@ -309,13 +309,14 @@ func NewSupervisor(logger *slog.Logger, baseDir string, store *storage.SQLiteSto
 // Launch validates the agent, resolves its executable, starts a fresh process,
 // and records it as running. Every call produces a distinct runtime; the caller
 // owns the returned process. envOverrides are merged over the daemon
-// environment.
+// environment and the agent's harness profile defaults.
 func (s *Supervisor) Launch(agent catalog.Agent, envOverrides map[string]string) (*Process, error) {
 	prepared, err := s.prepareAgent(agent)
 	if err != nil {
 		return nil, err
 	}
-	// A spare runs on the daemon environment, so env overrides launch cold.
+	// A spare runs on the daemon environment and profile defaults, so env
+	// overrides launch cold.
 	if len(envOverrides) > 0 {
 		return s.launchProcess(prepared, envOverrides)
 	}
@@ -329,9 +330,10 @@ func (s *Supervisor) Launch(agent catalog.Agent, envOverrides map[string]string)
 	return proc, nil
 }
 
-// Spawn starts a fresh process of agent on the daemon environment that is never
-// tracked as a runtime and never claims or refills a spare, for short-lived
-// callers outside the session lifecycle. The caller stops it with Discard.
+// Spawn starts a fresh process of agent on the daemon environment plus the
+// agent's harness profile defaults. It is never tracked as a runtime and never
+// claims or refills a spare, for short-lived callers outside the session
+// lifecycle. The caller stops it with Discard.
 func (s *Supervisor) Spawn(agent catalog.Agent) (*Process, error) {
 	prepared, err := s.prepareAgent(agent)
 	if err != nil {

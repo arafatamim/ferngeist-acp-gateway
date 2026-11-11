@@ -19,7 +19,8 @@ type Registry struct {
 	byID map[string]Profile
 }
 
-// New returns a registry serving the given profiles.
+// New returns a registry serving the given profiles. It keeps each profile's
+// LaunchEnv map; callers must not mutate it after construction.
 func New(profiles ...Profile) *Registry {
 	byID := make(map[string]Profile, len(profiles))
 	for _, profile := range profiles {

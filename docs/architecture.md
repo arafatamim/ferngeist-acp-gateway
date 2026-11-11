@@ -10,10 +10,11 @@ Its main job is to expose ACP agents through a unified WebSocket API. It discove
 - `internal/api` — public and admin HTTP APIs, WebSocket bridge, session handlers
 - `internal/push` — platform-neutral push dispatcher with pluggable delivery providers (Web Push)
 - `internal/pairing` — pairing flow and device credentials
-- `internal/runtime` — agent process launching, the per-runtime log ring buffer, and persisted failure records. The supervisor does not own the process: `Launch` hands the caller a `*exec.Cmd` plus its pipes, the caller reports the exit back with `RecordExit`, and there is no automatic restart.
+- `internal/runtime` — agent process launching, the per-runtime log ring buffer, and persisted failure records. The supervisor does not own the process: `Launch` hands the caller a `*exec.Cmd` plus its pipes, the caller reports the exit back with `RecordExit`, and there is no automatic restart. It applies the agent's harness profile launch environment at spawn, under any caller overrides.
 - `internal/session` — resilient session domain: session lifecycle, the stdio pump, agent process ownership (a session owns the `*exec.Cmd` it launched), attach tokens, and inbound diagnostics
 - `internal/turns` — the `GET /v1/turns` wire shape, the outcome classification of a finished prompt reply, and the daemon-wide in-memory store of finished outcomes (no project imports)
 - `internal/catalog` — supported agent discovery and validation
+- `internal/harness` — per-agent harness profiles: the launch overrides and non-ACP behaviours that the registry and protocol do not describe, keyed by catalog agent id. An agent with no profile behaves like a plain ACP agent.
 - `internal/registry` — ACP registry fetch and cache
 - `internal/storage` — SQLite persistence (sessions, pairings, runtimes, push tokens, gateway identity, inbound diagnostics)
 - `internal/discovery` — LAN advertising via mDNS
@@ -22,6 +23,10 @@ Its main job is to expose ACP agents through a unified WebSocket API. It discove
 - `internal/daemon` — wiring and startup reconciliation
 - `internal/remote` — Tailscale adapter (CLI or embedded tsnet), funnel/serve provisioning, domain types (`Result`, `ErrAuthRequired`, `RemoteSetupSnapshot`), and the provisioning lifecycle (`Access`): retry loop, public URL persistence, paired-device notifications, and auth-pending state for the status API
 - `internal/adminclient` — typed HTTP client for the admin API (used by `daemon status` and `daemon install`)
+
+## Harness profiles
+
+ACP describes the protocol, not the harness behind it. `internal/harness` holds gateway-side deviations for known harnesses, keyed by catalog agent id; an agent with no profile is a plain ACP agent, and quota providers, icons and logos stay catalog metadata rather than profiles. Today a profile sets only a launch environment override, and `runtime` applies it at the single process spawn site under any caller overrides, so cold launches, claimed spares and `Supervisor.Spawn` all share it. `internal/daemon` injects `harness.Default()` during composition. The first profile tags the Claude Agent adapter with `CLAUDE_CODE_ENTRYPOINT=cli`: Claude Code's `/resume` hides the SDK-labelled transcripts the adapter writes, and the SDK only defaults that variable when it is unset, so the label keeps gateway-created chats visible in the native CLI.
 
 ## Resilient gateway sessions
 
@@ -38,9 +43,11 @@ Every connection creates a persistent gateway session with:
 > per-agent stop closes every session for the agent. The supervisor never
 > auto-restarts a process: a crash is reported and the session is reclaimed.
 >
-> "Fresh" does not mean cold: after each launch without env overrides the
+> "Fresh" does not mean cold: after each launch without caller env overrides the
 > supervisor pre-boots one spare process of that agent (`internal/runtime/spare.go`),
 > unlisted until claimed, and the next connect takes it instead of spawning.
+> The spare runs on the daemon environment plus the agent's harness profile
+> defaults, the same environment a cold launch without overrides would get.
 > Agent startup is 300–900ms of a cold connect; a booted spare answers
 > `initialize` in a few ms. The spare has never seen a client, so the contract
 > is unchanged. A spare is dropped when its launch command or args no longer

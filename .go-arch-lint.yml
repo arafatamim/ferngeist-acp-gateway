@@ -87,7 +87,8 @@ deps:
   adminclient:
     mayDependOn: *transport
 
-  # domain tier 0, shared kernel: the agent catalog and the notification port.
+  # domain tier 0, shared kernel: the agent catalog, harness profiles and the
+  # notification port.
   catalog:
     mayDependOn: &infra [storage, registry, discovery, service]
   push:
@@ -117,4 +118,4 @@ deps:
   projects:
     mayDependOn: [runtime, workspace, acquire, catalog, push, storage, registry, discovery, service]
 
-  # infra and cmd-mock-agent have no entry: no project imports beyond config/logging.
+  # harness, the infra packages and cmd-mock-agent have no entry: no project imports beyond config/logging.
