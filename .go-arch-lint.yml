@@ -31,6 +31,7 @@ components:
   adminclient: { in: internal/adminclient }
   # domain
   catalog: { in: internal/catalog }
+  harness: { in: internal/harness }
   push: { in: internal/push }
   acquire: { in: internal/acquire }
   runtime: { in: internal/runtime }
@@ -106,7 +107,7 @@ deps:
 
   # domain tier 2: agent processes, which need acquired binaries.
   runtime:
-    mayDependOn: [acquire, catalog, push, storage, registry, discovery, service]
+    mayDependOn: [harness, acquire, catalog, push, storage, registry, discovery, service]
 
   # domain tier 3: things that drive a running agent.
   session:

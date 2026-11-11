@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -26,6 +27,7 @@ import (
 
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/acquire"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/catalog"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/harness"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/storage"
 )
 
@@ -280,6 +282,9 @@ type Supervisor struct {
 	// installer handles automatic agent acquisition if not present.
 	installer *acquire.Installer
 
+	// profiles supplies per-harness launch overrides; nil means none.
+	profiles *harness.Registry
+
 	// spares holds one pre-booted process per agent ID; nil until
 	// EnableSpares. closed stops new spares after Close.
 	spares   map[string]*spare
@@ -396,7 +401,7 @@ func (s *Supervisor) spawn(agent catalog.Agent, envOverrides map[string]string) 
 
 	cmd := exec.Command(commandPath, agent.Launch.Args...)
 	cmd.Dir = workingDir
-	cmd.Env = mergeProcessEnv(envOverrides)
+	cmd.Env = mergeProcessEnv(agentLaunchEnv(s.profileLaunchEnv(agent.ID), envOverrides))
 	stdinPipe, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
@@ -818,6 +823,32 @@ func (s *Supervisor) recentLogs(runtimeID string, limit int) []LogEntry {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return lastLogEntries(s.logs[runtimeID], limit)
+}
+
+// SetProfiles wires the per-harness launch overrides. Call it once during
+// startup, before any agent launches.
+func (s *Supervisor) SetProfiles(profiles *harness.Registry) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.profiles = profiles
+}
+
+// profileLaunchEnv reads the harness profile under the supervisor lock.
+func (s *Supervisor) profileLaunchEnv(agentID string) map[string]string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.profiles.LaunchEnv(agentID)
+}
+
+// agentLaunchEnv merges the profile's environment under the caller's
+// overrides. An explicit override always wins.
+func agentLaunchEnv(defaults, overrides map[string]string) map[string]string {
+	if len(defaults) == 0 {
+		return overrides
+	}
+	merged := maps.Clone(defaults)
+	maps.Copy(merged, overrides)
+	return merged
 }
 
 // mergeProcessEnv merges environment variable overrides with the current

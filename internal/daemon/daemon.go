@@ -17,6 +17,7 @@ import (
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/config"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/customagents"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/discovery"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/harness"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/logging"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/pairing"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/projects"
@@ -341,6 +342,7 @@ func newAgentRuntime(cfg config.Config, logger *slog.Logger, store *storage.SQLi
 	installer.SetJSRuntime(cfg.JSRuntime)
 	installer.PruneNpm() // before any agent launches from an install dir
 	runtimeSvc := gatewayruntime.NewSupervisor(logger, ".", store, installer)
+	runtimeSvc.SetProfiles(harness.Default())
 
 	return catalogSvc, runtimeSvc
 }
