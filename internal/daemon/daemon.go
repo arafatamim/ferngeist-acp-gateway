@@ -120,6 +120,7 @@ func serve(ctx context.Context, server *api.Server, access *remote.Access, sessi
 	case <-ctx.Done():
 		logger.Info("shutdown requested")
 	case err := <-errCh:
+		errCh = nil
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("api server failed; draining before exit", slog.String("error", err.Error()))
 			serveErr = err
@@ -134,6 +135,11 @@ func serve(ctx context.Context, server *api.Server, access *remote.Access, sessi
 	// stop remote access.
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		shutdownErr = fmt.Errorf("graceful shutdown failed: %w", err)
+	}
+	// Shutdown can finish before ListenAndServe's startup pruning does. Join
+	// it before dependent services and Run's database and logger are closed.
+	if errCh != nil {
+		<-errCh
 	}
 	if access != nil {
 		if err := access.Close(); err != nil {
