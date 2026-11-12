@@ -75,6 +75,14 @@ Remote diagnostics export is disabled by default unless enabled in configuration
 
 This helps avoid exposing logs and runtime details unless you explicitly want that.
 
+Shared HTTP request logs replace `path` and `acpSessionId` query values with
+`redacted`, as they do for `access_token`, `token`, and `authorization`.
+Matching is case-insensitive and covers duplicate keys and percent-encoded
+selectors. If query parsing fails, the entire query is logged as the fixed
+`redacted` marker, never as raw input. This does not add a raw-path audit event.
+The redaction applies to HTTP request logs only: optional raw ACP frame logging
+may still contain paths, ACP session IDs, and other sensitive content.
+
 ## Secrets and storage
 
 - Device credentials are hashed before being stored.

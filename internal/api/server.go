@@ -559,11 +559,12 @@ func requestPath(r *http.Request) string {
 }
 
 // sanitizeRawQuery replaces sensitive values with a fixed placeholder so logs
-// do not leak bearer tokens or other credentials.
+// do not leak credentials or artifact selectors. Malformed queries are fully
+// redacted because parsing may leave sensitive values unrecognized.
 func sanitizeRawQuery(rawQuery string) string {
 	values, err := url.ParseQuery(rawQuery)
 	if err != nil {
-		return rawQuery
+		return "redacted"
 	}
 	for key := range values {
 		if isSensitiveQueryKey(key) {
@@ -576,7 +577,7 @@ func sanitizeRawQuery(rawQuery string) string {
 // isSensitiveQueryKey marks query parameters that should not be logged verbatim.
 func isSensitiveQueryKey(key string) bool {
 	switch strings.ToLower(strings.TrimSpace(key)) {
-	case "access_token", "token", "authorization":
+	case "access_token", "token", "authorization", "path", "acpsessionid":
 		return true
 	default:
 		return false

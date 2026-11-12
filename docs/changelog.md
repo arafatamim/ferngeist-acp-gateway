@@ -43,6 +43,13 @@ against the code.
 
 ## Unreleased
 
+- `[additive]` Shared HTTP request logs redact `path` and `acpSessionId` query
+  values case-insensitively, including duplicate keys. Malformed queries log a
+  fixed `redacted` marker; existing credential redaction is preserved. This
+  covers request logs only, not optional raw ACP frames. HTTP contracts and
+  `protocolVersion` are unchanged; no artifact endpoint is introduced.
+  (2026-11-12, unreleased)
+
 - `[semantic]` Installing the systemd, launchd, or Windows scheduled-task service
   persists the invoking shell's non-empty PATH for agent detection and launches when no saved PATH
   exists. Reinstalls and package upgrades preserve this snapshot by default.
