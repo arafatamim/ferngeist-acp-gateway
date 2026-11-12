@@ -105,7 +105,8 @@ func (b *blockedArtifact) Write(p []byte) (int, error) {
 }
 
 func (b *blockedArtifact) SetWriteDeadline(t time.Time) error {
-	if t.Before(time.Now()) {
+	// Windows' clock can return the same instant for consecutive reads.
+	if !t.After(time.Now()) {
 		b.expireOnce.Do(func() { close(b.expired) })
 	}
 	b.deadlines <- t
