@@ -190,39 +190,7 @@ type StdioPump struct {
 // fire on notable events regardless of whether a client is attached. The loop
 // stops when the context is cancelled.
 func (p *StdioPump) StdoutDrainLoop(ctx context.Context) {
-	// ReadSlice, not ReadString. ReadString copies every byte until the newline
-	// before returning, so a newline-less stream grows without bound inside
-	// bufio — the old cap only set a flag after that copy. A Scanner is also
-	// wrong here: its hard line cap (previously 1 MiB) returns ErrTooLong and
-	// the drain loop exits, which closed the client WebSocket with no log
-	// ("connection dropped while loading a session"). readStdoutFrame keeps
-	// frames up to maxAgentFrameBytes and discards the rest of a longer line.
-	reader := bufio.NewReader(p.proc.Stdout)
-drain:
-	for {
-		select {
-		case <-ctx.Done():
-			// Session teardown must run the same exit path as EOF below
-			// (stop writer, flush, close conn): returning here would orphan
-			// a bound clientWriterLoop parked in select with a live ctx.
-			break drain
-		default:
-		}
-		frame, dropped, err := readStdoutFrame(reader, maxAgentFrameBytes)
-		if dropped {
-			p.logger.Warn("agent stdout frame exceeds safety cap; dropping",
-				"runtime_id", p.runtimeID, "cap", maxAgentFrameBytes)
-		} else if err == nil || frame != "" {
-			p.handleStdoutLine(frame)
-		}
-		if err != nil {
-			if !errors.Is(err, io.EOF) {
-				p.logger.Warn("agent stdout read failed",
-					"runtime_id", p.runtimeID, "error", err)
-			}
-			break
-		}
-	}
+	p.drainStdout(ctx)
 
 	// After the loop exits (ctx cancelled, agent stdout closed, or read error),
 	// stop the writer and wait for it to flush its queue, then close the
@@ -247,6 +215,49 @@ drain:
 	}
 	if conn != nil {
 		_ = conn.CloseNow()
+	}
+}
+
+func (p *StdioPump) drainStdout(ctx context.Context) {
+	// ReadSlice, not ReadString. ReadString copies every byte until the newline
+	// before returning, so a newline-less stream grows without bound inside
+	// bufio — the old cap only set a flag after that copy. A Scanner is also
+	// wrong here: its hard line cap (previously 1 MiB) returns ErrTooLong and
+	// the drain loop exits, which closed the client WebSocket with no log
+	// ("connection dropped while loading a session"). readStdoutFrame keeps
+	// frames up to maxAgentFrameBytes and discards the rest of a longer line.
+	reader := bufio.NewReader(p.proc.Stdout)
+drain:
+	for {
+		select {
+		case <-ctx.Done():
+			// Session teardown must run the same exit path as EOF below
+			// (stop writer, flush, close conn): returning here would orphan
+			// a bound clientWriterLoop parked in select with a live ctx.
+			break drain
+		default:
+		}
+		frame, dropped, err := readStdoutFrame(reader, maxAgentFrameBytes)
+		if dropped {
+			p.discardArtifactStream()
+			p.logger.Warn("agent stdout frame exceeds safety cap; dropping",
+				"runtime_id", p.runtimeID, "cap", maxAgentFrameBytes)
+		} else if err == nil || frame != "" {
+			p.handleStdoutLine(frame)
+		}
+		if err == nil {
+			continue
+		}
+		if !errors.Is(err, io.EOF) {
+			p.logger.Warn("agent stdout read failed", "runtime_id", p.runtimeID, "error", err)
+		}
+		break
+	}
+}
+
+func (p *StdioPump) discardArtifactStream() {
+	if p.loadRecovery != nil {
+		p.loadRecovery.discardArtifactStream()
 	}
 }
 
@@ -368,6 +379,11 @@ func (p *StdioPump) WriteToAgent(gen int64, payload []byte) error {
 	if f.Method == "session/prompt" {
 		p.promptWriteMu.Lock()
 		defer p.promptWriteMu.Unlock()
+	}
+	// These requests may be answered without reaching OnOutbound, but still
+	// separate artifact text streams. Ordinary forwarded frames break there.
+	if p.loadRecovery != nil && (f.Method == "initialize" || f.Method == "session/resume" || f.Method == "session/prompt") {
+		p.loadRecovery.endArtifactStream()
 	}
 	if p.replayInitialize(gen, f) || p.answerCatchUp(gen, f) || p.dropDuplicatePrompt(gen, f) {
 		return nil

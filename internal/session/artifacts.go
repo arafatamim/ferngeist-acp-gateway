@@ -7,47 +7,42 @@ import (
 	"strings"
 )
 
-// ArtifactAdvertised checks retained structured agent resources in a device's
+// ArtifactAdvertised checks retained agent advertisements in a device's
 // accepted ACP context. This is an admission snapshot, not a durable file grant.
 func (rs *RuntimeSession) ArtifactAdvertised(deviceID, runtimeID, acpSessionID, path string) (bool, error) {
 	frames, err := rs.artifactFrames(deviceID, runtimeID, acpSessionID)
 	if err != nil {
 		return false, err
 	}
-	for _, f := range frames {
-		if artifactInFrame(f.line, path) {
-			return true, nil
-		}
-	}
-	return false, nil
+	return frames.advertises(path), nil
 }
 
-func (rs *RuntimeSession) artifactFrames(deviceID, runtimeID, acpSessionID string) ([]historyFrame, error) {
+func (rs *RuntimeSession) artifactFrames(deviceID, runtimeID, acpSessionID string) (artifactHistory, error) {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
 	if rs.closed {
-		return nil, ErrSessionNotFound
+		return artifactHistory{}, ErrSessionNotFound
 	}
 	for _, s := range rs.sessions {
 		if s.RuntimeID != runtimeID {
 			continue
 		}
 		if s.DeviceID != deviceID {
-			return nil, ErrDeviceMismatch
+			return artifactHistory{}, ErrDeviceMismatch
 		}
 		s.mu.Lock()
 		active := s.Status == StatusActive || s.Status == StatusDisconnected
 		s.mu.Unlock()
 		if !active || !s.pump.acp.holds(acpSessionID) {
-			return nil, ErrSessionNotFound
+			return artifactHistory{}, ErrSessionNotFound
 		}
 		r := s.pump.loadRecovery
 		r.mu.Lock()
-		frames := slices.Clone(r.history[acpSessionID])
+		frames := artifactHistory(slices.Clone(r.history[acpSessionID]))
 		r.mu.Unlock()
 		return frames, nil
 	}
-	return nil, ErrSessionNotFound
+	return artifactHistory{}, ErrSessionNotFound
 }
 
 type artifactContent struct {

@@ -105,10 +105,24 @@ path the gateway user can read. Pair only trusted devices and agents.
 The public `GET`/`HEAD /v1/runtimes/{runtimeId}/artifacts` route binds verified
 DeviceID ownership before inspecting accepted ACP sessions or retained history.
 Foreign, unknown and closed contexts return indistinguishable `404` responses.
-Only explicit structured local resource links/embedded resource URIs in eligible
-agent messages or tool content count. Text, user/thought messages, tool titles,
-diffs and arbitrary JSON do not grant access. Retained replay history is the
-sole evidence source, so eviction, close and restart deny new requests.
+Evidence includes structured local resource links/embedded resource URIs in
+eligible agent messages or tool content, plus deliberately delimited exact
+local paths/file URIs in agent-message text (including Markdown links).
+Complete HTTP/HTTPS URL spans are excluded before local token extraction.
+User/thought messages, tool text, titles, diffs and arbitrary JSON never grant.
+Only adjacent text with the same bounded, nonempty message identity and ACP
+session joins. Internal history markers preserve client/prompt/reply/load and
+non-message boundaries, including requests answered by the gateway. Missing
+identity never permits concatenation; unknown/evicted message edges fail closed.
+An interruption or dropped stdout frame forbids joining but cannot establish a
+message edge. Only a correlated prompt reply or adjacent new identified message
+can complete an otherwise un-delimited token.
+Ambiguous punctuation/whitespace needs a structured URI, not guessed stripping.
+Retained replay history remains the sole evidence source; markers are evicted
+with frames, and no file lookup or grant registry runs on the pump. Eviction,
+close and restart deny new requests; accepted agent replay may advertise again.
+These checks do not prove an agent chose a path safely: prompt injection can
+still deliberately surface a host path.
 
 Linux/macOS opening canonicalizes the parent at fetch time, rejects supplied
 and canonical `/proc`, `/sys`, `/dev` trees, roots relative operations at the

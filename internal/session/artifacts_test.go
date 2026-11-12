@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-func TestArtifactEvidenceUsesOnlyStructuredAgentResources(t *testing.T) {
+func TestArtifactStructuredEvidenceUsesOnlyAgentResources(t *testing.T) {
 	tests := []struct {
 		name, update string
 		want         bool

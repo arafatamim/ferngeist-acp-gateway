@@ -44,6 +44,13 @@ type LoadRecovery struct {
 	evicted  map[string]int64         // acpSessionId -> highest seq evicted from history
 	rejected map[string][]cursorRange // cursors that may contain removed prompts
 
+	// Only the current stream identity is kept outside history. Numeric markers
+	// survive unbuffered replies/requests and are evicted with their frames.
+	artifactStream    uint64
+	artifactLost      bool
+	artifactMessageID string
+	artifactSession   string
+
 	logger *slog.Logger
 }
 
@@ -58,12 +65,18 @@ type loadCursor struct {
 
 // historyFrame is one buffered session/update; user marks a user_message_chunk
 // and seq is its ferngeist/seq, 0 for a frame that could not be numbered.
+// Artifact markers distinguish a known message edge from an interruption that
+// merely forbids joining; none of them is replayed onto the wire.
 type historyFrame struct {
-	line        string
-	user        bool
-	seq         int64
-	promptID    string
-	gapBoundary int64
+	line            string
+	user            bool
+	seq             int64
+	promptID        string
+	gapBoundary     int64
+	artifactStream  uint64
+	artifactStart   bool
+	artifactEnd     bool
+	artifactLeading bool
 }
 
 // newLoadRecovery builds a LoadRecovery bound to the given logger.
@@ -81,6 +94,7 @@ func newLoadRecovery(logger *slog.Logger) *LoadRecovery {
 // can be correlated to the session it targets. Called on the client->agent path
 // before the frame is forwarded.
 func (r *LoadRecovery) OnOutbound(f *clientFrame) {
+	r.endArtifactStream()
 	if f.Method == "session/prompt" && f.Params.SessionID != "" {
 		r.bufferPrompt(f.Params.SessionID, f.Params.Prompt, f.Params.Meta.ClientID, responseIDKey(f.ID))
 		return
@@ -167,15 +181,14 @@ func (r *LoadRecovery) OnFrame(line string, probe frameProbe, ok bool) ([]string
 // replays a stale, since-resolved request. The pump calls it under clientMu,
 // so a catch-up replay can neither repeat nor reorder this frame's forward.
 func (r *LoadRecovery) record(line string, probe frameProbe, ok bool) string {
-	if !ok ||
-		probe.Method != "session/update" || probe.Params == nil || probe.Params.SessionID == "" {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	start, leading := r.observeArtifactStreamLocked(probe, ok)
+	if !ok || probe.Method != "session/update" || probe.Params == nil || probe.Params.SessionID == "" {
 		return line
 	}
 	sid := probe.Params.SessionID
 	user := probe.Params.Update != nil && probe.Params.Update.Discriminator == "user_message_chunk"
-
-	r.mu.Lock()
-	defer r.mu.Unlock()
 	seq := r.seq[sid] + 1
 	stamped, numbered := withUpdateMeta(line, map[string]json.RawMessage{
 		seqMetaKey: json.RawMessage(strconv.FormatInt(seq, 10)),
@@ -188,6 +201,8 @@ func (r *LoadRecovery) record(line string, probe frameProbe, ok bool) string {
 	}
 	r.seq[sid] = seq
 	r.appendHistoryLocked(sid, stamped, user, seq)
+	f := &r.history[sid][len(r.history[sid])-1]
+	f.artifactStream, f.artifactStart, f.artifactLeading = r.artifactStream, start, leading
 	return stamped
 }
 

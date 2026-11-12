@@ -43,8 +43,27 @@ Authorization uses only retained session/update history: explicit local
 `resource_link` or embedded `resource` URIs in agent messages, or structured
 content blocks in tool calls/updates. Match exact paths or strictly once-decoded
 hostless `file:` URIs, without query/fragment or path-normalization aliases.
-Plain-text paths, user messages, thoughts, tool text, titles, diffs, and arbitrary
-JSON fields do not advertise artifacts. Evicted evidence, session close, or a
+Agent-message text also advertises exact local tokens, including Markdown
+links such as `[Recorded test](/tmp/recording.mp4)`. Complete HTTP/HTTPS URL
+spans (including queries, fragments and nested-looking Markdown) are excluded
+before extracting local tokens. Paths are never normalized or matched as
+prefixes/substrings; sentence punctuation is never stripped. Use structured
+local file URIs for ambiguous whitespace or punctuation in filenames.
+
+Only adjacent chunks with the same nonempty `messageId` (at most 1024 bytes)
+and originating ACP session may join. Client requests/replies, prompt results,
+load/resume, user/thought/tool events and message changes break the stream.
+Unidentified chunks never join and require explicit token delimiters; a bare
+path occupying an unidentified chunk is insufficient. A known message start
+allows a leading token; an un-delimited trailing token requires a correlated
+prompt result or an adjacent new identified message. Interruptions prevent
+joining but do not establish message edges; missing/dropped stdout frames also
+invalidate joining and message-edge provenance. Eviction of the start chunk
+loses leading-edge provenance, so a retained URL suffix cannot become a local
+advertisement. These internal
+markers leave replay frames and their existing 8 MiB/single-frame-exception
+bounds unchanged. User messages, thoughts, tool text, titles, diffs and arbitrary
+JSON fields never advertise artifacts. Evicted evidence, session close, or a
 gateway restart denies new requests; accepted agent replay may advertise again.
 An unadvertised path returns `403` before file lookup whether it exists or not.
 

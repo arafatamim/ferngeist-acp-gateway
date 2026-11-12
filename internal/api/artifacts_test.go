@@ -27,14 +27,36 @@ type artifactEnv struct {
 
 func newArtifactEnv(t *testing.T, name string) *artifactEnv {
 	t.Helper()
+	return newArtifactEnvWithAdvertisement(t, name, true)
+}
+
+func newArtifactEnvWithAdvertisement(t *testing.T, name string, structured bool) *artifactEnv {
+	t.Helper()
 	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
 		t.Skip("artifact retrieval requires Linux or macOS")
 	}
 	path := filepath.Join(t.TempDir(), name)
-	t.Setenv("FERNGEIST_MOCK_RESOURCE_URI", (&url.URL{Scheme: "file", Path: path}).String())
+	uri := ""
+	reply := "[Recorded test](" + path + ")"
+	if structured {
+		uri = (&url.URL{Scheme: "file", Path: path}).String()
+		reply = "Here is your artifact."
+	}
+	t.Setenv("FERNGEIST_MOCK_RESOURCE_URI", uri)
 	llm := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"Here is your artifact."}}]}`))
+		// Reply through the actual mock-agent LLM seam, without gateway grant hooks.
+		type message struct {
+			Content string `json:"content"`
+		}
+		type choice struct {
+			Message message `json:"message"`
+		}
+		if err := json.NewEncoder(w).Encode(struct {
+			Choices []choice `json:"choices"`
+		}{[]choice{{message{reply}}}}); err != nil {
+			t.Errorf("encode mock LLM reply: %v", err)
+		}
 	}))
 	t.Cleanup(llm.Close)
 	t.Setenv("FERNGEIST_MOCK_LLM_ENDPOINT", llm.URL)
@@ -98,7 +120,20 @@ func (e *artifactEnv) request(t *testing.T, method, target, token string) *httpt
 }
 
 func TestArtifactsReturnCompleteBytesAndHeadMetadata(t *testing.T) {
-	e := newArtifactEnv(t, "recording.mp4")
+	for _, structured := range []bool{true, false} {
+		name := "structured"
+		if !structured {
+			name = "Markdown"
+		}
+		t.Run(name, func(t *testing.T) {
+			e := newArtifactEnvWithAdvertisement(t, "live-full-history-test.mp4", structured)
+			assertCompleteArtifact(t, e)
+		})
+	}
+}
+
+func assertCompleteArtifact(t *testing.T, e *artifactEnv) {
+	t.Helper()
 	data := bytes.Repeat([]byte("mp4\x00"), (9<<20)/4)
 	if err := os.WriteFile(e.path, data, 0o600); err != nil {
 		t.Fatal(err)
@@ -112,7 +147,7 @@ func TestArtifactsReturnCompleteBytesAndHeadMetadata(t *testing.T) {
 			t.Fatalf("metadata = %v", w.Header())
 		}
 		kind, params, err := mime.ParseMediaType(w.Header().Get("Content-Disposition"))
-		if err != nil || kind != "attachment" || params["filename"] != "recording.mp4" {
+		if err != nil || kind != "attachment" || params["filename"] != "live-full-history-test.mp4" {
 			t.Fatalf("disposition = %v, %v", params, err)
 		}
 		if method == http.MethodGet && sha256.Sum256(w.Body.Bytes()) != sha256.Sum256(data) {

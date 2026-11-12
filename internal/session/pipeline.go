@@ -41,8 +41,9 @@ type frameProbe struct {
 			ToolCallID    string `json:"toolCallId"`
 			Status        string `json:"status"`
 			Kind          string `json:"kind"`
-			// No content or title: no stage reads them, and unmarshalling
-			// them would copy every chunk's text and tool output again.
+			MessageID     string `json:"messageId"`
+			// No text or title: copying those would duplicate every chunk and tool
+			// output. Only message identity is needed for provenance.
 		} `json:"update"`
 	} `json:"params"`
 }
@@ -184,6 +185,9 @@ func (p *StdioPump) forward(f *frame) {
 	var evict *websocket.Conn
 	p.clientMu.Lock()
 	if p.loadRecovery != nil {
+		if f.isReply && f.origin.method == "session/prompt" {
+			p.loadRecovery.completeArtifactMessage(f.origin.promptSession)
+		}
 		// Numbered and buffered under clientMu: see LoadRecovery.record.
 		if line := p.loadRecovery.record(f.line, f.probe, f.ok); line != f.line {
 			f.line, f.out = line, []string{line}

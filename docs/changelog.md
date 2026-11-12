@@ -43,6 +43,16 @@ against the code.
 
 ## Unreleased
 
+- `[additive]` Artifact retrieval also recognizes exact local paths/file URIs
+  deliberately surfaced in agent-message text and Markdown. HTTP/HTTPS spans,
+  user/thought/tool text and arbitrary JSON remain excluded. Split text joins
+  only within an identified adjacent message and ACP context, preserving
+  request/reply/load/event boundaries in bounded replay metadata; ambiguous
+  chunk edges fail closed. Evidence is still checked only at admission and
+  expires with retained history. No workspace/turns or protocol-version change.
+  Ranges and Windows support remain separate work.
+  (2026-11-12, unreleased)
+
 - `[additive]` Public authenticated GET/HEAD
   `/v1/runtimes/{runtimeId}/artifacts?acpSessionId=<id>&path=<absolute-host-path>`
   retrieves complete raw regular files up to 512 MiB on Linux/macOS. Access
