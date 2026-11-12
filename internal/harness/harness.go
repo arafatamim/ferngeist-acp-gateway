@@ -4,7 +4,27 @@
 // ACP agent.
 package harness
 
-import "maps"
+import (
+	"context"
+	"maps"
+	"slices"
+
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/agentext"
+)
+
+// Session is one chat a harness keeps outside the ACP surface it lists.
+type Session struct {
+	ID        string
+	Cwd       string
+	Title     string
+	UpdatedAt string
+}
+
+// SessionSource lists a harness's native chats, which its ACP adapter omits
+// from session/list.
+type SessionSource interface {
+	Sessions(ctx context.Context, cwd string) ([]Session, error)
+}
 
 // Profile is one harness's deviations from plain ACP.
 type Profile struct {
@@ -12,6 +32,12 @@ type Profile struct {
 	ID string
 	// LaunchEnv is set on the agent process. Caller overrides win.
 	LaunchEnv map[string]string
+	// Sessions lists chats the harness's ACP adapter leaves out of session/list.
+	// nil when the harness lists everything itself.
+	Sessions SessionSource
+	// Extensions are the agent-independent payload transformers this harness
+	// registers. Empty when the harness needs none.
+	Extensions agentext.Set
 }
 
 // Registry resolves profiles by catalog agent id.
@@ -40,4 +66,32 @@ func (r *Registry) LaunchEnv(agentID string) map[string]string {
 		return nil
 	}
 	return maps.Clone(env)
+}
+
+// Extensions returns the payload transformers agentID's profile registers. The
+// returned slice is a copy; the registrations themselves are immutable.
+func (r *Registry) Extensions(agentID string) agentext.Set {
+	if r == nil {
+		return agentext.Set{}
+	}
+	set := r.byID[agentID].Extensions
+	return agentext.Set{Transformers: slices.Clone(set.Transformers)}
+}
+
+// DecorateList extends a final session/list reply with the chats agentID's ACP
+// adapter omits. It returns nil when the profile has no session source or lists
+// nothing new.
+func (r *Registry) DecorateList(ctx context.Context, agentID, cwd string, reply []byte) ([]byte, error) {
+	if r == nil {
+		return nil, nil
+	}
+	source := r.byID[agentID].Sessions
+	if source == nil {
+		return nil, nil
+	}
+	sessions, err := source.Sessions(ctx, cwd)
+	if err != nil || len(sessions) == 0 {
+		return nil, err
+	}
+	return mergeSessionList(reply, sessions), nil
 }

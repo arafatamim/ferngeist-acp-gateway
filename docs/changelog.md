@@ -94,6 +94,11 @@ against the code.
   exists. Reinstalls and package upgrades preserve this snapshot by default.
   (2026-11-11, unreleased)
 
+- `[additive]` An ACP `session/list` reply from Hermes Agent also carries the
+  chats Hermes's TUI, desktop and web clients created. The gateway reads them
+  from Hermes's local session store and appends them to the reply's final page;
+  the agent's own rows, order and cursor are unchanged. (2026-11-11, unreleased)
+
 - `[additive]` The agent catalog includes the locally installed OpenClaw ACP
   bridge on Linux and macOS, plus Hermes Agent, Oh My Pi, DeepSeek Harness,
   Reasonix, Letta ACP, OpenHands, and Codewhale. OpenClaw requires a configured,

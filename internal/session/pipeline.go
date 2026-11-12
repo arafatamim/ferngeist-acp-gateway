@@ -1,7 +1,9 @@
 package session
 
 import (
+	"context"
 	"encoding/json"
+	"sync"
 	"time"
 
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/turns"
@@ -75,6 +77,9 @@ type frame struct {
 	// replaced marks a frame this pipeline rewrote itself (swallowed-failure
 	// error), which has already raised its own notification.
 	replaced bool
+	// reject marks a frame whose BeforeState chain rejected it. Canonical stages
+	// still run; forward applies the rejection instead of delivering the body.
+	reject bool
 	// resumed marks the out burst as a gateway-synthesized resume replay: the
 	// load recovery stage replaced the frame with buffered history plus a
 	// success it built itself.
@@ -84,7 +89,7 @@ type frame struct {
 // handleStdoutLine processes one complete agent stdout frame. The frame is
 // parsed once and passed through a fixed ordered list of stages:
 //
-//	request ids → ACP state → turn outcome → load recovery → notifications → forward
+//	request ids → ACP state → turn outcome → load recovery → session list → notifications → forward
 //
 // Every stage reads the same parse, so no two stages can disagree about what
 // the frame is, and each stage is a plain function call rather than a hook.
@@ -107,13 +112,20 @@ func (p *StdioPump) handleStdoutLine(line string) {
 	// Request ids: which client request (if any) this frame answers. Read-only,
 	// so later stages can use the answer without consuming it.
 	f.origin, f.isReply = p.reqIDs.peek(f.probe)
+	p.applyBeforeState(f)
+	if f.reject && f.probe.Method != "" && f.probe.ID != nil {
+		p.answerRejectedAgentRequest(f)
+		return
+	}
 
 	p.observeACPState(f)
 	p.recordOutcome(f)
 	p.applyLoadRecovery(f)
 	p.acp.acceptSession(f)
 	p.notifyFrame(f)
-	p.forward(f)
+	if !p.forwardDecorated(f) {
+		p.forward(f)
+	}
 }
 
 // observeACPState is the ACP-state stage: it feeds the frame into acpState
@@ -173,6 +185,137 @@ func (p *StdioPump) applyLoadRecovery(f *frame) {
 	}
 }
 
+// decoratorTimeout bounds one decorator chain. Only the decorated reply waits;
+// the stdout loop keeps draining other agent frames.
+const decoratorTimeout = 2 * time.Second
+
+// decoratorReads lets shutdown cancel decoration while the writer still accepts
+// the agent's unmodified replies, then wait before its final flush.
+type decoratorReads struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+	sync.WaitGroup
+}
+
+// forwardDecorated runs the decorators registered for this reply. It reports
+// whether it owns the forward: if any entry does I/O (FinalOnly), the whole
+// chain is deferred to one worker, so a slow decorator never stalls the stdout
+// loop and registration order still holds. A chain that cannot run (no client,
+// superseded generation, shutting down) leaves the reply untouched.
+func (p *StdioPump) forwardDecorated(f *frame) bool {
+	chain := p.decoratorsFor(f)
+	if len(chain) == 0 {
+		return false
+	}
+	if !defersDecoration(chain) {
+		p.applyDecorators(p.drainContext(), f, chain)
+		return false
+	}
+	p.clientMu.Lock()
+	reads := p.inFlight
+	if p.closed || reads == nil || reads.ctx.Err() != nil || f.origin.gen != p.connGen {
+		p.clientMu.Unlock()
+		return false
+	}
+	reads.Add(1)
+	p.clientMu.Unlock()
+	go func() {
+		defer reads.Done()
+		p.applyDecorators(reads.ctx, f, chain)
+		// forward still restores the request id and fences a superseded client.
+		p.forward(f)
+	}()
+	return true
+}
+
+// decoratorsFor returns the decorators that apply to this reply, in
+// registration order. A FinalOnly decorator applies only to a final page.
+func (p *StdioPump) decoratorsFor(f *frame) []ReplyDecorator {
+	if !f.isReply || f.probe.Error != nil || len(f.out) == 0 {
+		return nil
+	}
+	final := finalPage(f.out[len(f.out)-1])
+	var chain []ReplyDecorator
+	for _, decorator := range p.replyDecorators {
+		if decorator.Method != f.origin.method {
+			continue
+		}
+		if decorator.FinalOnly && !final {
+			continue
+		}
+		chain = append(chain, decorator)
+	}
+	return chain
+}
+
+// defersDecoration reports whether any decorator in the chain does I/O.
+func defersDecoration(chain []ReplyDecorator) bool {
+	for _, decorator := range chain {
+		if decorator.FinalOnly {
+			return true
+		}
+	}
+	return false
+}
+
+// applyDecorators runs the chain in order over the reply's last page. A nil
+// result leaves the bytes alone; an error stops the chain, and the reply is
+// forwarded as the previous decorator left it.
+func (p *StdioPump) applyDecorators(ctx context.Context, f *frame, chain []ReplyDecorator) {
+	last := len(f.out) - 1
+	if last < 0 || len(chain) == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, decoratorTimeout)
+	defer cancel()
+	reply := []byte(f.out[last])
+	changed := false
+	for _, decorator := range chain {
+		decorated, err := decorator.Decorate(ctx, p.agentID, f.origin.cwd, reply)
+		if err != nil {
+			p.logger.Debug("reply decoration failed", "agent_id", p.agentID, "method", decorator.Method, "error", err)
+			break
+		}
+		if decorated == nil {
+			continue
+		}
+		reply, changed = decorated, true
+	}
+	if !changed {
+		return
+	}
+	f.out[last] = string(reply)
+	if last == 0 {
+		f.line = f.out[last]
+	}
+}
+
+// drainContext is the pump's base context, or the stdout loop's when a test
+// built the pump without one, or a background context otherwise.
+func (p *StdioPump) drainContext() context.Context {
+	if p.ctx != nil {
+		return p.ctx
+	}
+	if p.drainCtx != nil {
+		return p.drainCtx
+	}
+	return context.Background()
+}
+
+// finalPage reports whether a paged reply is its last page: only that page is
+// decorated, so paging never repeats an added row.
+func finalPage(reply string) bool {
+	var top struct {
+		Result struct {
+			NextCursor *string `json:"nextCursor"`
+		} `json:"result"`
+	}
+	if json.Unmarshal([]byte(reply), &top) != nil {
+		return false
+	}
+	return top.Result.NextCursor == nil
+}
+
 // forward is the last stage: it routes the frame(s) to the attached client.
 // It restores the client's own request id on a reply, withholds a reply for a
 // superseded connection (a finished prompt there becomes a _ferngeist/turn_ended
@@ -205,6 +348,14 @@ func (p *StdioPump) forward(f *frame) {
 			usage:      f.probe.Result.Usage,
 			durationMs: time.Since(f.origin.startedAt).Milliseconds(),
 		})
+	}
+	if f.reject {
+		evict = p.rejectToClientLocked(f, out, bound)
+		p.clientMu.Unlock()
+		if evict != nil {
+			_ = evict.CloseNow()
+		}
+		return
 	}
 	// The agent's unanswered requests are not in load history, so the reply that
 	// restores their session carries them. Only for the connection that asked,

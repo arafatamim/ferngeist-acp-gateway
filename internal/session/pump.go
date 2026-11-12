@@ -2,6 +2,7 @@ package session
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/agentext"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/runtime"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/turns"
 	"github.com/coder/websocket"
@@ -144,6 +146,16 @@ type StdioPump struct {
 	// across a disconnect. See LoadRecovery. Nil when disabled.
 	loadRecovery *LoadRecovery
 
+	// ext runs the agent's registered payload transformers; nil when its profile
+	// registers none.
+	ext *agentext.Engine
+
+	// replyDecorators rewrite agent replies before they are forwarded; see
+	// ReplyDecorator for the inline/deferred contract.
+	replyDecorators []ReplyDecorator
+	// Decorator workers belong to the bound client; its writer waits for them on exit.
+	inFlight *decoratorReads // guarded by clientMu
+
 	// turnResults keeps a prompt's outcome when it finishes while no client
 	// is attached (its reply is then dropped): stop reason, usage and
 	// duration per ACP session, flushed ahead of the next session/load or
@@ -181,6 +193,13 @@ type StdioPump struct {
 	lastClientWrite atomic.Int64
 
 	lastStdoutAt time.Time // updated on each agent stdout line; used by reaper to avoid killing active agents
+
+	// ctx is the pump's base context, set before its goroutines start. Inline
+	// transforms read it from both the stdout and the client goroutines.
+	ctx context.Context
+	// drainCtx is the stdout loop's context, for inline decorators. nil when the
+	// stage runs outside a loop.
+	drainCtx     context.Context
 	lastStdoutMu sync.Mutex
 }
 
@@ -197,6 +216,7 @@ func (p *StdioPump) StdoutDrainLoop(ctx context.Context) {
 	// the drain loop exits, which closed the client WebSocket with no log
 	// ("connection dropped while loading a session"). readStdoutFrame keeps
 	// frames up to maxAgentFrameBytes and discards the rest of a longer line.
+	p.drainCtx = ctx
 	reader := bufio.NewReader(p.proc.Stdout)
 drain:
 	for {
@@ -224,6 +244,29 @@ drain:
 		}
 	}
 
+	p.finishClient()
+}
+
+// finishClient cancels decoration before the writer flushes, so an agent's
+// final list reply still reaches the client when stdout closes immediately.
+func (p *StdioPump) finishClient() {
+	if p.ext != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), extensionCloseTimeout)
+		if err := p.ext.Close(ctx); err != nil {
+			p.logger.Warn("extension workers did not stop before the deadline", "error", err)
+		}
+		cancel()
+	}
+	p.clientMu.Lock()
+	p.closed = true
+	reads := p.inFlight
+	if reads != nil {
+		reads.cancel()
+	}
+	p.clientMu.Unlock()
+	if reads != nil {
+		reads.Wait()
+	}
 	// After the loop exits (ctx cancelled, agent stdout closed, or read error),
 	// stop the writer and wait for it to flush its queue, then close the
 	// attached client WebSocket. This unblocks proxyWebSocketToStdio's read
@@ -233,7 +276,6 @@ drain:
 	p.clientMu.Lock()
 	conn := p.client
 	done := p.writerDone
-	p.closed = true
 	p.stopWriterLocked()
 	p.clientMu.Unlock()
 	if done != nil {
@@ -258,6 +300,7 @@ func (p *StdioPump) stopWriterLocked() {
 	p.writerQ = nil
 	p.writerCtx = nil
 	p.writerDone = nil
+	p.inFlight = nil
 }
 
 // readStdoutFrame reads one newline-delimited stdout frame.
@@ -330,12 +373,18 @@ func (p *StdioPump) queueLocked(frames []string) *websocket.Conn {
 		p.logger.Warn("client backlog exceeds cap; disconnecting client",
 			"runtime_id", p.runtimeID, "session_id", p.sessionID,
 			"cap_bytes", maxClientQueueBytes, "dropped_total", dropped)
-		evict := p.client
-		p.client = nil
-		p.stopWriterLocked()
-		return evict
+		return p.evictClientLocked()
 	}
 	return nil
+}
+
+// evictClientLocked detaches the bound client and stops its writer, returning
+// the connection for the caller to close after releasing clientMu.
+func (p *StdioPump) evictClientLocked() *websocket.Conn {
+	evict := p.client
+	p.client = nil
+	p.stopWriterLocked()
+	return evict
 }
 
 // queueClientReply builds and queues a gateway reply only for the connection
@@ -365,6 +414,17 @@ func (p *StdioPump) queueClientReply(gen int64, build func() []string) {
 // from a superseded connection is withheld rather than sent to its successor.
 func (p *StdioPump) WriteToAgent(gen int64, payload []byte) error {
 	f := parseClientFrame(payload)
+	if selector, ok := inboundSelector(f); ok {
+		effective, rejected := p.beforeState(p.drainContext(), selector, payload)
+		if rejected {
+			p.rejectInbound(gen, f)
+			return nil
+		}
+		if !bytes.Equal(effective, payload) {
+			payload = effective
+			f = parseClientFrame(payload)
+		}
+	}
 	if f.Method == "session/prompt" {
 		p.promptWriteMu.Lock()
 		defer p.promptWriteMu.Unlock()
@@ -484,9 +544,13 @@ func (p *StdioPump) startWriterLocked(conn *websocket.Conn) {
 	p.writerQ = q
 	done := make(chan struct{})
 	p.writerDone = done
+	readCtx, readCancel := context.WithCancel(ctx)
+	reads := &decoratorReads{ctx: readCtx, cancel: readCancel}
+	p.inFlight = reads
 	go func() {
 		defer close(done)
 		p.clientWriterLoop(ctx, conn, q)
+		reads.Wait()
 	}()
 }
 

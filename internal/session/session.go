@@ -23,6 +23,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/agentext"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/push"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/runtime"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/storage"
@@ -75,6 +76,20 @@ type SessionSummary struct {
 	AcpSessionIDs []string `json:"acpSessionIds"`
 }
 
+// ReplyDecorator rewrites one agent reply before the pump forwards it, so a
+// harness can present what its ACP adapter omits.
+type ReplyDecorator struct {
+	// Method is the ACP method whose replies this decorator rewrites.
+	Method string
+	// FinalOnly runs the decorator off the stdout loop and only on the last page
+	// of a paged reply (no nextCursor). Only a FinalOnly decorator may do I/O: an
+	// inline one runs on the drain loop and must never block it.
+	FinalOnly bool
+	// Decorate returns the reply to forward, or nil to leave it unchanged. cwd is
+	// the request's cwd when the method carries one.
+	Decorate func(ctx context.Context, agentID, cwd string, reply []byte) ([]byte, error)
+}
+
 // Config holds session-level tunables from the daemon configuration.
 type Config struct {
 	// MaxDisconnected is how long a disconnected session survives before the reaper closes it.
@@ -95,6 +110,17 @@ type Config struct {
 	// The daemon injects workspace.Service.BranchOf; the session layer keeps
 	// only this narrow lookup, not the whole workspace service.
 	BranchOf func(ctx context.Context, cwd string) string
+	// Extensions resolves the payload transformers registered for an agent's
+	// harness profile. nil, or a set with no transformers, passes frames through
+	// unchanged.
+	Extensions func(agentID string) agentext.Set
+	// ExtensionBudget is the daemon-wide budget every session's extension engine
+	// shares. nil keeps only the per-engine limits.
+	ExtensionBudget *agentext.Budget
+	// ReplyDecorators rewrite agent replies before the pump forwards them. The
+	// daemon registers them as data; an inline decorator runs on the stdout loop,
+	// a FinalOnly one on a worker. nil-able — when nil, replies pass through.
+	ReplyDecorators []ReplyDecorator
 	// GatewayID is this gateway's stable instance id, sent as the server identity
 	// in push notifications so clients can deep-link into the right chat.
 	GatewayID string

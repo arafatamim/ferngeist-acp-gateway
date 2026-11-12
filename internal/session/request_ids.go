@@ -83,6 +83,8 @@ type pendingRequest struct {
 	startedAt time.Time
 	// The ACP session a session/load restores; empty for every other method.
 	loadSession string
+	// The request's cwd when its method carries one; empty when it lists every folder.
+	cwd string
 }
 
 func ownerKey(gen int64, clientID json.RawMessage) string {
@@ -120,6 +122,8 @@ func (r *requestIDs) outbound(gen int64, f *clientFrame) []byte {
 		origin.startedAt = time.Now()
 	case "session/load", "session/resume":
 		origin.loadSession = f.Params.SessionID
+	case "session/list":
+		origin.cwd = f.Params.Cwd
 	}
 
 	r.mu.Lock()

@@ -1595,6 +1595,7 @@ prompt runs, and always fire on each tool call that completes or fails.
     prompt's turn then ends with `_ferngeist/turn_ended`), as are the
     gateway's own answers to it.
   - A `session/prompt` result carries the turn's length as `_meta.ferngeist.durationMs`, measured on the gateway from the prompt's arrival to the agent's reply. A client that heard the reply late (a stalled connection) can time the turn with it instead of its own clock. The agent's own `_meta` keys are kept.
+  - **`session/list` augmentation.** Some harnesses keep chats outside the ACP surface their adapter lists. For Hermes Agent, the gateway appends the chats Hermes's TUI, desktop and web clients created to the **final page** of the agent's `session/list` reply (`nextCursor` absent or `null`); the agent's own rows, order and cursor are unchanged. Ids the agent already listed on that page are not repeated, and only the final page is extended, so the gateway does not repeat a chat it adds. The merge assumes the adapter does not list those native surfaces itself (Hermes currently does not); the harness profile is dropped if that changes. The harness's own owner resumes these chats on `session/load`, so they are ordinary sessions once listed.
 
 ### Attach tokens
 

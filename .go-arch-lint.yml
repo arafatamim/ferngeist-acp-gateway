@@ -30,6 +30,7 @@ components:
   api: { in: internal/api }
   adminclient: { in: internal/adminclient }
   # domain
+  agentext: { in: internal/agentext }
   catalog: { in: internal/catalog }
   harness: { in: internal/harness }
   push: { in: internal/push }
@@ -87,8 +88,8 @@ deps:
   adminclient:
     mayDependOn: *transport
 
-  # domain tier 0, shared kernel: the agent catalog, harness profiles and the
-  # notification port.
+  # domain tier 0, shared kernel: the agent catalog, harness profiles, agent
+  # extension contracts and the notification port.
   catalog:
     mayDependOn: &infra [storage, registry, discovery, service]
   push:
@@ -112,10 +113,14 @@ deps:
 
   # domain tier 3: things that drive a running agent.
   session:
-    mayDependOn: [turns, runtime, acquire, catalog, push, storage, registry, discovery, service]
+    mayDependOn: [agentext, turns, runtime, acquire, catalog, push, storage, registry, discovery, service]
   customagents:
     mayDependOn: [runtime, acquire, catalog, push, storage, registry, discovery, service]
   projects:
     mayDependOn: [runtime, workspace, acquire, catalog, push, storage, registry, discovery, service]
 
-  # harness, the infra packages and cmd-mock-agent have no entry: no project imports beyond config/logging.
+  # harness depends only on the tier-0 extension contracts; agentext itself, the
+  # infra packages and cmd-mock-agent have no entry: no project imports beyond
+  # config/logging.
+  harness:
+    mayDependOn: [agentext]

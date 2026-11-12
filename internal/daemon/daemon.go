@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/acquire"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/agentext"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/api"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/caffeine"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/catalog"
@@ -38,6 +39,10 @@ import (
 // "component=tsnet" Debug entries instead of raw stderr text; the default
 // drops them so the package-level seam needs no logger.
 var tsnetLogf = func(string, ...any) {}
+
+// agentExtensionBudget bounds the bytes every session's extension engine may
+// retain together.
+const agentExtensionBudget = 16 << 20
 
 // tsnetUserLogf receives tsnet's user-facing lines (state path, login link,
 // auth loop). Run points it at the daemon's structured logger at Info level —
@@ -349,6 +354,8 @@ func newAgentRuntime(cfg config.Config, logger *slog.Logger, store *storage.SQLi
 
 func composeServer(deps api.Deps, store *storage.SQLiteStore) (*api.Server, *session.RuntimeSession) {
 	cfg, logger := deps.Config, deps.Logger
+	profiles := harness.Default()
+	extensionBudget := agentext.NewBudget(agentExtensionBudget)
 	// The push path only needs the branch behind a chat's cwd, so the session
 	// layer gets that one workspace lookup rather than the whole workspace
 	// service, whose full instance (with its chat callback) is composed below.
@@ -356,11 +363,18 @@ func composeServer(deps api.Deps, store *storage.SQLiteStore) (*api.Server, *ses
 	// so the two never contend.
 	worktrees := workspace.New(func() *storage.SQLiteStore { return store }, logger, time.Now, nil)
 	sessionSvc := session.NewRuntimeSession(logger, store, deps.Runtime, session.NewTokenService(logger), session.Config{
-		MaxDisconnected:    cfg.SessionMaxDisconnected,
-		MaxPerDevice:       cfg.MaxSessionsPerDevice,
-		ProgressInterval:   cfg.ProgressInterval,
-		PushSvc:            deps.Push,
-		BranchOf:           worktrees.BranchOf,
+		MaxDisconnected:  cfg.SessionMaxDisconnected,
+		MaxPerDevice:     cfg.MaxSessionsPerDevice,
+		ProgressInterval: cfg.ProgressInterval,
+		PushSvc:          deps.Push,
+		BranchOf:         worktrees.BranchOf,
+		Extensions:       profiles.Extensions,
+		ExtensionBudget:  extensionBudget,
+		ReplyDecorators: []session.ReplyDecorator{{
+			Method:    "session/list",
+			FinalOnly: true,
+			Decorate:  profiles.DecorateList,
+		}},
 		GatewayID:          cfg.GatewayID,
 		FrameLogEnabled:    cfg.FrameLogEnabled,
 		FrameLogDir:        cfg.LogDir,

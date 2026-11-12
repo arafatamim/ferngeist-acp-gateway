@@ -49,6 +49,14 @@ func (rs *RuntimeSession) create(ctx context.Context, agent catalog.Agent, devic
 	sessionID := generateID()
 	rs.mu.Unlock()
 
+	// Build the extension snapshot before the process exists: an invalid profile
+	// fails the connect rather than leaving the session without its transforms.
+	extensions, err := extensionRegistry(rs.cfg, agent.ID)
+	if err != nil {
+		rs.releaseLaunchSlot(deviceID)
+		return nil, "", err
+	}
+
 	// Connecting starts the agent: the session owns the process it launches.
 	proc, err := rs.runtimeSvc.Launch(agent, env)
 	if err != nil {
@@ -98,6 +106,7 @@ func (rs *RuntimeSession) create(ctx context.Context, agent catalog.Agent, devic
 	}
 
 	pump := &StdioPump{
+		ctx:                pumpCtx,
 		proc:               proc,
 		runtimeID:          runtimeID,
 		sessionID:          sessionID,
@@ -113,6 +122,8 @@ func (rs *RuntimeSession) create(ctx context.Context, agent catalog.Agent, devic
 		ProgressInterval: rs.cfg.ProgressInterval,
 		frameLog:         rs.frameLog,
 		loadRecovery:     newLoadRecovery(rs.logger),
+		ext:              bindExtensions(pumpCtx, rs.cfg, extensions, agent.ID, runtimeID, sessionID),
+		replyDecorators:  rs.cfg.ReplyDecorators,
 	}
 
 	go pump.StdoutDrainLoop(pumpCtx)
