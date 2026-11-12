@@ -77,21 +77,3 @@ func (r *Registry) Extensions(agentID string) agentext.Set {
 	set := r.byID[agentID].Extensions
 	return agentext.Set{Transformers: slices.Clone(set.Transformers)}
 }
-
-// DecorateList extends a final session/list reply with the chats agentID's ACP
-// adapter omits. It returns nil when the profile has no session source or lists
-// nothing new.
-func (r *Registry) DecorateList(ctx context.Context, agentID, cwd string, reply []byte) ([]byte, error) {
-	if r == nil {
-		return nil, nil
-	}
-	source := r.byID[agentID].Sessions
-	if source == nil {
-		return nil, nil
-	}
-	sessions, err := source.Sessions(ctx, cwd)
-	if err != nil || len(sessions) == 0 {
-		return nil, err
-	}
-	return mergeSessionList(reply, sessions), nil
-}

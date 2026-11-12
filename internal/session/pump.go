@@ -150,12 +150,6 @@ type StdioPump struct {
 	// registers none.
 	ext *agentext.Engine
 
-	// replyDecorators rewrite agent replies before they are forwarded; see
-	// ReplyDecorator for the inline/deferred contract.
-	replyDecorators []ReplyDecorator
-	// Decorator workers belong to the bound client; its writer waits for them on exit.
-	inFlight *decoratorReads // guarded by clientMu
-
 	// turnResults keeps a prompt's outcome when it finishes while no client
 	// is attached (its reply is then dropped): stop reason, usage and
 	// duration per ACP session, flushed ahead of the next session/load or
@@ -196,10 +190,7 @@ type StdioPump struct {
 
 	// ctx is the pump's base context, set before its goroutines start. Inline
 	// transforms read it from both the stdout and the client goroutines.
-	ctx context.Context
-	// drainCtx is the stdout loop's context, for inline decorators. nil when the
-	// stage runs outside a loop.
-	drainCtx     context.Context
+	ctx          context.Context
 	lastStdoutMu sync.Mutex
 }
 
@@ -216,7 +207,6 @@ func (p *StdioPump) StdoutDrainLoop(ctx context.Context) {
 	// the drain loop exits, which closed the client WebSocket with no log
 	// ("connection dropped while loading a session"). readStdoutFrame keeps
 	// frames up to maxAgentFrameBytes and discards the rest of a longer line.
-	p.drainCtx = ctx
 	reader := bufio.NewReader(p.proc.Stdout)
 drain:
 	for {
@@ -247,8 +237,8 @@ drain:
 	p.finishClient()
 }
 
-// finishClient cancels decoration before the writer flushes, so an agent's
-// final list reply still reaches the client when stdout closes immediately.
+// finishClient stops extension work and the client writer when agent stdout
+// ends, so a final queued reply still reaches the client.
 func (p *StdioPump) finishClient() {
 	if p.ext != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), extensionCloseTimeout)
@@ -257,23 +247,15 @@ func (p *StdioPump) finishClient() {
 		}
 		cancel()
 	}
+	p.reqIDs.releasePendingParams()
 	p.clientMu.Lock()
 	p.closed = true
-	reads := p.inFlight
-	if reads != nil {
-		reads.cancel()
-	}
-	p.clientMu.Unlock()
-	if reads != nil {
-		reads.Wait()
-	}
 	// After the loop exits (ctx cancelled, agent stdout closed, or read error),
 	// stop the writer and wait for it to flush its queue, then close the
 	// attached client WebSocket. This unblocks proxyWebSocketToStdio's read
 	// loop so handleSessionWebSocket can clean up the connection. Without this,
 	// a dead agent — whose stdout pipe has closed — leaves the WebSocket open
 	// and the client waiting forever.
-	p.clientMu.Lock()
 	conn := p.client
 	done := p.writerDone
 	p.stopWriterLocked()
@@ -300,7 +282,6 @@ func (p *StdioPump) stopWriterLocked() {
 	p.writerQ = nil
 	p.writerCtx = nil
 	p.writerDone = nil
-	p.inFlight = nil
 }
 
 // readStdoutFrame reads one newline-delimited stdout frame.
@@ -544,13 +525,9 @@ func (p *StdioPump) startWriterLocked(conn *websocket.Conn) {
 	p.writerQ = q
 	done := make(chan struct{})
 	p.writerDone = done
-	readCtx, readCancel := context.WithCancel(ctx)
-	reads := &decoratorReads{ctx: readCtx, cancel: readCancel}
-	p.inFlight = reads
 	go func() {
 		defer close(done)
 		p.clientWriterLoop(ctx, conn, q)
-		reads.Wait()
 	}()
 }
 

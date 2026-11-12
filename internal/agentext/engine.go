@@ -122,7 +122,7 @@ func (e *Engine) TransformInline(ctx context.Context, in TransformInput) (Payloa
 	}
 	in.Message.Identity = e.identity
 	res := &reservation{engine: e}
-	if err := res.add(len(in.Message.Body.body)); err != nil {
+	if err := res.add(len(in.Message.Body.body) + len(in.Message.RequestParams.body)); err != nil {
 		return e.failed(chain, in.Stage, in.Message.Body, err)
 	}
 	defer res.release()
@@ -150,7 +150,7 @@ func (e *Engine) SubmitTransform(ctx context.Context, in TransformInput, done fu
 	}
 	in.Message.Identity = e.identity
 	res := &reservation{engine: e}
-	if err := res.add(len(in.Message.Body.body)); err != nil {
+	if err := res.add(len(in.Message.Body.body) + len(in.Message.RequestParams.body)); err != nil {
 		return err
 	}
 	jobCtx, cancel := context.WithTimeout(ctx, deferredTimeout)
@@ -161,6 +161,41 @@ func (e *Engine) SubmitTransform(ctx context.Context, in TransformInput, done fu
 		return err
 	}
 	return nil
+}
+
+// Retain charges n bytes of correlated data, such as a request's params, until
+// the returned release runs. It refuses before the caller copies anything when
+// the operation, engine or shared budget cannot hold them.
+func (e *Engine) Retain(n int) (func(), bool) {
+	if n <= 0 {
+		return func() {}, true
+	}
+	res := &reservation{engine: e}
+	if err := res.add(n); err != nil {
+		return nil, false
+	}
+	var once sync.Once
+	return func() { once.Do(res.release) }, true
+}
+
+// Mode returns the execution mode of the chain matching selector and stage, and
+// false when nothing matches.
+func (e *Engine) Mode(selector Selector, stage Stage) (Mode, bool) {
+	chain, mode := e.resolve(TransformInput{Message: Message{Selector: selector}, Stage: stage})
+	if len(chain) == 0 {
+		return Inline, false
+	}
+	return mode, true
+}
+
+// Failure returns the failure policy of the chain matching selector and stage,
+// and false when nothing matches.
+func (e *Engine) Failure(selector Selector, stage Stage) (Failure, bool) {
+	chain, _ := e.resolve(TransformInput{Message: Message{Selector: selector}, Stage: stage})
+	if len(chain) == 0 {
+		return KeepOriginal, false
+	}
+	return chain[0].Failure, true
 }
 
 // Close stops admission, drains queued jobs without running their callbacks,
@@ -244,6 +279,12 @@ func (e *Engine) runJob(job transformJob) {
 		return
 	}
 	out, err := e.executeChain(job.ctx, job.chain, job.input, job.reserve)
+	if err == nil {
+		if ctxErr := job.ctx.Err(); ctxErr != nil {
+			// The deadline or the caller won the race: discard the late result.
+			out, err = e.failed(job.chain, job.input.Stage, job.input.Message.Body, ctxErr)
+		}
+	}
 	job.done(out, err)
 }
 

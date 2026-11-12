@@ -123,7 +123,6 @@ func (rs *RuntimeSession) create(ctx context.Context, agent catalog.Agent, devic
 		frameLog:         rs.frameLog,
 		loadRecovery:     newLoadRecovery(rs.logger),
 		ext:              bindExtensions(pumpCtx, rs.cfg, extensions, agent.ID, runtimeID, sessionID),
-		replyDecorators:  rs.cfg.ReplyDecorators,
 	}
 
 	go pump.StdoutDrainLoop(pumpCtx)

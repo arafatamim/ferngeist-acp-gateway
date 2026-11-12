@@ -61,7 +61,8 @@ func Hermes() Profile {
 }
 
 func hermesAt(home string) Profile {
-	return Profile{ID: "hermes", Sessions: hermesSessions{path: filepath.Join(home, "state.db")}}
+	sessions := hermesSessions{path: filepath.Join(home, "state.db")}
+	return Profile{ID: "hermes", Sessions: sessions, Extensions: hermesExtensions(sessions)}
 }
 
 func hermesHome() string {

@@ -1,407 +1,333 @@
 package session
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
-	"net/http"
-	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
-	"github.com/arafatamim/ferngeist-acp-gateway/internal/runtime"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/agentext"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/turns"
+	"github.com/coder/acp-go-sdk"
 	"github.com/coder/websocket"
 )
 
-func newSessionListPump(t *testing.T, decorate func(context.Context, string, string, []byte) ([]byte, error)) (*StdioPump, *websocket.Conn) {
+// attachPresentation binds a BeforeDelivery engine with an optional shared
+// budget, closing it when the test ends.
+func attachPresentation(t *testing.T, p *StdioPump, budget *agentext.Budget, transformers ...agentext.Transformer) {
 	t.Helper()
-	return newDecoratedPump(t, ReplyDecorator{Method: "session/list", FinalOnly: true, Decorate: decorate})
-}
-
-func newDecoratedPump(t *testing.T, decorators ...ReplyDecorator) (*StdioPump, *websocket.Conn) {
-	t.Helper()
-	serverCh := make(chan *websocket.Conn, 1)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := websocket.Accept(w, r, nil)
-		if err == nil {
-			serverCh <- conn
-		}
-	}))
-	t.Cleanup(srv.Close)
-	client, _, err := websocket.Dial(context.Background(), "ws://"+srv.Listener.Addr().String()+"/", nil)
+	registry, err := agentext.New(agentext.Set{Transformers: transformers})
 	if err != nil {
-		t.Fatalf("dial client: %v", err)
+		t.Fatalf("agentext.New: %v", err)
 	}
-	t.Cleanup(func() { _ = client.CloseNow() }) // Test teardown: no handshake to wait on.
-	p := &StdioPump{
-		agentID: "hermes", logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		replyDecorators: decorators,
-	}
-	gen := p.Attach()
-	if !p.Bind(<-serverCh, gen) {
-		t.Fatal("Bind should succeed")
-	}
-	done := p.writerDone
-	t.Cleanup(func() { p.Detach(gen); <-done })
-	return p, client
-}
-
-func startSessionListDrain(t *testing.T, p *StdioPump) (*io.PipeWriter, context.CancelFunc) {
-	t.Helper()
-	r, w := io.Pipe()
-	p.proc = &runtime.Process{Stdout: r}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		p.StdoutDrainLoop(ctx)
-	}()
+	p.ext = registry.Bind(context.Background(),
+		agentext.Identity{AgentID: p.agentID, RuntimeID: p.runtimeID, SessionID: p.sessionID}, budget,
+		slog.New(slog.NewTextHandler(io.Discard, nil)))
 	t.Cleanup(func() {
-		cancel()
-		_ = w.Close() // Unblock the pipe read during teardown.
-		<-done
-		_ = r.Close() // The test owns both pipe ends.
-	})
-	return w, cancel
-}
-
-// decorateNative replaces the reply's empty session list with one native chat,
-// so a test can tell the decorator's bytes from the agent's.
-func decorateNative(reply []byte) []byte {
-	return bytes.Replace(reply, []byte(`"sessions":[]`),
-		[]byte(`"sessions":[{"sessionId":"native","cwd":"/work","title":"TUI chat"}]`), 1)
-}
-
-func TestSessionListDecorationDoesNotDelayFollowingFrames(t *testing.T) {
-	entered, release := make(chan struct{}), make(chan struct{})
-	p, client := newSessionListPump(t, func(ctx context.Context, _, _ string, reply []byte) ([]byte, error) {
-		close(entered)
-		select {
-		case <-release:
-			return decorateNative(reply), nil
-		case <-ctx.Done():
-			return nil, ctx.Err()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := p.ext.Close(ctx); err != nil {
+			t.Errorf("Close extensions: %v", err)
 		}
 	})
-	w, _ := startSessionListDrain(t, p)
-	request := parseClientFrame([]byte(`{"jsonrpc":"2.0","id":"list","method":"session/list","params":{}}`))
-	p.prepareOutbound(p.connGen, request)
-	const notification = `{"jsonrpc":"2.0","method":"agent/progress","params":{}}`
-	reply := `{"jsonrpc":"2.0","id":` + string(request.ID) + `,"result":{"sessions":[]}}`
-	if _, err := w.Write([]byte(reply + "\n" + notification + "\n")); err != nil {
-		t.Fatal(err)
-	}
-	<-entered
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	_, msg, err := client.Read(ctx)
-	if err != nil {
-		t.Fatalf("following frame stalled behind decoration: %v", err)
-	}
-	if string(msg) != notification {
-		t.Fatalf("first frame = %s, want the progress notification", msg)
-	}
-	close(release)
-	_, msg, err = client.Read(ctx)
-	if err != nil {
-		t.Fatalf("read decorated reply: %v", err)
-	}
-	got := decodeSessionList(t, string(msg))
-	if len(got.Result.Sessions) != 1 || got.Result.Sessions[0].SessionID != "native" {
-		t.Fatalf("sessions = %+v, want native", got.Result.Sessions)
-	}
-	var decoded struct {
-		ID string `json:"id"`
-	}
-	if err := json.Unmarshal(msg, &decoded); err != nil || decoded.ID != "list" {
-		t.Fatalf("reply = %s, want the client's list id (error %v)", msg, err)
+}
+
+func deferredReply(name, method string, failure agentext.Failure, run agentext.TransformFunc) agentext.Transformer {
+	return agentext.Transformer{
+		Name:             name,
+		Selector:         agentext.Selector{Direction: agentext.ToClient, Kind: agentext.Reply, Method: agentext.Method(method)},
+		Stage:            agentext.BeforeDelivery,
+		Mode:             agentext.Deferred,
+		Failure:          failure,
+		IndependentReply: true,
+		Run:              run,
 	}
 }
 
-func TestSessionListDecorationIsCancelledWhenThePumpStops(t *testing.T) {
-	entered := make(chan context.Context, 1)
-	p, client := newSessionListPump(t, func(ctx context.Context, _, _ string, _ []byte) ([]byte, error) {
-		entered <- ctx
-		<-ctx.Done()
-		return nil, ctx.Err()
-	})
-	w, cancel := startSessionListDrain(t, p)
-	request := parseClientFrame([]byte(`{"jsonrpc":"2.0","id":1,"method":"session/list","params":{}}`))
-	p.prepareOutbound(p.connGen, request)
-	if _, err := w.Write([]byte(`{"jsonrpc":"2.0","id":` + string(request.ID) + `,"result":{"sessions":[]}}` + "\n")); err != nil {
-		t.Fatal(err)
-	}
-	readCtx := <-entered
-	cancel()
-	_ = w.Close() // Closing stdout wakes the drain so it can finish teardown.
-	select {
-	case <-readCtx.Done():
-		if readCtx.Err() != context.Canceled {
-			t.Fatalf("decorator error = %v, want pump cancellation", readCtx.Err())
-		}
-	case <-time.After(time.Second):
-		t.Fatal("decoration outlived pump shutdown")
-	}
-	ctx, stop := context.WithTimeout(context.Background(), time.Second)
-	defer stop()
-	_, msg, err := client.Read(ctx)
-	if err != nil {
-		t.Fatalf("shutdown lost the agent's list reply: %v", err)
-	}
-	var reply struct {
-		ID     int `json:"id"`
-		Result *struct {
-			Sessions []json.RawMessage `json:"sessions"`
-		} `json:"result"`
-	}
-	if err := json.Unmarshal(msg, &reply); err != nil {
-		t.Fatal(err)
-	}
-	if reply.ID != 1 || reply.Result == nil || len(reply.Result.Sessions) != 0 {
-		t.Fatalf("shutdown reply = %s, want the original empty list with client id 1", msg)
-	}
+func inlineReply(name, method string, run agentext.TransformFunc) agentext.Transformer {
+	transformer := deferredReply(name, method, agentext.KeepOriginal, run)
+	transformer.Mode = agentext.Inline
+	return transformer
 }
 
-func TestSessionListHandsTheRequestToTheDecorator(t *testing.T) {
-	var gotAgent, gotCwd string
-	var gotReply []byte
-	const decorated = `{"jsonrpc":"2.0","id":7,"result":{"sessions":[{"sessionId":"native"}]}}`
-	p := &StdioPump{
-		agentID: "hermes",
-		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
-		replyDecorators: []ReplyDecorator{{
-			Method:    "session/list",
-			FinalOnly: true,
-			Decorate: func(_ context.Context, agentID, cwd string, reply []byte) ([]byte, error) {
-				gotAgent, gotCwd, gotReply = agentID, cwd, reply
-				return []byte(decorated), nil
-			},
-		}},
-	}
-	reply := `{"jsonrpc":"2.0","id":7,"result":{"sessions":[],"nextCursor":null}}`
-	f := &frame{
-		line:    reply,
-		out:     []string{reply},
-		isReply: true,
-		origin:  pendingRequest{method: "session/list", cwd: "/work"},
-	}
-
-	p.applyDecorators(context.Background(), f, p.decoratorsFor(f))
-
-	if gotAgent != "hermes" || gotCwd != "/work" {
-		t.Errorf("decorator queried with agent=%q cwd=%q, want hermes /work", gotAgent, gotCwd)
-	}
-	if string(gotReply) != reply {
-		t.Errorf("decorator reply = %s, want the agent's own bytes", gotReply)
-	}
-	if f.out[0] != decorated || f.line != decorated {
-		t.Errorf("forwarded reply = %s (line %s), want the decorator's", f.out[0], f.line)
-	}
-}
-
-func TestSessionListPassesThroughWhenDecorationFails(t *testing.T) {
-	p := &StdioPump{
-		agentID: "hermes",
-		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
-		replyDecorators: []ReplyDecorator{{
-			Method:    "session/list",
-			FinalOnly: true,
-			Decorate: func(context.Context, string, string, []byte) ([]byte, error) {
-				return nil, context.DeadlineExceeded
-			},
-		}},
-	}
-	reply := `{"jsonrpc":"2.0","id":7,"result":{"sessions":[],"nextCursor":null}}`
-	f := &frame{
-		line:    reply,
-		out:     []string{reply},
-		isReply: true,
-		origin:  pendingRequest{method: "session/list"},
-	}
-
-	p.applyDecorators(context.Background(), f, p.decoratorsFor(f))
-
-	if f.out[0] != reply {
-		t.Errorf("reply after decorator failure = %s, want it untouched", f.out[0])
-	}
-}
-
-func TestSessionListLeavesPagesWithACursorAlone(t *testing.T) {
-	called := false
-	p, _ := newSessionListPump(t, func(_ context.Context, _, _ string, reply []byte) ([]byte, error) {
-		called = true
-		return decorateNative(reply), nil
-	})
-	reply := `{"jsonrpc":"2.0","id":7,"result":{"sessions":[],"nextCursor":"next"}}`
-	f := &frame{
-		line:    reply,
-		out:     []string{reply},
-		isReply: true,
-		origin:  pendingRequest{method: "session/list", gen: p.connGen},
-	}
-
-	if p.forwardDecorated(f) {
-		t.Fatal("a page with a cursor was deferred for decoration")
-	}
-	if called {
-		t.Error("the decorator ran for a page that is not the last")
-	}
-	if f.out[0] != reply {
-		t.Errorf("paged reply = %s, want it untouched", f.out[0])
-	}
-}
-
-func TestReplyDecoratorIgnoresOtherMethods(t *testing.T) {
-	called := false
-	p := &StdioPump{
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		replyDecorators: []ReplyDecorator{{
-			Method:    "session/list",
-			FinalOnly: true,
-			Decorate: func(context.Context, string, string, []byte) ([]byte, error) {
-				called = true
-				return nil, nil
-			},
-		}},
-	}
-	reply := `{"jsonrpc":"2.0","id":7,"result":{"protocolVersion":1}}`
-	f := &frame{
-		line:    reply,
-		out:     []string{reply},
-		isReply: true,
-		origin:  pendingRequest{method: "session/load"},
-	}
-
-	if p.forwardDecorated(f) {
-		t.Fatal("a reply to another method was deferred for decoration")
-	}
-	if called {
-		t.Error("the session/list decorator ran for a session/load reply")
-	}
-}
-
-func TestReplyDecoratorsRunInRegistrationOrder(t *testing.T) {
-	reply := `{"jsonrpc":"2.0","id":7,"result":{"sessions":[],"nextCursor":null}}`
-	p := &StdioPump{
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		replyDecorators: []ReplyDecorator{
-			{Method: "session/list", Decorate: func(_ context.Context, _, _ string, reply []byte) ([]byte, error) {
-				return append(reply, " one"...), nil
-			}},
-			{Method: "session/list", Decorate: func(_ context.Context, _, _ string, reply []byte) ([]byte, error) {
-				return append(reply, " two"...), nil
-			}},
-		},
-	}
-	f := &frame{
-		line:    reply,
-		out:     []string{reply},
-		isReply: true,
-		origin:  pendingRequest{method: "session/list"},
-	}
-
-	p.applyDecorators(context.Background(), f, p.decoratorsFor(f))
-
-	if want := reply + " one two"; f.out[0] != want || f.line != want {
-		t.Errorf("decorated reply = %s (line %s), want %s", f.out[0], f.line, want)
-	}
-}
-
-func TestInlineReplyDecoratorRunsBeforeForward(t *testing.T) {
-	p, client := newDecoratedPump(t, ReplyDecorator{
-		Method: "session/list",
-		Decorate: func(_ context.Context, _, _ string, reply []byte) ([]byte, error) {
-			return decorateNative(reply), nil
-		},
-	})
-	request := parseClientFrame([]byte(`{"jsonrpc":"2.0","id":"list","method":"session/list","params":{}}`))
-	p.prepareOutbound(p.connGen, request)
-	reply := `{"jsonrpc":"2.0","id":` + string(request.ID) + `,"result":{"sessions":[]}}`
-
-	p.handleStdoutLine(reply)
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	_, msg, err := client.Read(ctx)
-	if err != nil {
-		t.Fatalf("read forwarded reply: %v", err)
-	}
-	got := decodeSessionList(t, string(msg))
-	if len(got.Result.Sessions) != 1 || got.Result.Sessions[0].SessionID != "native" {
-		t.Fatalf("sessions = %+v, want native", got.Result.Sessions)
-	}
-}
-
-type decodedSessionList struct {
-	Result struct {
-		Sessions []struct {
-			SessionID string `json:"sessionId"`
-			Cwd       string `json:"cwd"`
-			Title     string `json:"title"`
-			UpdatedAt string `json:"updatedAt"`
-		} `json:"sessions"`
-		NextCursor *string `json:"nextCursor"`
-	} `json:"result"`
-}
-
-func decodeSessionList(t *testing.T, line string) decodedSessionList {
+// readOne reads exactly one client frame within the test deadline.
+func readOne(t *testing.T, client *websocket.Conn) string {
 	t.Helper()
-	var decoded decodedSessionList
-	if err := json.Unmarshal([]byte(line), &decoded); err != nil {
-		t.Fatalf("decode session/list reply: %v", err)
-	}
-	return decoded
-}
-
-// TestSessionListMergesOnTheForwardedReply runs the client request through the
-// real request-id mapping and the pump's stage list, so the decorator's reply is
-// what the client receives under its own request id.
-func TestSessionListMergesOnTheForwardedReply(t *testing.T) {
-	gotCwd := make(chan string, 1)
-	pump, client := newSessionListPump(t, func(_ context.Context, _, cwd string, reply []byte) ([]byte, error) {
-		gotCwd <- cwd
-		return decorateNative(reply), nil
-	})
-	gen := pump.connGen
-
-	request := parseClientFrame([]byte(
-		`{"jsonrpc":"2.0","id":1,"method":"session/list","params":{"cwd":"/work"}}`))
-	forwarded := pump.prepareOutbound(gen, request)
-	var id struct {
-		ID json.RawMessage `json:"id"`
-	}
-	if err := json.Unmarshal(forwarded, &id); err != nil {
-		t.Fatalf("decode forwarded request: %v", err)
-	}
-	reply := `{"jsonrpc":"2.0","id":` + string(id.ID) + `,"result":{"sessions":[],"nextCursor":null}}`
-	pump.handleStdoutLine(reply)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_, msg, err := client.Read(ctx)
 	if err != nil {
-		t.Fatalf("read forwarded reply: %v", err)
+		t.Fatalf("read frame: %v", err)
 	}
-	var top struct {
-		ID     json.RawMessage `json:"id"`
-		Result struct {
-			Sessions []struct {
-				SessionID string `json:"sessionId"`
-			} `json:"sessions"`
-		} `json:"result"`
+	return string(msg)
+}
+
+// listRequest prepares a session/list request and returns its agent-side id.
+func listRequest(t *testing.T, p *StdioPump, params string) string {
+	t.Helper()
+	frame := fmt.Sprintf(`{"jsonrpc":"2.0","id":"list","method":"session/list","params":%s}`, params)
+	return agentIDOf(t, p.prepareOutbound(p.connGen, parseClientFrame([]byte(frame))))
+}
+
+func newPresentationPump(t *testing.T, budget *agentext.Budget, transformers ...agentext.Transformer) (*StdioPump, *websocket.Conn) {
+	t.Helper()
+	p := newPump()
+	p.agentID, p.sessionID, p.runtimeID = "hermes", "gs", "rt"
+	attachPresentation(t, p, budget, transformers...)
+	_, client := connect(t, p)
+	return p, client
+}
+
+func TestDeferredPresentationMergesOnTheForwardedReply(t *testing.T) {
+	var receivedParams string
+	var calls int
+	appendNative := deferredReply("list", "session/list", agentext.KeepOriginal,
+		func(_ context.Context, in agentext.TransformInput) (agentext.Payload, error) {
+			calls++
+			receivedParams = string(in.Message.RequestParams.Bytes())
+			return rewriteObject(t, in.Message.Body.Bytes(), func(object map[string]json.RawMessage) {
+				object["result"] = json.RawMessage(`{"sessions":[{"sessionId":"native"}]}`)
+			}), nil
+		})
+	p, client := newPresentationPump(t, nil, appendNative)
+	agentID := listRequest(t, p, `{"cwd":"/work"}`)
+	p.handleStdoutLine(fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"result":{"sessions":[]}}`, agentID))
+
+	got := readOne(t, client)
+	if !strings.Contains(got, `"id":"list"`) {
+		t.Fatalf("frame = %s, want the client's original id", got)
 	}
-	if err := json.Unmarshal(msg, &top); err != nil {
-		t.Fatalf("decode forwarded reply: %v", err)
+	if !strings.Contains(got, `"native"`) {
+		t.Fatalf("frame = %s, want the presented native chat", got)
 	}
-	if cwd := <-gotCwd; cwd != "/work" {
-		t.Errorf("decorator queried with cwd %q, want the request's /work", cwd)
+	if calls != 1 || !strings.Contains(receivedParams, `"cwd":"/work"`) {
+		t.Fatalf("calls = %d, params = %q, want one call with the request's params", calls, receivedParams)
 	}
-	if string(top.ID) != "1" {
-		t.Errorf("forwarded reply id = %s, want the client's id 1", top.ID)
+}
+
+func TestDeferredPresentationDoesNotDelayFollowingFrames(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	presented := deferredReply("list", "session/list", agentext.KeepOriginal,
+		func(ctx context.Context, in agentext.TransformInput) (agentext.Payload, error) {
+			close(entered)
+			select {
+			case <-release:
+				return rewriteObject(t, in.Message.Body.Bytes(), func(object map[string]json.RawMessage) {
+					object["result"] = json.RawMessage(`{"sessions":[{"sessionId":"native"}]}`)
+				}), nil
+			case <-ctx.Done():
+				return agentext.Payload{}, ctx.Err()
+			}
+		})
+	p, client := newPresentationPump(t, nil, presented)
+	agentID := listRequest(t, p, `{}`)
+	p.handleStdoutLine(fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"result":{"sessions":[]}}`, agentID))
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("presentation never started")
 	}
-	if len(top.Result.Sessions) != 1 || top.Result.Sessions[0].SessionID != "native" {
-		t.Errorf("forwarded sessions = %+v, want only native", top.Result.Sessions)
+	const notification = `{"jsonrpc":"2.0","method":"agent/progress","params":{}}`
+	p.handleStdoutLine(notification)
+	if got := readOne(t, client); got != notification {
+		t.Fatalf("first frame = %s, want the later notification to overtake the held reply", got)
+	}
+	close(release)
+	if got := readOne(t, client); !strings.Contains(got, `"native"`) {
+		t.Fatalf("second frame = %s, want the presented reply", got)
+	}
+}
+
+func TestStalePresentationIsSkippedEntirely(t *testing.T) {
+	var calls int
+	p, _ := newPresentationPump(t, nil,
+		deferredReply("list", "session/list", agentext.Reject,
+			func(context.Context, agentext.TransformInput) (agentext.Payload, error) {
+				calls++
+				return agentext.Payload{}, fmt.Errorf("refused")
+			}))
+	agentID := listRequest(t, p, `{}`)
+	_, successor := connect(t, p) // a newer connection supersedes the request's generation
+	p.handleStdoutLine(fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"result":{"sessions":[]}}`, agentID))
+
+	if calls != 0 {
+		t.Fatalf("presentation ran %d times for a stale reply", calls)
+	}
+	if got := readFrames(t, p, successor, 0); len(got) != 0 {
+		t.Fatalf("successor saw frames for a stale reply: %q", got)
+	}
+}
+
+func TestPresentationSkipsAgentErrors(t *testing.T) {
+	var calls int
+	p, client := newPresentationPump(t, nil,
+		deferredReply("list", "session/list", agentext.KeepOriginal,
+			func(context.Context, agentext.TransformInput) (agentext.Payload, error) {
+				calls++
+				return agentext.Payload{}, nil
+			}))
+	agentID := listRequest(t, p, `{}`)
+	p.handleStdoutLine(fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"error":{"code":-1,"message":"boom"}}`, agentID))
+
+	if got := readOne(t, client); !strings.Contains(got, `"error"`) {
+		t.Fatalf("frame = %s, want the agent's error untouched", got)
+	}
+	if calls != 0 {
+		t.Fatalf("presentation ran %d times on an agent error", calls)
+	}
+}
+
+func TestDroppedRequestParamsSkipPresentation(t *testing.T) {
+	var calls int
+	transform := deferredReply("list", "session/list", agentext.KeepOriginal,
+		func(context.Context, agentext.TransformInput) (agentext.Payload, error) {
+			calls++
+			return agentext.Payload{}, nil
+		})
+	p, client := newPresentationPump(t, agentext.NewBudget(0), transform)
+	agentID := listRequest(t, p, `{"cwd":"/work"}`)
+	const agentReply = `{"jsonrpc":"2.0","id":%s,"result":{"sessions":[]}}`
+	p.handleStdoutLine(fmt.Sprintf(agentReply, agentID))
+
+	if got := readOne(t, client); !strings.Contains(got, `"sessions":[]`) {
+		t.Fatalf("frame = %s, want the agent's original reply", got)
+	}
+	if calls != 0 {
+		t.Fatalf("presentation ran without its retained params (calls = %d)", calls)
+	}
+}
+
+func TestPresentationUsesTheRegistrationContractForAnotherMethod(t *testing.T) {
+	transform := inlineReply("inspect", "example/inspect",
+		func(_ context.Context, in agentext.TransformInput) (agentext.Payload, error) {
+			return rewriteObject(t, in.Message.Body.Bytes(), func(object map[string]json.RawMessage) {
+				object["result"] = json.RawMessage(`{"transformed":true}`)
+			}), nil
+		})
+	p, client := newPresentationPump(t, nil, transform)
+	agentID := agentIDOf(t, p.prepareOutbound(p.connGen,
+		parseClientFrame([]byte(`{"jsonrpc":"2.0","id":5,"method":"example/inspect","params":{}}`))))
+	p.handleStdoutLine(fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"result":{}}`, agentID))
+
+	got := readOne(t, client)
+	if !strings.Contains(got, `"id":5`) || !strings.Contains(got, `"transformed":true`) {
+		t.Fatalf("frame = %s, want the transformed reply under the client's id", got)
+	}
+}
+
+func TestPresentationDoesNotRewriteRecordedTurn(t *testing.T) {
+	recorded := make([]turns.Status, 0, 1)
+	var mu sync.Mutex
+	transform := deferredReply("prompt", "session/prompt", agentext.KeepOriginal,
+		func(_ context.Context, in agentext.TransformInput) (agentext.Payload, error) {
+			return rewriteObject(t, in.Message.Body.Bytes(), func(object map[string]json.RawMessage) {
+				var result map[string]json.RawMessage
+				if err := json.Unmarshal(object["result"], &result); err != nil {
+					t.Fatalf("decode result: %v", err)
+				}
+				result["stopReason"] = json.RawMessage(`"refusal"`)
+				raw, err := json.Marshal(result)
+				if err != nil {
+					t.Fatalf("encode result: %v", err)
+				}
+				object["result"] = raw
+			}), nil
+		})
+	p, client := newPresentationPump(t, nil, transform)
+	p.onTurnFinished = func(st turns.Status) {
+		mu.Lock()
+		recorded = append(recorded, st)
+		mu.Unlock()
+	}
+	id := sendPrompt(t, p, 1, "ses_a")
+	p.handleStdoutLine(`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"ses_a","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hi"}}}}`)
+	p.handleStdoutLine(agentReply(id, `"result":{"stopReason":"end_turn"}`))
+
+	if update := readOne(t, client); !strings.Contains(update, "agent_message_chunk") {
+		t.Fatalf("first frame = %s, want the turn's content update", update)
+	}
+	if got := readOne(t, client); !strings.Contains(got, `"stopReason":"refusal"`) {
+		t.Fatalf("frame = %s, want the presented refusal", got)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(recorded) != 1 || recorded[0].State != turns.StateSucceeded || recorded[0].StopReason != acp.StopReasonEndTurn {
+		t.Fatalf("outcomes = %+v, want the original successful end_turn", recorded)
+	}
+}
+
+func TestStalePromptPresentationYieldsTurnEnded(t *testing.T) {
+	var calls int
+	p, _ := newPresentationPump(t, nil,
+		deferredReply("prompt", "session/prompt", agentext.KeepOriginal,
+			func(context.Context, agentext.TransformInput) (agentext.Payload, error) {
+				calls++
+				return agentext.Payload{}, nil
+			}))
+	id := sendPrompt(t, p, 1, "ses_a")
+	p.handleStdoutLine(`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"ses_a","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hi"}}}}`)
+	_, successor := connect(t, p)
+	p.handleStdoutLine(agentReply(id, `"result":{"stopReason":"end_turn"}`))
+
+	if calls != 0 {
+		t.Fatalf("presentation ran %d times for a stale prompt reply", calls)
+	}
+	got := readFrames(t, p, successor, 1)
+	if !strings.Contains(got[0], turnEndedMethod) {
+		t.Fatalf("successor frame = %s, want turn-ended", got[0])
+	}
+}
+
+func TestStaleDeferredFailureCannotCloseSuccessor(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	p, _ := newPresentationPump(t, nil,
+		deferredReply("list", "session/list", agentext.Reject,
+			func(ctx context.Context, _ agentext.TransformInput) (agentext.Payload, error) {
+				close(entered)
+				select {
+				case <-release:
+					return agentext.Payload{}, fmt.Errorf("refused")
+				case <-ctx.Done():
+					return agentext.Payload{}, ctx.Err()
+				}
+			}))
+	agentID := listRequest(t, p, `{}`)
+	p.handleStdoutLine(fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"result":{"sessions":[]}}`, agentID))
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("presentation never started")
+	}
+	_, successor := connect(t, p) // takeover while the callback is held
+	close(release)
+	if got := readFrames(t, p, successor, 0); len(got) != 0 {
+		t.Fatalf("successor saw frames from a stale failure: %q", got)
+	}
+}
+
+func TestPresentationReleasesBudgetBetweenReplies(t *testing.T) {
+	var calls int
+	transform := deferredReply("list", "session/list", agentext.KeepOriginal,
+		func(_ context.Context, in agentext.TransformInput) (agentext.Payload, error) {
+			calls++
+			return rewriteObject(t, in.Message.Body.Bytes(), func(object map[string]json.RawMessage) {
+				object["result"] = json.RawMessage(`{"sessions":[{"sessionId":"native"}]}`)
+			}), nil
+		})
+	p, client := newPresentationPump(t, agentext.NewBudget(150), transform)
+	for i := 0; i < 2; i++ {
+		agentID := listRequest(t, p, `{"cwd":"/work"}`)
+		p.handleStdoutLine(fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"result":{"sessions":[]}}`, agentID))
+		if got := readOne(t, client); !strings.Contains(got, `"native"`) {
+			t.Fatalf("reply %d = %s, want presentation after the previous budget release", i+1, got)
+		}
+	}
+	if calls != 2 {
+		t.Fatalf("presentation calls = %d, want both replies presented", calls)
 	}
 }

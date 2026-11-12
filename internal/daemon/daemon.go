@@ -363,18 +363,13 @@ func composeServer(deps api.Deps, store *storage.SQLiteStore) (*api.Server, *ses
 	// so the two never contend.
 	worktrees := workspace.New(func() *storage.SQLiteStore { return store }, logger, time.Now, nil)
 	sessionSvc := session.NewRuntimeSession(logger, store, deps.Runtime, session.NewTokenService(logger), session.Config{
-		MaxDisconnected:  cfg.SessionMaxDisconnected,
-		MaxPerDevice:     cfg.MaxSessionsPerDevice,
-		ProgressInterval: cfg.ProgressInterval,
-		PushSvc:          deps.Push,
-		BranchOf:         worktrees.BranchOf,
-		Extensions:       profiles.Extensions,
-		ExtensionBudget:  extensionBudget,
-		ReplyDecorators: []session.ReplyDecorator{{
-			Method:    "session/list",
-			FinalOnly: true,
-			Decorate:  profiles.DecorateList,
-		}},
+		MaxDisconnected:    cfg.SessionMaxDisconnected,
+		MaxPerDevice:       cfg.MaxSessionsPerDevice,
+		ProgressInterval:   cfg.ProgressInterval,
+		PushSvc:            deps.Push,
+		BranchOf:           worktrees.BranchOf,
+		Extensions:         profiles.Extensions,
+		ExtensionBudget:    extensionBudget,
 		GatewayID:          cfg.GatewayID,
 		FrameLogEnabled:    cfg.FrameLogEnabled,
 		FrameLogDir:        cfg.LogDir,

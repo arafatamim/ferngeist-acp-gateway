@@ -83,8 +83,13 @@ type pendingRequest struct {
 	startedAt time.Time
 	// The ACP session a session/load restores; empty for every other method.
 	loadSession string
-	// The request's cwd when its method carries one; empty when it lists every folder.
-	cwd string
+	// requestParams is the request's effective params JSON, retained only when
+	// its reply has a BeforeDelivery transformer. paramsRelease returns the
+	// engine budget it holds; paramsDropped marks params that could not be
+	// retained, so presentation is skipped instead of inventing empty params.
+	requestParams []byte
+	paramsRelease func()
+	paramsDropped bool
 }
 
 func ownerKey(gen int64, clientID json.RawMessage) string {
@@ -122,8 +127,6 @@ func (r *requestIDs) outbound(gen int64, f *clientFrame) []byte {
 		origin.startedAt = time.Now()
 	case "session/load", "session/resume":
 		origin.loadSession = f.Params.SessionID
-	case "session/list":
-		origin.cwd = f.Params.Cwd
 	}
 
 	r.mu.Lock()
@@ -337,6 +340,9 @@ func (r *requestIDs) takePrompts() []pendingRequest {
 			prompts = append(prompts, req)
 			delete(r.pending, id)
 			delete(r.byOwner, req.owner)
+			if req.paramsRelease != nil {
+				defer req.paramsRelease()
+			}
 		}
 	}
 	r.mu.Unlock()
@@ -357,8 +363,73 @@ func (r *requestIDs) discard(agentID json.RawMessage) {
 		delete(r.byOwner, origin.owner)
 	}
 	r.mu.Unlock()
+	if origin.paramsRelease != nil {
+		origin.paramsRelease()
+	}
 	if ok {
 		r.changed()
+	}
+}
+
+// setParams attaches retained params to the pending request with agentID,
+// releasing them immediately when it no longer exists.
+func (r *requestIDs) setParams(agentID json.RawMessage, body []byte, release func()) {
+	key := responseIDKey(agentID)
+	r.mu.Lock()
+	origin, ok := r.pending[key]
+	if ok {
+		origin.requestParams, origin.paramsRelease = body, release
+		r.pending[key] = origin
+	}
+	r.mu.Unlock()
+	if !ok && release != nil {
+		release()
+	}
+}
+
+// markParamsDropped marks a pending request whose params could not be retained.
+func (r *requestIDs) markParamsDropped(agentID json.RawMessage) {
+	key := responseIDKey(agentID)
+	r.mu.Lock()
+	if origin, ok := r.pending[key]; ok {
+		origin.paramsDropped = true
+		r.pending[key] = origin
+	}
+	r.mu.Unlock()
+}
+
+// detachParams hands the retained params of one pending request to its reply,
+// leaving the correlation entry intact for reply.
+func (r *requestIDs) detachParams(agentID json.RawMessage) retainedParams {
+	key := responseIDKey(agentID)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	origin, ok := r.pending[key]
+	if !ok {
+		return retainedParams{}
+	}
+	params := retainedParams{body: origin.requestParams, release: origin.paramsRelease, dropped: origin.paramsDropped}
+	origin.requestParams, origin.paramsRelease = nil, nil
+	r.pending[key] = origin
+	return params
+}
+
+// releasePendingParams returns every pending request's retained params to the
+// budget without forgetting the request: teardown still needs the prompt
+// entries to record their outcomes.
+func (r *requestIDs) releasePendingParams() {
+	r.mu.Lock()
+	var releases []func()
+	for id, req := range r.pending {
+		if req.paramsRelease != nil {
+			releases = append(releases, req.paramsRelease)
+		}
+		req.requestParams, req.paramsRelease = nil, nil
+		r.pending[id] = req
+	}
+	r.mu.Unlock()
+	for _, release := range releases {
+		release()
 	}
 }
 
@@ -426,6 +497,9 @@ func (r *requestIDs) reply(currentGen int64, probe frameProbe, frames []string) 
 	if ok {
 		delete(r.pending, agentID)
 		delete(r.byOwner, origin.owner)
+		if origin.paramsRelease != nil {
+			origin.paramsRelease()
+		}
 		if origin.promptSession != "" {
 			// The turn is over, so requests it raised can no longer be answered
 			// usefully; re-sending them on a later load would show stale prompts.

@@ -129,12 +129,15 @@ func (p Payload) IsZero() bool {
 }
 
 // Message is what a transformer sees: the session identity, the selector that
-// matched it, and one owned body. It shares no ids, locks or handles with the
-// session.
+// matched it, one owned body, and the original effective params of the request
+// this message answers. It shares no ids, locks or handles with the session.
 type Message struct {
 	Identity Identity
 	Selector Selector
 	Body     Payload
+	// RequestParams is the request's effective params for a correlated reply,
+	// and absent for every other message.
+	RequestParams Payload
 }
 
 // TransformInput is one transformer invocation.

@@ -183,6 +183,164 @@ func (p *StdioPump) closeGeneration(gen int64) {
 	}
 }
 
+// retainedParams is the budgeted original params of one request, handed to its
+// reply's presentation transform. A zero value carries no params.
+type retainedParams struct {
+	body    []byte
+	release func()
+	// dropped marks params the budget refused, so presentation must not invent
+	// an empty stand-in.
+	dropped bool
+}
+
+// payload returns the params as an owned payload; ok is false when absent.
+func (r retainedParams) payload() (agentext.Payload, bool) {
+	if len(r.body) == 0 {
+		return agentext.Payload{}, false
+	}
+	payload, err := agentext.NewPayload(r.body)
+	if err != nil {
+		return agentext.Payload{}, false
+	}
+	return payload, true
+}
+
+// releaseBudget returns the params' bytes to the engine budget.
+func (r retainedParams) releaseBudget() {
+	if r.release != nil {
+		r.release()
+	}
+}
+
+// replyDelivery is a prepared client delivery: the generation that asked for
+// it and the frames to queue once presentation finishes.
+type replyDelivery struct {
+	gen int64
+	out []string
+}
+
+// retainReplyParams keeps a request's effective params while its reply has a
+// BeforeDelivery transformer. It refuses before copying when the budget is full;
+// the reply then skips presentation instead of inventing empty params.
+func (p *StdioPump) retainReplyParams(f *clientFrame) {
+	if p.ext == nil || f.Method == "" || f.ID == nil || f.fields == nil {
+		return
+	}
+	selector := agentext.Selector{
+		Direction: agentext.ToClient, Kind: agentext.Reply, Method: agentext.Method(f.Method),
+	}
+	if !p.ext.Enabled(selector, agentext.BeforeDelivery) {
+		return
+	}
+	raw := f.fields["params"]
+	if len(raw) == 0 {
+		return // No filter to retain; the reply still lists every folder.
+	}
+	release, ok := p.ext.Retain(len(raw))
+	if !ok {
+		p.reqIDs.markParamsDropped(f.ID)
+		return
+	}
+	body := make([]byte, len(raw))
+	copy(body, raw)
+	p.reqIDs.setParams(f.ID, body, release)
+}
+
+// present runs the matching BeforeDelivery chain for one correlated reply, then
+// delivers. Presentation never changes canonical state; only the bytes queued
+// to the client change, and only while the asking generation is still current.
+func (p *StdioPump) present(f *frame, delivery replyDelivery, params retainedParams) {
+	defer params.releaseBudget()
+	if p.ext == nil || !f.isReply || f.probe.Error != nil || f.origin.method == "" ||
+		f.origin.gen != delivery.gen || delivery.gen != p.connectionGeneration() {
+		p.deliver(delivery)
+		return
+	}
+	selector := agentext.Selector{
+		Direction: agentext.ToClient, Kind: agentext.Reply, Method: agentext.Method(f.origin.method),
+	}
+	mode, ok := p.ext.Mode(selector, agentext.BeforeDelivery)
+	if !ok {
+		p.deliver(delivery)
+		return
+	}
+	if params.dropped {
+		if failure, _ := p.ext.Failure(selector, agentext.BeforeDelivery); failure == agentext.Reject {
+			p.closeGeneration(delivery.gen)
+			return
+		}
+		p.deliver(delivery)
+		return
+	}
+	body, err := agentext.NewPayload([]byte(delivery.out[len(delivery.out)-1]))
+	if err != nil {
+		p.deliver(delivery)
+		return
+	}
+	requestParams, _ := params.payload()
+	in := agentext.TransformInput{
+		Message: agentext.Message{Selector: selector, Body: body, RequestParams: requestParams},
+		Stage:   agentext.BeforeDelivery,
+	}
+	if mode == agentext.Inline {
+		out, err := p.ext.TransformInline(p.drainContext(), in)
+		p.finishPresentation(delivery, out, err)
+		return
+	}
+	err = p.ext.SubmitTransform(p.drainContext(), in, func(out agentext.Payload, err error) {
+		p.finishPresentation(delivery, out, err)
+	})
+	if err == nil {
+		return
+	}
+	// Admission failure applies the chain's policy: the original reply or a
+	// rejection, never a fabricated body.
+	if failure, _ := p.ext.Failure(selector, agentext.BeforeDelivery); failure == agentext.Reject {
+		p.closeGeneration(delivery.gen)
+		return
+	}
+	p.deliver(delivery)
+}
+
+// finishPresentation applies a completed presentation and delivers, or applies
+// the chain's rejection. A failure already logged by the engine keeps the
+// original body.
+func (p *StdioPump) finishPresentation(delivery replyDelivery, out agentext.Payload, err error) {
+	if errors.Is(err, agentext.ErrRejected) {
+		p.closeGeneration(delivery.gen)
+		return
+	}
+	if err == nil && !out.IsZero() {
+		delivery.out[len(delivery.out)-1] = string(out.Bytes())
+	}
+	p.deliver(delivery)
+}
+
+// deliver queues a prepared delivery only while its generation is still bound,
+// so a late presentation can never reach a successor connection.
+func (p *StdioPump) deliver(delivery replyDelivery) {
+	if len(delivery.out) == 0 {
+		return
+	}
+	p.clientMu.Lock()
+	if delivery.gen != p.connGen || p.client == nil || p.writerQ == nil {
+		p.clientMu.Unlock()
+		return
+	}
+	evict := p.queueLocked(delivery.out)
+	p.clientMu.Unlock()
+	if evict != nil {
+		_ = evict.CloseNow()
+	}
+}
+
+// connectionGeneration reads the current client generation under clientMu.
+func (p *StdioPump) connectionGeneration() int64 {
+	p.clientMu.Lock()
+	defer p.clientMu.Unlock()
+	return p.connGen
+}
+
 // extensionErrorFrame is the gateway's answer to a rejected request.
 func extensionErrorFrame(id json.RawMessage) string {
 	frame, err := json.Marshal(struct {

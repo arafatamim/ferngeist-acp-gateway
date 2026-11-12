@@ -466,16 +466,23 @@ func TestDeferredDeadlineCompletesOnce(t *testing.T) {
 	}}, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	results := make(chan error, 1)
-	if err := engine.SubmitTransform(ctx, listInput(testPayload(t, `{"original":true}`)), func(_ Payload, err error) {
-		results <- err
+	type outcome struct {
+		body string
+		err  error
+	}
+	results := make(chan outcome, 1)
+	if err := engine.SubmitTransform(ctx, listInput(testPayload(t, `{"original":true}`)), func(p Payload, err error) {
+		results <- outcome{body: string(p.Bytes()), err: err}
 	}); err != nil {
 		t.Fatalf("SubmitTransform: %v", err)
 	}
 	select {
-	case err := <-results:
-		if err != nil {
-			t.Fatalf("completion error = %v, want KeepOriginal's nil", err)
+	case got := <-results:
+		if got.err != nil {
+			t.Fatalf("completion error = %v, want KeepOriginal's nil", got.err)
+		}
+		if got.body != `{"original":true}` {
+			t.Fatalf("late result = %s, want the original body", got.body)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("completion never ran")
