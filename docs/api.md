@@ -23,6 +23,69 @@ including duplicate keys. Malformed query strings are logged as a fixed
 logging is outside this redaction. Request handling and proof signing still use
 the original query string.
 
+## Artifact retrieval
+
+`GET /v1/runtimes/{runtimeId}/artifacts?acpSessionId=<id>&path=<absolute-host-path>`
+and `HEAD` retrieve an agent-advertised regular file on Linux/macOS, including
+outside the workspace. This route is public-API-only and requires a credential,
+`read` scope, and the configured proof of possession (binding the original raw
+query) on every request. The runtime must be active/disconnected, owned by the
+verified device, and have accepted the selected ACP session. Unknown, foreign,
+and closed contexts all return the same `404`.
+
+Exactly one `path` and one `acpSessionId` are required; other query keys,
+duplicates, case aliases, and malformed encoding return `400`. Paths must be
+clean absolute host paths, valid UTF-8, and at most 4096 bytes. ACP IDs are
+opaque, nonempty UTF-8, at most 1024 bytes, without surrounding whitespace.
+Neither selector may contain Unicode control or format characters.
+
+Authorization uses only retained session/update history: explicit local
+`resource_link` or embedded `resource` URIs in agent messages, or structured
+content blocks in tool calls/updates. Match exact paths or strictly once-decoded
+hostless `file:` URIs, without query/fragment or path-normalization aliases.
+Plain-text paths, user messages, thoughts, tool text, titles, diffs, and arbitrary
+JSON fields do not advertise artifacts. Evicted evidence, session close, or a
+gateway restart denies new requests; accepted agent replay may advertise again.
+An unadvertised path returns `403` before file lookup whether it exists or not.
+
+Successful `GET` returns complete raw bytes with `200`, never a JSON/base64
+blob. `HEAD` returns the same metadata without a body. `Content-Type` comes from
+the extension, falling back to `application/octet-stream`; `Content-Length` is
+the checked file size. `Content-Disposition: attachment` contains only a safe
+basename, with an ASCII fallback and encoded filename for non-ASCII names. All
+responses carry `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`.
+There are no `ETag` or `Last-Modified` validators. This initial capability ignores
+`Range` and conditional headers and returns the complete `200` response; range
+support follows separately. Clients must reject short bodies/network failures
+and must not concatenate separately retrieved versions.
+
+The full on-disk file must be at most **512 MiB**, including for HEAD. Transfers
+stream only the checked length: file growth cannot extend the response, and
+shrinkage can cause a short body. Admission is bounded to **4 requests globally,
+2 per device**, including authorization, opening, HEAD and transfer; exhaustion
+returns `429` with `Retry-After: 1` without queuing. Each admitted request has a
+**ten-minute absolute deadline**; cancellation, disconnect or gateway shutdown
+releases its file and slot. Credential, ownership and evidence checks happen at
+admission only: revocation, expiry, evidence eviction or context close blocks
+new requests, but an already admitted response may finish within that window.
+
+Only regular files are eligible. Final symlinks, directories, devices and FIFOs
+are rejected. The parent is canonicalized at fetch time and opened as a root;
+the final basename is opened without following symlinks, nonblocking, and its
+type, identity and size are rechecked. Supplied and canonical paths equal to or
+under `/proc`, `/sys` or `/dev` are forbidden on Unix. The grant names current
+path contents, not the inode or parent at advertisement time. Parent retargeting
+before fetch, mutable contents, bind mounts and hostile local filesystem aliases
+remain limits; this is not an immutable snapshot or an OS sandbox.
+
+Preparation failures return JSON without raw host paths: `400` invalid selectors,
+nonregular/special paths; `401` invalid credential/proof; `403` missing scope,
+evidence or OS permission; `404` missing advertised file or unknown/foreign
+context; `409` identity changed while opening; `413` file over 512 MiB; `429`
+capacity; `503` unavailable session service or unsupported platform; `500` other
+preparation failure. Windows and other platforms fail closed without file access.
+See [security.md](security.md#artifact-retrieval) for the trust model and limits.
+
 ## Public API
 
 Base path: `/v1`

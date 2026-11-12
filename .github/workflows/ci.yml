@@ -69,6 +69,9 @@ jobs:
       - name: Keep-awake inhibitor
         run: go test -count=1 ./internal/caffeine/ -v
 
+      - name: Artifact retrieval
+        run: go test -count=1 ./internal/api ./internal/session ./internal/workspace -run TestArtifact -v
+
   windows-caffeine:
     name: Windows keep-awake inhibitor
     runs-on: windows-latest
@@ -83,11 +86,17 @@ jobs:
           cache-dependency-path: go.sum
 
       # The only Windows-specific runtime code in the gateway's test surface:
-      # SetThreadExecutionState on a locked OS thread.
+      # SetThreadExecutionState on a locked OS thread. Artifact retrieval
+      # remains unsupported until the Windows opener is implemented.
       - name: Keep-awake inhibitor
         env:
           CGO_ENABLED: "0"
         run: go test -count=1 ./internal/caffeine/ -v
+
+      - name: Artifact retrieval fails closed
+        env:
+          CGO_ENABLED: "0"
+        run: go test -count=1 ./internal/workspace -run TestArtifactUnsupportedPlatform -v
 
   race:
     name: race detector

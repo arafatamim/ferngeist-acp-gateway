@@ -100,6 +100,12 @@ type Server struct {
 	streamHandlers        sync.WaitGroup
 	streamSnapshotTimeout time.Duration // test seam for the snapshot slot budget
 	streamRecheck         time.Duration // test seam for the credential recheck
+
+	artifactMu      sync.Mutex
+	artifactCount   int
+	artifactDevices map[string]int
+	artifactCtx     context.Context
+	artifactCancel  context.CancelFunc
 }
 
 // ProtocolVersion identifies the current gateway-to-client protocol version.
@@ -237,6 +243,7 @@ type Deps struct {
 // a single ACP WebSocket path.
 func NewServer(deps Deps) *Server {
 	cfg := normalizeSecurityConfig(deps.Config)
+	artifactCtx, artifactCancel := context.WithCancel(context.Background())
 	server := &Server{
 		logger:          deps.Logger.With("component", "api"),
 		cfg:             cfg,
@@ -263,10 +270,18 @@ func NewServer(deps Deps) *Server {
 		streamStop:            make(chan struct{}),
 		streamSnapshotTimeout: turnStreamSnapshotTimeout,
 		streamRecheck:         turnStreamRecheck,
+		artifactDevices:       make(map[string]int),
+		artifactCtx:           artifactCtx,
+		artifactCancel:        artifactCancel,
 	}
 
-	mux, adminMux := server.routes()
+	server.configureHTTPServers()
+	return server
+}
 
+func (server *Server) configureHTTPServers() {
+	cfg := server.cfg
+	mux, adminMux := server.routes()
 	adminAddr := strings.TrimSpace(cfg.AdminListenAddr)
 	if adminAddr == "" {
 		adminAddr = "127.0.0.1:0"
@@ -290,13 +305,13 @@ func NewServer(deps Deps) *Server {
 		IdleTimeout:       60 * time.Second,
 	}
 
-	return server
 }
 
 func (s *Server) routes() (*http.ServeMux, *http.ServeMux) {
 	mux := http.NewServeMux()
 	adminMux := http.NewServeMux()
 	mux.HandleFunc("/healthz", s.handleHealth)
+	mux.HandleFunc("/v1/runtimes/{runtimeId}/artifacts", s.handleArtifact)
 	mux.HandleFunc("/v1/status", s.handleStatus)
 	mux.HandleFunc("GET /v1/quotas", s.handleQuotas)
 	mux.HandleFunc("/v1/agents", s.handleAgents)
@@ -343,18 +358,22 @@ func (s *Server) routes() (*http.ServeMux, *http.ServeMux) {
 	mux.HandleFunc("GET /v1/projects", s.handleProjects)
 	mux.HandleFunc("POST /v1/devices/push-token", s.handleRegisterPushToken)
 	mux.HandleFunc("GET /v1/devices/push-config", s.handlePushConfig)
-	adminMux.HandleFunc("GET /admin/v1/status", s.handleAdminStatus)
-	adminMux.HandleFunc("POST /admin/v1/pairings/start", s.handleAdminPairingStart)
-	adminMux.HandleFunc("GET /admin/v1/pairings/{challengeId}", s.handleAdminPairingStatus)
-	adminMux.HandleFunc("DELETE /admin/v1/pairings/{challengeId}", s.handleAdminPairingCancel)
-	adminMux.HandleFunc("GET /admin/v1/devices", s.handleAdminDevices)
-	adminMux.HandleFunc("DELETE /admin/v1/devices/{deviceId}", s.handleAdminDeviceRevoke)
-	adminMux.HandleFunc("GET /admin/v1/agents", s.handleAdminCustomAgentList)
-	adminMux.HandleFunc("POST /admin/v1/agents/custom", s.handleCustomAgentCreate)
-	adminMux.HandleFunc("PUT /admin/v1/agents/custom/{id}", s.handleCustomAgentUpdate)
-	adminMux.HandleFunc("DELETE /admin/v1/agents/custom/{id}", s.handleCustomAgentDelete)
+	s.registerAdminRoutes(adminMux)
 
 	return mux, adminMux
+}
+
+func (s *Server) registerAdminRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("GET /admin/v1/status", s.handleAdminStatus)
+	mux.HandleFunc("POST /admin/v1/pairings/start", s.handleAdminPairingStart)
+	mux.HandleFunc("GET /admin/v1/pairings/{challengeId}", s.handleAdminPairingStatus)
+	mux.HandleFunc("DELETE /admin/v1/pairings/{challengeId}", s.handleAdminPairingCancel)
+	mux.HandleFunc("GET /admin/v1/devices", s.handleAdminDevices)
+	mux.HandleFunc("DELETE /admin/v1/devices/{deviceId}", s.handleAdminDeviceRevoke)
+	mux.HandleFunc("GET /admin/v1/agents", s.handleAdminCustomAgentList)
+	mux.HandleFunc("POST /admin/v1/agents/custom", s.handleCustomAgentCreate)
+	mux.HandleFunc("PUT /admin/v1/agents/custom/{id}", s.handleCustomAgentUpdate)
+	mux.HandleFunc("DELETE /admin/v1/agents/custom/{id}", s.handleCustomAgentDelete)
 }
 
 // normalizeSecurityConfig applies safe security defaults based on whether the
@@ -418,6 +437,7 @@ func (s *Server) ListenAndServe() error {
 // http.Server.Shutdown does not close hijacked connections: without the join the
 // handler never writes the 1001 close frame and the client sees 1006.
 func (s *Server) Shutdown(ctx context.Context) error {
+	s.artifactCancel()
 	s.streamMu.Lock()
 	s.stopStreams.Do(func() { close(s.streamStop) })
 	s.streamMu.Unlock()

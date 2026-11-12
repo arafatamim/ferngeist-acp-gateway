@@ -226,6 +226,7 @@ func replayBulk(w *bufio.Writer, sessionID string, logger *slog.Logger) {
 				},
 			},
 		})
+
 	}
 	logger.Info("bulk replay done", slog.Int("turns", turns), slog.Duration("elapsed", time.Since(start)))
 }
@@ -260,6 +261,17 @@ func handlePrompt(w *bufio.Writer, req rpcRequest, logger *slog.Logger) {
 				},
 			},
 		})
+		// A structured resource fixture lets transport tests exercise agent
+		// advertisement without teaching the gateway a test-only grant path.
+		if uri := os.Getenv("FERNGEIST_MOCK_RESOURCE_URI"); uri != "" {
+			writeNotif(w, "session/update", map[string]any{
+				"sessionId": params.SessionID,
+				"update": map[string]any{
+					"sessionUpdate": "agent_message_chunk",
+					"content":       map[string]any{"type": "resource_link", "uri": uri, "name": "artifact"},
+				},
+			})
+		}
 	}
 
 	writeResult(w, req, map[string]any{"stopReason": "end_turn"})

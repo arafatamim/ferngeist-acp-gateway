@@ -43,6 +43,19 @@ against the code.
 
 ## Unreleased
 
+- `[additive]` Public authenticated GET/HEAD
+  `/v1/runtimes/{runtimeId}/artifacts?acpSessionId=<id>&path=<absolute-host-path>`
+  retrieves complete raw regular files up to 512 MiB on Linux/macOS. Access
+  requires verified device ownership, an accepted ACP session and retained
+  structured local resource advertisement. Four global/two per-device slots,
+  a ten-minute admission-only authorization window, safe attachment metadata,
+  no-store/nosniff and rooted nonblocking file opening bound the surface.
+  Plain-text advertisements and ranges are not yet supported; Range requests
+  receive complete 200 responses. Windows fails closed. Workspace and turns
+  contracts and `protocolVersion` remain unchanged. See the API/security docs
+  for error outcomes and mutable-file/namespace limitations.
+  (2026-11-12, unreleased)
+
 - `[additive]` Shared HTTP request logs redact `path` and `acpSessionId` query
   values case-insensitively, including duplicate keys. Malformed queries log a
   fixed `redacted` marker; existing credential redaction is preserved. This

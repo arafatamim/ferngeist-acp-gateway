@@ -94,6 +94,42 @@ may still contain paths, ACP session IDs, and other sensitive content.
 - In public mode, proof-of-possession is required by default.
 - Legacy bearer-only credentials are disabled by default in public mode.
 
+## Artifact retrieval
+
+Pairing grants both `read` and `control`; a paired client can register a custom
+agent with an arbitrary command and thereby execute code as the gateway OS user.
+Artifact advertisement is a disclosure/provenance filter, not an OS sandbox or
+an allowed-roots policy. Prompt-injected or malicious agents can advertise any
+path the gateway user can read. Pair only trusted devices and agents.
+
+The public `GET`/`HEAD /v1/runtimes/{runtimeId}/artifacts` route binds verified
+DeviceID ownership before inspecting accepted ACP sessions or retained history.
+Foreign, unknown and closed contexts return indistinguishable `404` responses.
+Only explicit structured local resource links/embedded resource URIs in eligible
+agent messages or tool content count. Text, user/thought messages, tool titles,
+diffs and arbitrary JSON do not grant access. Retained replay history is the
+sole evidence source, so eviction, close and restart deny new requests.
+
+Linux/macOS opening canonicalizes the parent at fetch time, rejects supplied
+and canonical `/proc`, `/sys`, `/dev` trees, roots relative operations at the
+opened parent, rejects final symlinks and nonregular files, and checks open-file
+identity and size. A nonblocking basename open avoids a raced FIFO hang. These
+checks protect one open, not the time since advertisement: grants refer to
+current path contents, parent symlinks may have changed before fetch, and files
+can mutate during transfer. Bind mounts and hostile local namespace races are
+not fully excluded. No immutable snapshots or content validators are promised.
+Windows remains unsupported and fails closed without file access.
+
+Four global/two per-device slots bound the entire admission/open/transfer
+lifetime, including HEAD; files over 512 MiB are refused. Credential, ownership
+and retained evidence checks apply at admission only. An admitted response may
+continue after revocation, expiry, evidence eviction or session close for up to
+ten minutes; new requests are denied. Cancellation/disconnect/shutdown releases
+the descriptor and capacity. All responses are no-store/nosniff, attachment
+headers expose only a basename, and errors omit raw paths. Shared request-log
+redaction covers the selectors; optional raw ACP frame logs remain outside it.
+Existing workspace confinement and cross-device turns behavior are unchanged.
+
 ## Workspace read surface
 
 The workspace endpoints (`/v1/runtimes/{id}/files`, `/files/list`, `/git/status`,
