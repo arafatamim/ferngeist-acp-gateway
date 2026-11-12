@@ -1,0 +1,31 @@
+{
+  "id": "letta",
+  "displayName": "Letta",
+  "protocol": "acp",
+  "platformSupport": [
+    "darwin",
+    "linux"
+  ],
+  "detection": {
+    "mode": "path_lookup",
+    "command": "letta-acp"
+  },
+  "launch": {
+    "mode": "external",
+    "command": "letta-acp",
+    "args": []
+  },
+  "capabilities": [
+    "acp"
+  ],
+  "security": {
+    "curatedLaunch": true,
+    "allowsRemoteStart": true,
+    "userConfigurableFields": []
+  },
+  "registry": {
+    "required": false,
+    "validationStatus": "not_required"
+  },
+  "hint": "Install the Letta ACP adapter and configure Letta access."
+}

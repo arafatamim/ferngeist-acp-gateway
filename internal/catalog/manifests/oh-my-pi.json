@@ -1,0 +1,34 @@
+{
+  "id": "oh-my-pi",
+  "displayName": "Oh My Pi",
+  "protocol": "acp",
+  "platformSupport": [
+    "windows",
+    "darwin",
+    "linux"
+  ],
+  "detection": {
+    "mode": "path_lookup",
+    "command": "omp"
+  },
+  "launch": {
+    "mode": "external",
+    "command": "omp",
+    "args": [
+      "acp"
+    ]
+  },
+  "capabilities": [
+    "acp"
+  ],
+  "security": {
+    "curatedLaunch": true,
+    "allowsRemoteStart": true,
+    "userConfigurableFields": []
+  },
+  "registry": {
+    "required": false,
+    "validationStatus": "not_required"
+  },
+  "hint": "Install Oh My Pi and configure a provider."
+}

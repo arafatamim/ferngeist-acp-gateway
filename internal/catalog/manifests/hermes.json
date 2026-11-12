@@ -1,0 +1,33 @@
+{
+  "id": "hermes",
+  "displayName": "Hermes Agent",
+  "protocol": "acp",
+  "platformSupport": [
+    "darwin",
+    "linux"
+  ],
+  "detection": {
+    "mode": "path_lookup",
+    "command": "hermes"
+  },
+  "launch": {
+    "mode": "external",
+    "command": "hermes",
+    "args": [
+      "acp"
+    ]
+  },
+  "capabilities": [
+    "acp"
+  ],
+  "security": {
+    "curatedLaunch": true,
+    "allowsRemoteStart": true,
+    "userConfigurableFields": []
+  },
+  "registry": {
+    "required": false,
+    "validationStatus": "not_required"
+  },
+  "hint": "Install Hermes and its ACP extra, then configure a provider."
+}

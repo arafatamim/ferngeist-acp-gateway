@@ -1,0 +1,26 @@
+{
+  "id": "openclaw",
+  "displayName": "OpenClaw",
+  "protocol": "acp",
+  "platformSupport": ["darwin", "linux"],
+  "detection": {
+    "mode": "path_lookup",
+    "command": "openclaw"
+  },
+  "launch": {
+    "mode": "external",
+    "command": "openclaw",
+    "args": ["acp"]
+  },
+  "capabilities": ["acp"],
+  "security": {
+    "curatedLaunch": true,
+    "allowsRemoteStart": true,
+    "userConfigurableFields": []
+  },
+  "registry": {
+    "required": false,
+    "validationStatus": "not_required"
+  },
+  "hint": "Requires an installed OpenClaw CLI and a configured, running OpenClaw gateway."
+}

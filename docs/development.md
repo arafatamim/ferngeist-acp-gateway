@@ -1,5 +1,26 @@
 # Development
 
+## Bundled ACP agents
+
+`internal/catalog/manifests/` contains gateway-maintained agents that are not in
+the official ACP registry. They detect an existing local installation; the
+gateway does not install them. Check the official registry before adding an
+entry, verify its upstream launch instructions and platform support, and remove
+the bundled entry when the official registry adds the same agent: a bundled
+manifest otherwise overrides the registry launch configuration for the same ID.
+Changes ship with gateway releases.
+
+- OpenClaw: [`openclaw acp`](https://github.com/openclaw/openclaw/blob/main/docs/cli/acp.md)
+  bridges to a configured OpenClaw gateway. Linux and macOS are supported;
+  Windows users can run both gateways inside WSL.
+- [Hermes Agent](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/features/acp.md): `hermes acp` requires the ACP extra. Linux and macOS only.
+- [Oh My Pi](https://github.com/can1357/oh-my-pi/blob/main/docs/cli-reference.md): `omp acp`.
+- [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness/blob/master/apps/cli/README.md): `dsh --profile acp` starts its automation ACP server. Linux and macOS only.
+- [Reasonix](https://github.com/esengine/DeepSeek-Reasonix/blob/studio/docs/GUIDE.md): `reasonix acp`.
+- [Letta](https://github.com/letta-ai/letta-acp): `letta-acp` requires the separately installed ACP adapter. Linux and macOS only.
+- [OpenHands](https://github.com/OpenHands/OpenHands-CLI): `openhands acp`. Linux and macOS only.
+- [Codewhale](https://github.com/codewhale-hq/Codewhale/blob/main/docs/RUNTIME_API.md): `codewhale serve --acp`.
+
 ## Build
 
 ```powershell

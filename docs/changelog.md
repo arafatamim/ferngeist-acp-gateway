@@ -94,6 +94,12 @@ against the code.
   exists. Reinstalls and package upgrades preserve this snapshot by default.
   (2026-11-11, unreleased)
 
+- `[additive]` The agent catalog includes the locally installed OpenClaw ACP
+  bridge on Linux and macOS, plus Hermes Agent, Oh My Pi, DeepSeek Harness,
+  Reasonix, Letta ACP, OpenHands, and Codewhale. OpenClaw requires a configured,
+  running OpenClaw gateway; the others' own setup and provider configuration
+  remain prerequisites. (2026-11-10, unreleased)
+
 - `[semantic]` The runtime-scoped Git routes are deprecated in favor of
   `/v1/projects/git/...`. They remain available for existing clients and are
   planned for removal in protocol v3. Runtime file and file-list routes are not

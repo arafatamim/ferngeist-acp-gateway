@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	goruntime "runtime"
 	"testing"
 
@@ -87,6 +88,59 @@ func TestLoadEmbeddedAgents(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("embedded manifests should include mock-acp")
+	}
+}
+
+func TestOpenClawAvailableWhenInstalledWithoutRegistry(t *testing.T) {
+	if goruntime.GOOS == "windows" {
+		t.Skip("test executable uses Unix permissions")
+	}
+	binDir := t.TempDir()
+	t.Setenv("PATH", binDir)
+	service := New(t.TempDir(), nil)
+	agent, err := service.Get("openclaw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if agent.Detected {
+		t.Fatal("OpenClaw detected before installation")
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "openclaw"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	service.Refresh()
+	agent, err = service.Get("openclaw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !agent.ManifestValid || !agent.Detected {
+		t.Fatalf("installed OpenClaw: valid=%v detected=%v error=%s", agent.ManifestValid, agent.Detected, agent.ValidationError)
+	}
+}
+
+func TestBundledAgentsUseUpstreamACPCommands(t *testing.T) {
+	for _, tc := range []struct {
+		id      string
+		command string
+		args    []string
+	}{
+		{"hermes", "hermes", []string{"acp"}},
+		{"oh-my-pi", "omp", []string{"acp"}},
+		{"deepseek-harness", "dsh", []string{"--profile", "acp"}},
+		{"reasonix", "reasonix", []string{"acp"}},
+		{"letta", "letta-acp", []string{}},
+		{"openhands", "openhands", []string{"acp"}},
+		{"codewhale", "codewhale", []string{"serve", "--acp"}},
+	} {
+		t.Run(tc.id, func(t *testing.T) {
+			agent, err := New(t.TempDir(), nil).Get(tc.id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !agent.ManifestValid || agent.Launch.Command != tc.command || !reflect.DeepEqual(agent.Launch.Args, tc.args) {
+				t.Fatalf("invalid upstream launch: valid=%v launch=%+v error=%s", agent.ManifestValid, agent.Launch, agent.ValidationError)
+			}
+		})
 	}
 }
 

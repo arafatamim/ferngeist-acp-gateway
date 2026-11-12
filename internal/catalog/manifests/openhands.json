@@ -1,0 +1,33 @@
+{
+  "id": "openhands",
+  "displayName": "OpenHands",
+  "protocol": "acp",
+  "platformSupport": [
+    "darwin",
+    "linux"
+  ],
+  "detection": {
+    "mode": "path_lookup",
+    "command": "openhands"
+  },
+  "launch": {
+    "mode": "external",
+    "command": "openhands",
+    "args": [
+      "acp"
+    ]
+  },
+  "capabilities": [
+    "acp"
+  ],
+  "security": {
+    "curatedLaunch": true,
+    "allowsRemoteStart": true,
+    "userConfigurableFields": []
+  },
+  "registry": {
+    "required": false,
+    "validationStatus": "not_required"
+  },
+  "hint": "Install OpenHands CLI and configure a provider."
+}

@@ -1,0 +1,34 @@
+{
+  "id": "reasonix",
+  "displayName": "Reasonix",
+  "protocol": "acp",
+  "platformSupport": [
+    "windows",
+    "darwin",
+    "linux"
+  ],
+  "detection": {
+    "mode": "path_lookup",
+    "command": "reasonix"
+  },
+  "launch": {
+    "mode": "external",
+    "command": "reasonix",
+    "args": [
+      "acp"
+    ]
+  },
+  "capabilities": [
+    "acp"
+  ],
+  "security": {
+    "curatedLaunch": true,
+    "allowsRemoteStart": true,
+    "userConfigurableFields": []
+  },
+  "registry": {
+    "required": false,
+    "validationStatus": "not_required"
+  },
+  "hint": "Install Reasonix and configure a provider."
+}

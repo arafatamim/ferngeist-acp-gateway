@@ -1,0 +1,34 @@
+{
+  "id": "deepseek-harness",
+  "displayName": "DeepSeek Harness",
+  "protocol": "acp",
+  "platformSupport": [
+    "darwin",
+    "linux"
+  ],
+  "detection": {
+    "mode": "path_lookup",
+    "command": "dsh"
+  },
+  "launch": {
+    "mode": "external",
+    "command": "dsh",
+    "args": [
+      "--profile",
+      "acp"
+    ]
+  },
+  "capabilities": [
+    "acp"
+  ],
+  "security": {
+    "curatedLaunch": true,
+    "allowsRemoteStart": true,
+    "userConfigurableFields": []
+  },
+  "registry": {
+    "required": false,
+    "validationStatus": "not_required"
+  },
+  "hint": "Install DeepSeek Harness and configure its ACP profile."
+}

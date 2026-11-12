@@ -1,0 +1,35 @@
+{
+  "id": "codewhale",
+  "displayName": "Codewhale",
+  "protocol": "acp",
+  "platformSupport": [
+    "windows",
+    "darwin",
+    "linux"
+  ],
+  "detection": {
+    "mode": "path_lookup",
+    "command": "codewhale"
+  },
+  "launch": {
+    "mode": "external",
+    "command": "codewhale",
+    "args": [
+      "serve",
+      "--acp"
+    ]
+  },
+  "capabilities": [
+    "acp"
+  ],
+  "security": {
+    "curatedLaunch": true,
+    "allowsRemoteStart": true,
+    "userConfigurableFields": []
+  },
+  "registry": {
+    "required": false,
+    "validationStatus": "not_required"
+  },
+  "hint": "Install Codewhale and configure a provider."
+}
