@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -36,7 +37,7 @@ func (g *networkArtifactGate) Write(p []byte) (int, error) {
 	return g.ResponseWriter.Write(p)
 }
 
-func TestArtifactNetworkClientDetectsShortBody(t *testing.T) {
+func TestArtifactNetworkClientDetectsShortRangeBody(t *testing.T) {
 	e := newArtifactEnv(t, "video.mp4")
 	if err := os.WriteFile(e.path, make([]byte, 1<<20), 0o600); err != nil {
 		t.Fatal(err)
@@ -58,12 +59,17 @@ func TestArtifactNetworkClientDetectsShortBody(t *testing.T) {
 			return
 		}
 		r.Header.Set("Authorization", "Bearer "+e.h.token)
+		r.Header.Set("Range", "bytes=65536-")
 		response, err := srv.Client().Do(r)
 		if err != nil {
 			result <- err
 			return
 		}
 		defer response.Body.Close()
+		if response.StatusCode != 206 || response.ContentLength != 983040 || response.Header.Get("Content-Range") != "bytes 65536-1048575/1048576" {
+			result <- fmt.Errorf("range response = %d %v", response.StatusCode, response.Header)
+			return
+		}
 		_, err = io.Copy(io.Discard, response.Body)
 		result <- err
 	}()
@@ -112,10 +118,14 @@ func blockArtifact(t *testing.T, e *artifactEnv, target, token string) *blockedA
 	b := &blockedArtifact{ResponseRecorder: httptest.NewRecorder(), entered: make(chan struct{}), resume: make(chan struct{}), expired: make(chan struct{}), done: make(chan struct{}), deadlines: make(chan time.Time, 2), cancel: cancel}
 	r := httptest.NewRequest(http.MethodGet, target, nil).WithContext(ctx)
 	r.Header.Set("Authorization", "Bearer "+token)
+	r.Header.Set("Range", "bytes=0-")
 	go func() { defer close(b.done); e.h.server.Handler().ServeHTTP(b, r) }()
 	t.Cleanup(func() { cancel(); awaitArtifactDone(t, b) })
 	select {
 	case <-b.entered:
+		if b.Code != 206 || b.Header().Get("Accept-Ranges") != "bytes" {
+			t.Fatalf("blocked range = %d %v", b.Code, b.Header())
+		}
 	case <-b.done:
 		t.Fatalf("transfer did not start: %d %s", b.Code, b.Body.String())
 	case <-time.After(5 * time.Second):
@@ -215,7 +225,7 @@ func TestArtifactShutdownCancelsAdmittedTransfers(t *testing.T) {
 	}
 }
 
-func TestArtifactTransferFreezesLengthAndDetectsShrink(t *testing.T) {
+func TestArtifactRangeTransferFreezesLengthAndDetectsShrink(t *testing.T) {
 	for _, shrink := range []bool{false, true} {
 		t.Run(map[bool]string{false: "growth", true: "shrink"}[shrink], func(t *testing.T) {
 			e := newArtifactEnv(t, "video.mp4")

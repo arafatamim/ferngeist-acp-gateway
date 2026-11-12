@@ -73,13 +73,26 @@ the extension, falling back to `application/octet-stream`; `Content-Length` is
 the checked file size. `Content-Disposition: attachment` contains only a safe
 basename, with an ASCII fallback and encoded filename for non-ASCII names. All
 responses carry `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`.
-There are no `ETag` or `Last-Modified` validators. This initial capability ignores
-`Range` and conditional headers and returns the complete `200` response; range
-support follows separately. Clients must reject short bodies/network failures
-and must not concatenate separately retrieved versions.
+Successful responses advertise `Accept-Ranges: bytes`. GET accepts one byte
+range: `bytes=start-end`, `bytes=start-`, or `bytes=-suffixLength`. A satisfiable
+range returns `206`, the selected `Content-Length`, and
+`Content-Range: bytes start-end/fullSize`. End positions/suffix lengths beyond
+the file are clamped. Invalid, unsatisfiable, empty or multiple ranges (including
+repeated Range headers) return `416` with `Content-Range: bytes */fullSize`;
+safety headers remain present. HEAD ignores Range and returns full-file metadata
+with `200` and no body.
 
-The full on-disk file must be at most **512 MiB**, including for HEAD. Transfers
-stream only the checked length: file growth cannot extend the response, and
+There are no `ETag` or `Last-Modified` validators. **Any If-Range header** ignores
+Range and returns the complete `200` response, even for an empty, invalid or
+apparently matching date/tag and same-second file changes. Other conditional
+headers also do not validate or suppress a response. Plain ranges read the
+current file; they do not promise immutable resumable versions. Clients must
+reject short bodies/network failures and must not concatenate separately
+retrieved versions.
+
+The full on-disk file must be at most **512 MiB**, including for HEAD or a tiny
+range. All ranges use the same credentials/proof, ownership, evidence, slots and
+lifetime checks as full downloads. Transfers stream only the checked length: file growth cannot extend the response, and
 shrinkage can cause a short body. Admission is bounded to **4 requests globally,
 2 per device**, including authorization, opening, HEAD and transfer; exhaustion
 returns `429` with `Retry-After: 1` without queuing. Each admitted request has a
@@ -101,7 +114,8 @@ Preparation failures return JSON without raw host paths: `400` invalid selectors
 nonregular/special paths; `401` invalid credential/proof; `403` missing scope,
 evidence or OS permission; `404` missing advertised file or unknown/foreign
 context; `409` identity changed while opening; `413` file over 512 MiB; `429`
-capacity; `503` unavailable session service or unsupported platform; `500` other
+capacity; `416` invalid/unsatisfiable/multiple ranges; `503` unavailable session
+service or unsupported platform; `500` other
 preparation failure. Windows and other platforms fail closed without file access.
 See [security.md](security.md#artifact-retrieval) for the trust model and limits.
 

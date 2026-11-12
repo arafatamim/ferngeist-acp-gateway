@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"mime"
 	"net/http"
@@ -146,22 +147,32 @@ func (s *Server) serveArtifact(w http.ResponseWriter, r *http.Request, f *os.Fil
 	if r.Context().Err() != nil {
 		return
 	}
+	offset, length, status := artifactRange(r, info.Size())
+	w.Header().Set("Accept-Ranges", "bytes")
+	if status == http.StatusRequestedRangeNotSatisfiable {
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", info.Size()))
+		writeError(w, status, "invalid or unsatisfiable artifact range")
+		return
+	}
+	if status == http.StatusPartialContent {
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", offset, offset+length-1, info.Size()))
+	}
 	contentType := mime.TypeByExtension(filepath.Ext(name))
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Content-Disposition", artifactDisposition(name))
-	w.Header().Set("Content-Length", strconv.FormatInt(info.Size(), 10))
-	w.WriteHeader(http.StatusOK)
+	w.Header().Set("Content-Length", strconv.FormatInt(length, 10))
+	w.WriteHeader(status)
 	if r.Method == http.MethodHead {
 		return
 	}
-	n, err := io.CopyN(w, io.NewSectionReader(f, 0, info.Size()), info.Size())
+	n, err := io.CopyN(w, io.NewSectionReader(f, offset, length), length)
 	if err != nil {
 		// Keep the promised Content-Length: clients detect a short response.
 		// Filesystem error strings can contain the host path, so omit them.
-		s.logger.Warn("artifact transfer incomplete", "bytes", n, "size", info.Size())
+		s.logger.Warn("artifact transfer incomplete", "bytes", n, "size", length)
 	}
 }
 

@@ -43,6 +43,16 @@ against the code.
 
 ## Unreleased
 
+- `[additive]` Artifact GET supports one byte range with `206`, Content-Range
+  and Accept-Ranges. Invalid/unsatisfiable/multiple ranges return `416` while
+  retaining no-store/nosniff. HEAD ignores Range and returns full metadata.
+  Any If-Range header forces a full `200`; no ETag/Last-Modified or immutable
+  resume guarantee is introduced. Full-file size limits, admission checks,
+  slots and transfer deadlines apply equally to ranges. Clients must reject
+  short bodies and avoid joining separately fetched file versions. No
+  protocol-version, workspace or turns change. Windows remains unsupported.
+  (2026-11-12, unreleased)
+
 - `[additive]` Artifact retrieval also recognizes exact local paths/file URIs
   deliberately surfaced in agent-message text and Markdown. HTTP/HTTPS spans,
   user/thought/tool text and arbitrary JSON remain excluded. Split text joins

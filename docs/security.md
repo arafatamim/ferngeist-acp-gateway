@@ -134,6 +134,15 @@ can mutate during transfer. Bind mounts and hostile local namespace races are
 not fully excluded. No immutable snapshots or content validators are promised.
 Windows remains unsupported and fails closed without file access.
 
+Single byte ranges use the same admission and file checks; even a one-byte
+request is rejected if the full file exceeds 512 MiB. Ranged reads freeze their
+offset/length to admitted size but can still fail short if the file shrinks.
+Invalid or multiple ranges return 416 with no-store/nosniff. No metadata-derived
+ETag or Last-Modified validator is emitted: any If-Range header forces a full
+200, including after same-second mutation. Current-file ranges are not immutable
+resumable versions; clients must reject short bodies and avoid splicing separate
+responses together.
+
 Four global/two per-device slots bound the entire admission/open/transfer
 lifetime, including HEAD; files over 512 MiB are refused. Credential, ownership
 and retained evidence checks apply at admission only. An admitted response may

@@ -18,6 +18,7 @@ func TestArtifactsBindProofToOriginalQueryForGetAndHead(t *testing.T) {
 		for _, mutate := range []bool{false, true} {
 			r := httptest.NewRequest(method, "/v1/runtimes/x/artifacts?path=/tmp/x&acpSessionId=a", nil)
 			r.Header.Set("Authorization", "Bearer "+c.token)
+			r.Header.Set("Range", "bytes=0-0")
 			signProofRequest(t, r, c, nil, time.Now(), method+"-"+time.Now().String())
 			want := http.StatusServiceUnavailable
 			if mutate {
@@ -51,6 +52,7 @@ func TestArtifactsRequireReadScope(t *testing.T) {
 	for _, method := range []string{http.MethodGet, http.MethodHead} {
 		r := httptest.NewRequest(method, "/v1/runtimes/x/artifacts?path=/tmp/x&acpSessionId=a", nil)
 		r.Header.Set("Authorization", "Bearer control-token")
+		r.Header.Set("Range", "bytes=0-0")
 		w := httptest.NewRecorder()
 		s.Handler().ServeHTTP(w, r)
 		if w.Code != http.StatusForbidden {
