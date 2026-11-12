@@ -48,20 +48,7 @@ func openRootedArtifact(root *os.Root, name string) (*os.File, os.FileInfo, erro
 	if err != nil {
 		return nil, nil, artifactFileError(err)
 	}
-	info, err := f.Stat()
-	if err != nil {
-		f.Close()
-		return nil, nil, artifactFileError(err)
-	}
-	if !info.Mode().IsRegular() || !os.SameFile(before, info) {
-		f.Close()
-		return nil, nil, errStatus(http.StatusConflict, "artifact changed while opening")
-	}
-	if info.Size() > MaxArtifactBytes {
-		f.Close()
-		return nil, nil, errStatus(http.StatusRequestEntityTooLarge, "artifact exceeds 512 MiB")
-	}
-	return f, info, nil
+	return checkedArtifact(f, before)
 }
 
 func openArtifactBasename(root *os.Root, name string) (*os.File, error) {
@@ -89,13 +76,6 @@ func specialArtifactPath(path string) bool {
 	return false
 }
 
-func artifactFileError(err error) error {
-	switch {
-	case errors.Is(err, os.ErrNotExist):
-		return errStatus(http.StatusNotFound, "artifact not found")
-	case errors.Is(err, os.ErrPermission):
-		return errStatus(http.StatusForbidden, "artifact access denied")
-	default:
-		return errStatus(http.StatusInternalServerError, "could not open artifact")
-	}
+func validateArtifactPlatformPath(string) error {
+	return nil
 }

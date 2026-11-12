@@ -43,6 +43,17 @@ against the code.
 
 ## Unreleased
 
+- `[additive]` Adds Windows artifact retrieval for canonical drive-letter paths
+  on direct local fixed/removable disks, including exact hostless drive file
+  URIs. UNC/device/NT/ADS/reserved/trailing-dot-space forms and indirect/network
+  drive mappings are refused before target access. Native handle traversal
+  rejects every reparse component and rechecks file identity/type/size; sharing
+  conflicts and oplock breaks return `409` without waiting for acknowledgment. Existing admission, binary/HEAD, size, range, headers
+  and cancellation policies apply. Native Windows tests/lint are configured in
+  CI; runtime behavior remains unverified from this Linux session. No protocol,
+  workspace or turns contract change.
+  (2026-11-12, unreleased)
+
 - `[additive]` Artifact GET supports one byte range with `206`, Content-Range
   and Accept-Ranges. Invalid/unsatisfiable/multiple ranges return `416` while
   retaining no-store/nosniff. HEAD ignores Range and returns full metadata.

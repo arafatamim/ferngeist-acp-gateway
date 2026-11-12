@@ -26,8 +26,8 @@ the original query string.
 ## Artifact retrieval
 
 `GET /v1/runtimes/{runtimeId}/artifacts?acpSessionId=<id>&path=<absolute-host-path>`
-and `HEAD` retrieve an agent-advertised regular file on Linux/macOS, including
-outside the workspace. This route is public-API-only and requires a credential,
+and `HEAD` retrieve an agent-advertised regular file on Linux/macOS and supported
+Windows local drives, including outside the workspace. This route is public-API-only and requires a credential,
 `read` scope, and the configured proof of possession (binding the original raw
 query) on every request. The runtime must be active/disconnected, owned by the
 verified device, and have accepted the selected ACP session. Unknown, foreign,
@@ -102,7 +102,7 @@ admission only: revocation, expiry, evidence eviction or context close blocks
 new requests, but an already admitted response may finish within that window.
 
 Only regular files are eligible. Final symlinks, directories, devices and FIFOs
-are rejected. The parent is canonicalized at fetch time and opened as a root;
+are rejected. On Linux/macOS, the parent is canonicalized at fetch time and opened as a root;
 the final basename is opened without following symlinks, nonblocking, and its
 type, identity and size are rechecked. Supplied and canonical paths equal to or
 under `/proc`, `/sys` or `/dev` are forbidden on Unix. The grant names current
@@ -110,13 +110,35 @@ path contents, not the inode or parent at advertisement time. Parent retargeting
 before fetch, mutable contents, bind mounts and hostile local filesystem aliases
 remain limits; this is not an immutable snapshot or an OS sandbox.
 
+On Windows, `path` must already use a clean drive-letter absolute spelling,
+for example `C:\recordings\video.mp4`; structured URI advertisements use
+`file:///C:/recordings/video.mp4` (once-decoded and compared exactly). UNC,
+extended/device/NT namespaces, drive-relative paths, ADS/extra colons, reserved
+device stems (including extensions), trailing-dot/space components and invalid
+filename characters return `400` before target access. Only direct
+`\Device\HarddiskVolumeN` mappings on fixed/removable disks qualify; network,
+SUBST, CD-ROM, RAM and unknown/indirect mappings fail closed with `400`.
+
+The Windows opener pins the local volume mapping and traverses one component
+per native directory handle, without following symlinks/junctions/other reparse
+points. All reparse components (including cloud placeholders and volume mount
+points) are refused. Ancestors and the inspected file exclude write/delete
+sharing until the read handle is checked for identity/type/size. The admitted
+read handle permits later content mutation; this remains current-file access,
+not an immutable snapshot. Sharing conflicts or an oplock break during opening
+return `409`; native opens do not wait for another process to acknowledge an
+oplock break.
+Native Windows tests are wired into CI; this implementation has only been
+cross-compiled/linted on Linux so far, so native behavior remains unverified.
+
 Preparation failures return JSON without raw host paths: `400` invalid selectors,
 nonregular/special paths; `401` invalid credential/proof; `403` missing scope,
 evidence or OS permission; `404` missing advertised file or unknown/foreign
 context; `409` identity changed while opening; `413` file over 512 MiB; `429`
 capacity; `416` invalid/unsatisfiable/multiple ranges; `503` unavailable session
 service or unsupported platform; `500` other
-preparation failure. Windows and other platforms fail closed without file access.
+preparation failure. Platforms other than Linux/macOS/Windows fail closed
+without file access.
 See [security.md](security.md#artifact-retrieval) for the trust model and limits.
 
 ## Public API

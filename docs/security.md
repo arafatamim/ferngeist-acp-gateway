@@ -132,7 +132,28 @@ checks protect one open, not the time since advertisement: grants refer to
 current path contents, parent symlinks may have changed before fetch, and files
 can mutate during transfer. Bind mounts and hostile local namespace races are
 not fully excluded. No immutable snapshots or content validators are promised.
-Windows remains unsupported and fails closed without file access.
+Windows uses a separate native handle traversal. Pure path checks reject
+UNC/device/NT/drive-relative/ADS/reserved/trailing-dot-space forms first.
+The current DOS drive mapping must name a direct local HarddiskVolume device;
+network, SUBST and ambiguous mappings are refused. Type checks use that pinned
+volume, never a later lookup of the mutable drive alias. Native relative opens
+forbid reparse processing and inspect every component before continuing;
+symlinks, junctions, mount points and cloud reparse placeholders are unsupported.
+Ancestors and the inspected file deny write/delete sharing while descendants
+and the final read handle are opened. Handle-derived file identity/type/size
+are rechecked; sharing conflicts and oplock breaks return 409. Native opens
+request immediate completion rather than waiting for oplock acknowledgment;
+an alternate-success handle is closed without reading. Afterwards the read handle allows
+mutable contents, preserving admission-only semantics.
+
+This follows the handle-relative and reparse-open contracts in
+[Microsoft NtCreateFile](https://learn.microsoft.com/en-us/windows/win32/api/winternl/nf-winternl-ntcreatefile)
+and the current-mapping semantics of
+[QueryDosDevice](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-querydosdevicew).
+It does not defend against privileged local replacement of device objects or
+hostile filesystem drivers. Native Windows tests are configured in CI but have
+not run in this Linux implementation session; cross-compilation/lint is not
+native proof. Other platforms remain unsupported and fail closed.
 
 Single byte ranges use the same admission and file checks; even a one-byte
 request is rejected if the full file exceeds 512 MiB. Ranged reads freeze their

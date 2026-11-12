@@ -3,6 +3,7 @@ package api
 import (
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"testing"
 	"time"
@@ -16,13 +17,14 @@ func TestArtifactsBindProofToOriginalQueryForGetAndHead(t *testing.T) {
 	c := pairDeviceWithProof(t, s)
 	for _, method := range []string{http.MethodGet, http.MethodHead} {
 		for _, mutate := range []bool{false, true} {
-			r := httptest.NewRequest(method, "/v1/runtimes/x/artifacts?path=/tmp/x&acpSessionId=a", nil)
+			path := url.QueryEscape(filepath.Join(t.TempDir(), "x"))
+			r := httptest.NewRequest(method, "/v1/runtimes/x/artifacts?path="+path+"&acpSessionId=a", nil)
 			r.Header.Set("Authorization", "Bearer "+c.token)
 			r.Header.Set("Range", "bytes=0-0")
 			signProofRequest(t, r, c, nil, time.Now(), method+"-"+time.Now().String())
 			want := http.StatusServiceUnavailable
 			if mutate {
-				r.URL.RawQuery = "path=/tmp/y&acpSessionId=a"
+				r.URL.RawQuery = "path=" + path + "y&acpSessionId=a"
 				want = http.StatusUnauthorized
 			}
 			w := httptest.NewRecorder()

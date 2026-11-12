@@ -32,14 +32,18 @@ func newArtifactEnv(t *testing.T, name string) *artifactEnv {
 
 func newArtifactEnvWithAdvertisement(t *testing.T, name string, structured bool) *artifactEnv {
 	t.Helper()
-	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
-		t.Skip("artifact retrieval requires Linux or macOS")
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" && runtime.GOOS != "windows" {
+		t.Skip("artifact retrieval requires Linux, macOS or Windows")
 	}
 	path := filepath.Join(t.TempDir(), name)
 	uri := ""
 	reply := "[Recorded test](" + path + ")"
 	if structured {
-		uri = (&url.URL{Scheme: "file", Path: path}).String()
+		uriPath := filepath.ToSlash(path)
+		if runtime.GOOS == "windows" {
+			uriPath = "/" + uriPath
+		}
+		uri = (&url.URL{Scheme: "file", Path: uriPath}).String()
 		reply = "Here is your artifact."
 	}
 	t.Setenv("FERNGEIST_MOCK_RESOURCE_URI", uri)
@@ -126,6 +130,9 @@ func TestArtifactsReturnCompleteBytesAndHeadMetadata(t *testing.T) {
 			name = "Markdown"
 		}
 		t.Run(name, func(t *testing.T) {
+			if runtime.GOOS == "windows" && !structured {
+				t.Skip("Windows slice verifies structured whole-file retrieval independently")
+			}
 			e := newArtifactEnvWithAdvertisement(t, "live-full-history-test.mp4", structured)
 			assertCompleteArtifact(t, e)
 		})
@@ -242,6 +249,9 @@ func TestArtifactsReportAdmissionErrorsWithoutHostPaths(t *testing.T) {
 func TestArtifactAttachmentNamesAreSafe(t *testing.T) {
 	for _, name := range []string{`quoted"name.mp4`, `back\slash.mp4`, "résumé 你好.mp4"} {
 		t.Run(name, func(t *testing.T) {
+			if runtime.GOOS == "windows" && strings.ContainsAny(name, `"\`) {
+				t.Skip("invalid Windows filename; lexical rejection is covered at the workspace boundary")
+			}
 			e := newArtifactEnv(t, name)
 			if err := os.WriteFile(e.path, []byte("video"), 0o600); err != nil {
 				t.Fatal(err)
@@ -274,13 +284,14 @@ func TestArtifactsRequireAuthenticationBeforeSelectors(t *testing.T) {
 func TestArtifactsRejectInvalidSelectors(t *testing.T) {
 	s := newTestServer()
 	token := pairDevice(t, s)
-	valid := "path=%2Ftmp%2Fvideo.mp4&acpSessionId=opaque"
+	validPath := url.QueryEscape(filepath.Join(t.TempDir(), "video.mp4"))
+	valid := "path=" + validPath + "&acpSessionId=opaque"
 	queries := []string{"", "path=/tmp/x", "acpSessionId=a", valid + "&path=/tmp/y", valid + "&acpSessionId=b", valid + "&cwd=/tmp", valid + "&deviceId=b", valid + "&deviceID=b", valid + "&PATH=/tmp/x", valid + "&bad=%ZZ", valid + ";bad=x"}
 	for _, path := range []string{"relative", "/tmp/../tmp/x", "/tmp/", "/tmp/\n", "/tmp/\x00", "/tmp/\u200b", "/" + strings.Repeat("x", 4096), "/tmp/\xff"} {
 		queries = append(queries, "acpSessionId=a&path="+url.QueryEscape(path))
 	}
 	for _, id := range []string{"", " padded", "padded ", "a\n", "a\u200b", "\xff", strings.Repeat("x", 1025)} {
-		queries = append(queries, "path=/tmp/x&acpSessionId="+url.QueryEscape(id))
+		queries = append(queries, "path="+validPath+"&acpSessionId="+url.QueryEscape(id))
 	}
 	for _, query := range queries {
 		r := httptest.NewRequest(http.MethodGet, "/v1/runtimes/unknown/artifacts?"+query, nil)

@@ -3,6 +3,8 @@ package session
 import (
 	"encoding/json"
 	"net/url"
+	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 )
@@ -108,5 +110,5 @@ func (c artifactContent) matches(path string) bool {
 	u, err := url.Parse(uri)
 	return err == nil && u.Scheme == "file" && u.Host == "" && u.User == nil &&
 		u.Opaque == "" && u.RawQuery == "" && !u.ForceQuery && u.Fragment == "" &&
-		u.Path == path
+		(u.Path == path || runtime.GOOS == "windows" && u.Path == "/"+filepath.ToSlash(path))
 }
