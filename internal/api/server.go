@@ -337,12 +337,6 @@ func (s *Server) routes() (*http.ServeMux, *http.ServeMux) {
 	mux.HandleFunc("POST /v1/agents/{agentId}/stop", s.handleAgentStop)
 	mux.HandleFunc("POST /v1/runtimes/{runtimeId}/restart", s.handleRuntimeRestart)
 	mux.HandleFunc("GET /v1/runtimes/{runtimeId}/files/list", s.handleWorkspaceFileList)
-	// Deprecated: use /v1/projects/git. Remove these routes in protocol v3.
-	mux.HandleFunc("GET /v1/runtimes/{runtimeId}/git/refs", s.handleWorkspaceGitRefs)
-	mux.HandleFunc("GET /v1/runtimes/{runtimeId}/git/status", s.handleWorkspaceGitStatus)
-	mux.HandleFunc("GET /v1/runtimes/{runtimeId}/git/diff", s.handleWorkspaceGitDiff)
-	mux.HandleFunc("GET /v1/runtimes/{runtimeId}/git/log", s.handleWorkspaceGitLog)
-	mux.HandleFunc("GET /v1/runtimes/{runtimeId}/git/commits/{sha}", s.handleWorkspaceGitCommit)
 	mux.HandleFunc("GET /v1/projects/git/refs", s.projectWorkspace(s.handleWorkspaceGitRefs))
 	mux.HandleFunc("GET /v1/projects/git/status", s.projectWorkspace(s.handleWorkspaceGitStatus))
 	mux.HandleFunc("GET /v1/projects/git/diff", s.projectWorkspace(s.handleWorkspaceGitDiff))

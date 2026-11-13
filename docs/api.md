@@ -525,8 +525,7 @@ an existing non-bare checkout (main or linked worktree); a root symlink is
 canonicalized. Missing, empty, repeated, relative, or NUL-containing `cwd`, a
 subdirectory, a file, a bare repository, or any `acpSessionId` parameter returns
 `400`. A missing checkout returns `404`; a non-repository or Git failure returns
-`422`. Runtime routes retain their session selection and reject any `cwd`
-parameter with `400`, including when `acpSessionId` is also present.
+`422`.
 
 **Trust boundary:** any paired client with `read` scope can select any checkout
 the gateway OS user can read. Checkout validation is not an authorization
@@ -534,12 +533,10 @@ allowlist. There is no project-scoped `/files/list` route.
 
 #### Runtime workspace responses
 
-The runtime-scoped Git routes below (`refs`, `status`, `diff`, `log`, and
-`commits/{sha}`) are **deprecated**. Use the corresponding
-`/v1/projects/git/...` routes for new clients. The runtime Git routes remain
-available in protocol v3 and are planned for removal in a later version. The
-runtime file-list route is not deprecated and remains available for non-Git
-projects. File contents come from [`/v1/files`](#file-retrieval).
+Protocol v3 removes the runtime-scoped Git routes (`refs`, `status`, `diff`,
+`log`, and `commits/{sha}`). Use the `/v1/projects/git/...` routes; the Git
+sections below document the shared response shapes. The runtime file-list
+route remains available for non-Git projects. File contents come from [`/v1/files`](#file-retrieval).
 
 - `GET /v1/runtimes/{runtimeId}/files/list`
   - Lists the files of the runtime's project directory so a client can resolve

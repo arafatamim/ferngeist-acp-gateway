@@ -24,7 +24,7 @@ type fileListResponse struct {
 	Truncated bool     `json:"truncated"`
 }
 
-// gitStatusResponse is the payload for GET /v1/runtimes/{id}/git/status.
+// gitStatusResponse is the payload for GET /v1/projects/git/status.
 type gitStatusResponse struct {
 	Branch  string                  `json:"branch"`
 	Ahead   int                     `json:"ahead"`
@@ -126,7 +126,7 @@ func (s *Server) handleWorkspaceFileList(w http.ResponseWriter, r *http.Request)
 }
 
 // handleWorkspaceGitRefs lists the refs a client can compare against.
-// GET /v1/runtimes/{runtimeId}/git/refs
+// GET /v1/projects/git/refs
 func (s *Server) handleWorkspaceGitRefs(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireGatewayScope(w, r, pairing.ScopeRead); !ok {
 		return
@@ -144,7 +144,7 @@ func (s *Server) handleWorkspaceGitRefs(w http.ResponseWriter, r *http.Request) 
 }
 
 // handleWorkspaceGitStatus returns branch, ahead/behind, and changed files.
-// GET /v1/runtimes/{runtimeId}/git/status
+// GET /v1/projects/git/status
 func (s *Server) handleWorkspaceGitStatus(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireGatewayScope(w, r, pairing.ScopeRead); !ok {
 		return
@@ -254,7 +254,7 @@ func parseBranchHeader(resp *gitStatusResponse, out string) {
 // object with ?path=, otherwise a JSON array with one entry per changed file
 // (the same set /git/status reports). oldText is the committed version
 // (git show HEAD:<path>), newText the working-tree copy. This replaces the
-// old raw unified-patch shape {path?,diff}. GET /v1/runtimes/{runtimeId}/git/diff
+// old raw unified-patch shape {path?,diff}. GET /v1/projects/git/diff
 func (s *Server) handleWorkspaceGitDiff(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireGatewayScope(w, r, pairing.ScopeRead); !ok {
 		return
@@ -390,7 +390,7 @@ func (s *Server) writeCommitFileDiff(w http.ResponseWriter, r *http.Request, cwd
 }
 
 // handleWorkspaceGitLog returns one page of commit history, newest first.
-// GET /v1/runtimes/{runtimeId}/git/log?head=<sha>&skip=<n>&limit=<n>&compare=<ref>&beyond=<n>
+// GET /v1/projects/git/log?head=<sha>&skip=<n>&limit=<n>&compare=<ref>&beyond=<n>
 func (s *Server) handleWorkspaceGitLog(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireGatewayScope(w, r, pairing.ScopeRead); !ok {
 		return
@@ -436,7 +436,7 @@ func (s *Server) handleWorkspaceGitLog(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleWorkspaceGitCommit returns the files a commit changed under cwd,
-// compared with its first parent. GET /v1/runtimes/{runtimeId}/git/commits/{sha}
+// compared with its first parent. GET /v1/projects/git/commits/{sha}
 func (s *Server) handleWorkspaceGitCommit(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireGatewayScope(w, r, pairing.ScopeRead); !ok {
 		return

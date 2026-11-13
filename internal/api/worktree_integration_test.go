@@ -98,7 +98,7 @@ func TestWorktrees_EndToEnd(t *testing.T) {
 	readWSMessage(t, ws) // session/new result
 	readWSMessage(t, ws) // session_info_update
 
-	rec = do(t, http.MethodGet, "/v1/runtimes/"+h.runtimeID+"/git/status", "")
+	rec = do(t, http.MethodGet, "/v1/projects/git/status?cwd="+url.QueryEscape(wt.Path), "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("git status = %d, body=%s", rec.Code, rec.Body.String())
 	}
@@ -114,7 +114,7 @@ func TestWorktrees_EndToEnd(t *testing.T) {
 		t.Fatalf("status vs base = %+v", st.Changed)
 	}
 
-	rec = do(t, http.MethodGet, "/v1/runtimes/"+h.runtimeID+"/git/diff?path=a.txt", "")
+	rec = do(t, http.MethodGet, "/v1/projects/git/diff?path=a.txt&cwd="+url.QueryEscape(wt.Path), "")
 	var diff acp.ToolCallContentDiff
 	if err := json.Unmarshal(rec.Body.Bytes(), &diff); err != nil {
 		t.Fatalf("diff: %v body=%s", err, rec.Body.String())

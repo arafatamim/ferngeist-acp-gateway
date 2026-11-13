@@ -86,6 +86,14 @@ func newWorkspaceEnv(t *testing.T, proj string) *workspaceEnv {
 
 	env.do = func(t *testing.T, path string) *httptest.ResponseRecorder {
 		t.Helper()
+		// Project git routes take the checkout as ?cwd=; default to env's project.
+		if strings.HasPrefix(path, "/v1/projects/git/") && !strings.Contains(path, "cwd=") {
+			sep := "?"
+			if strings.Contains(path, "?") {
+				sep = "&"
+			}
+			path += sep + "cwd=" + url.QueryEscape(proj)
+		}
 		req := httptest.NewRequest(http.MethodGet, path, nil)
 		req.Header.Set("Authorization", "Bearer "+env.h.token)
 		rec := httptest.NewRecorder()
@@ -108,7 +116,7 @@ func TestWorkspaceGitStatusCleanTreeReturnsEmptyArray(t *testing.T) {
 	env := newWorkspaceEnv(t, proj)
 	for _, query := range []string{"", "?compare=main"} {
 		t.Run(query, func(t *testing.T) {
-			rec := env.do(t, "/v1/runtimes/"+env.h.runtimeID+"/git/status"+query)
+			rec := env.do(t, "/v1/projects/git/status"+query)
 			if rec.Code != http.StatusOK {
 				t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
 			}
@@ -222,22 +230,10 @@ func TestWorkspaceEndpoints_EndToEnd(t *testing.T) {
 	}
 
 	env := newWorkspaceEnv(t, proj)
-	h := env.h
 	do := env.do
 
-	// Scoping to the ACP session the agent just created resolves the same
-	// project; a session the gateway never saw opened is unknown.
-	rec := do(t, "/v1/runtimes/"+h.runtimeID+"/git/status?acpSessionId="+env.acpSessionID)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("scoped git status code = %d, body=%s", rec.Code, rec.Body.String())
-	}
-	rec = do(t, "/v1/runtimes/"+h.runtimeID+"/git/status?acpSessionId=never-opened")
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("unknown acpSessionId code = %d, want 404", rec.Code)
-	}
-
 	// 5. Ref listing for the compare picker.
-	rec = do(t, "/v1/runtimes/"+h.runtimeID+"/git/refs")
+	rec := do(t, "/v1/projects/git/refs")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("git refs code = %d, body=%s", rec.Code, rec.Body.String())
 	}
@@ -261,12 +257,9 @@ func TestWorkspaceEndpoints_EndToEnd(t *testing.T) {
 	if refs.Default != "main" {
 		t.Fatalf("refs default = %q, want main", refs.Default)
 	}
-	if rec := do(t, "/v1/runtimes/"+h.runtimeID+"/git/refs?acpSessionId=never-opened"); rec.Code != http.StatusNotFound {
-		t.Fatalf("refs unknown acpSessionId code = %d, want 404", rec.Code)
-	}
 
 	// 3. Git status lists the untracked and modified files.
-	rec = do(t, "/v1/runtimes/"+h.runtimeID+"/git/status")
+	rec = do(t, "/v1/projects/git/status")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("git status code = %d, body=%s", rec.Code, rec.Body.String())
 	}
@@ -338,7 +331,7 @@ func TestWorkspaceEndpoints_EndToEnd(t *testing.T) {
 
 	// 4. Git diff for the edited file returns a ToolCallContentDiff with the
 	// new text and the committed old text.
-	rec = do(t, "/v1/runtimes/"+h.runtimeID+"/git/diff?path=edited.txt")
+	rec = do(t, "/v1/projects/git/diff?path=edited.txt")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("git diff code = %d, body=%s", rec.Code, rec.Body.String())
 	}
@@ -360,7 +353,7 @@ func TestWorkspaceEndpoints_EndToEnd(t *testing.T) {
 	}
 
 	// 4b. Whole-tree diff returns an array with an entry per changed file.
-	rec = do(t, "/v1/runtimes/"+h.runtimeID+"/git/diff")
+	rec = do(t, "/v1/projects/git/diff")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("git diff whole-tree code = %d, body=%s", rec.Code, rec.Body.String())
 	}
@@ -397,7 +390,7 @@ func TestWorkspaceEndpoints_EndToEnd(t *testing.T) {
 	}
 
 	// 6. History: log, commit files, and a file diff from a commit.
-	rec = do(t, "/v1/runtimes/"+h.runtimeID+"/git/log?limit=1")
+	rec = do(t, "/v1/projects/git/log?limit=1")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("git log code = %d, body=%s", rec.Code, rec.Body.String())
 	}
@@ -413,7 +406,7 @@ func TestWorkspaceEndpoints_EndToEnd(t *testing.T) {
 	if lp.Total != 3 {
 		t.Fatalf("git log total = %d, want 3 (the whole walk)", lp.Total)
 	}
-	rec = do(t, "/v1/runtimes/"+h.runtimeID+"/git/log?head="+lp.Head+"&limit=1&skip=2")
+	rec = do(t, "/v1/projects/git/log?head="+lp.Head+"&limit=1&skip=2")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("git log last page code = %d, body=%s", rec.Code, rec.Body.String())
 	}
@@ -424,18 +417,18 @@ func TestWorkspaceEndpoints_EndToEnd(t *testing.T) {
 	if len(lpLast.Commits) != 1 || lpLast.Total != 3 {
 		t.Fatalf("git log last page = %+v, want one commit and total 3", lpLast)
 	}
-	rec = do(t, "/v1/runtimes/"+h.runtimeID+"/git/commits/"+lp.Head)
+	rec = do(t, "/v1/projects/git/commits/"+lp.Head)
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"path":"partial.txt"`) {
 		t.Fatalf("git commit code = %d, body=%s", rec.Code, rec.Body.String())
 	}
-	rec = do(t, "/v1/runtimes/"+h.runtimeID+"/git/diff?path=partial.txt&commit="+lp.Head)
+	rec = do(t, "/v1/projects/git/diff?path=partial.txt&commit="+lp.Head)
 	var cd acp.ToolCallContentDiff
 	if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &cd) != nil || cd.NewText != "a\nb\nc\n" || cd.OldText != nil {
 		t.Fatalf("commit diff code = %d, body=%s", rec.Code, rec.Body.String())
 	}
 
 	// 7. Compare mode: the file list is the strict two-dot `git diff cmp` set.
-	rec = do(t, "/v1/runtimes/"+h.runtimeID+"/git/status?compare=cmp")
+	rec = do(t, "/v1/projects/git/status?compare=cmp")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("compare status code = %d, body=%s", rec.Code, rec.Body.String())
 	}
@@ -483,7 +476,7 @@ func TestWorkspaceEndpoints_EndToEnd(t *testing.T) {
 	// merge-base sha can never masquerade as a comparison. An empty or
 	// whitespace-only compare= is not an honoured comparison either.
 	for _, q := range []string{"", "compare=", "compare=%20"} {
-		rec = do(t, "/v1/runtimes/"+h.runtimeID+"/git/status?"+q)
+		rec = do(t, "/v1/projects/git/status?"+q)
 		if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), `"compare"`) {
 			t.Fatalf("git/status?%s code = %d, body=%s", q, rec.Code, rec.Body.String())
 		}
@@ -491,7 +484,7 @@ func TestWorkspaceEndpoints_EndToEnd(t *testing.T) {
 	// A malformed or unknown target is a 400: never working-tree data under a
 	// branch label.
 	for _, q := range []string{"compare=..%2Fetc", "compare=-x", "compare=nope"} {
-		if rec := do(t, "/v1/runtimes/"+h.runtimeID+"/git/status?"+q); rec.Code != http.StatusBadRequest {
+		if rec := do(t, "/v1/projects/git/status?"+q); rec.Code != http.StatusBadRequest {
 			t.Fatalf("git/status?%s code = %d, want 400, body=%s", q, rec.Code, rec.Body.String())
 		}
 	}
@@ -500,7 +493,7 @@ func TestWorkspaceEndpoints_EndToEnd(t *testing.T) {
 	// exists only in the target reads as a deletion. Without compare it has no
 	// oldText at all (cmp-only.txt is not in HEAD), so this distinguishes the
 	// two comparisons.
-	rec = do(t, "/v1/runtimes/"+h.runtimeID+"/git/diff?path=cmp-only.txt&compare=cmp")
+	rec = do(t, "/v1/projects/git/diff?path=cmp-only.txt&compare=cmp")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("compare diff code = %d, body=%s", rec.Code, rec.Body.String())
 	}
@@ -512,7 +505,7 @@ func TestWorkspaceEndpoints_EndToEnd(t *testing.T) {
 		t.Fatalf("compare diff = %+v, want oldText %q and empty newText", cdiff, "only\n")
 	}
 	for _, q := range []string{"compare=nope", "compare=..%2Fetc"} {
-		if rec := do(t, "/v1/runtimes/"+h.runtimeID+"/git/diff?path=base.txt&"+q); rec.Code != http.StatusBadRequest {
+		if rec := do(t, "/v1/projects/git/diff?path=base.txt&"+q); rec.Code != http.StatusBadRequest {
 			t.Fatalf("git/diff?path=base.txt&%s code = %d, want 400, body=%s", q, rec.Code, rec.Body.String())
 		}
 	}
@@ -521,7 +514,7 @@ func TestWorkspaceEndpoints_EndToEnd(t *testing.T) {
 	// and not on disk, so without compare it is absent; with compare=cmp it
 	// reads as a deletion with oldText from cmp. base.txt is dirty against HEAD
 	// but identical to cmp, so compare must leave it out.
-	rec = do(t, "/v1/runtimes/"+h.runtimeID+"/git/diff?compare=cmp")
+	rec = do(t, "/v1/projects/git/diff?compare=cmp")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("compare whole-tree diff code = %d, body=%s", rec.Code, rec.Body.String())
 	}
@@ -540,13 +533,13 @@ func TestWorkspaceEndpoints_EndToEnd(t *testing.T) {
 		t.Fatalf("base.txt in whole-tree compare: dirty against HEAD but identical to cmp: %+v", d)
 	}
 	for _, q := range []string{"compare=nope", "compare=..%2Fetc"} {
-		if rec := do(t, "/v1/runtimes/"+h.runtimeID+"/git/diff?"+q); rec.Code != http.StatusBadRequest {
+		if rec := do(t, "/v1/projects/git/diff?"+q); rec.Code != http.StatusBadRequest {
 			t.Fatalf("git/diff?%s code = %d, want 400, body=%s", q, rec.Code, rec.Body.String())
 		}
 	}
 
 	// 7c. Compare mode: the history range is HEAD --not cmp, newest first.
-	rec = do(t, "/v1/runtimes/"+h.runtimeID+"/git/log?compare=cmp&limit=50")
+	rec = do(t, "/v1/projects/git/log?compare=cmp&limit=50")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("compare log code = %d, body=%s", rec.Code, rec.Body.String())
 	}
@@ -572,12 +565,12 @@ func TestWorkspaceEndpoints_EndToEnd(t *testing.T) {
 	if len(clp.Target) != 0 {
 		t.Fatalf("compare log target = %+v, want none without beyond", clp.Target)
 	}
-	rec = do(t, "/v1/runtimes/"+h.runtimeID+"/git/log?compare=cmp&limit=50&beyond=1")
+	rec = do(t, "/v1/projects/git/log?compare=cmp&limit=50&beyond=1")
 	var clb workspace.LogPage
 	if err := json.Unmarshal(rec.Body.Bytes(), &clb); err != nil || len(clb.Target) != 1 || clb.Target[0].SHA != cmpSha {
 		t.Fatalf("compare log beyond=1 target = %+v, %v", clb.Target, err)
 	}
-	rec = do(t, "/v1/runtimes/"+h.runtimeID+"/git/log?compare=cmp&limit=50&beyond=2")
+	rec = do(t, "/v1/projects/git/log?compare=cmp&limit=50&beyond=2")
 	var clb2 workspace.LogPage
 	if err := json.Unmarshal(rec.Body.Bytes(), &clb2); err != nil || len(clb2.Target) != 2 || clb2.Target[0].SHA != cmpSha {
 		t.Fatalf("compare log beyond=2 target = %+v, %v", clb2.Target, err)
@@ -587,7 +580,7 @@ func TestWorkspaceEndpoints_EndToEnd(t *testing.T) {
 		t.Fatalf("compare log beyond=2 total = %d, want 2", clb2.Total)
 	}
 	// Paging by the pinned head keeps the same range.
-	rec = do(t, "/v1/runtimes/"+h.runtimeID+"/git/log?compare=cmp&head="+clp.Head+"&limit=1&skip=1")
+	rec = do(t, "/v1/projects/git/log?compare=cmp&head="+clp.Head+"&limit=1&skip=1")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("compare log page 2 code = %d, body=%s", rec.Code, rec.Body.String())
 	}
@@ -603,7 +596,7 @@ func TestWorkspaceEndpoints_EndToEnd(t *testing.T) {
 	}
 	// A branch compared with itself is an empty walk: no commits and total 0,
 	// while hasMore stays the authority on whether another page exists.
-	rec = do(t, "/v1/runtimes/"+h.runtimeID+"/git/log?compare=main")
+	rec = do(t, "/v1/projects/git/log?compare=main")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("self compare log code = %d, body=%s", rec.Code, rec.Body.String())
 	}
@@ -615,7 +608,7 @@ func TestWorkspaceEndpoints_EndToEnd(t *testing.T) {
 		t.Fatalf("self compare log = %+v, body=%s, want no commits and total 0", self, rec.Body.String())
 	}
 	for _, q := range []string{"compare=nope", "compare=..%2Fetc"} {
-		if rec := do(t, "/v1/runtimes/"+h.runtimeID+"/git/log?"+q); rec.Code != http.StatusBadRequest {
+		if rec := do(t, "/v1/projects/git/log?"+q); rec.Code != http.StatusBadRequest {
 			t.Fatalf("git/log?%s code = %d, want 400, body=%s", q, rec.Code, rec.Body.String())
 		}
 	}
@@ -629,36 +622,15 @@ func TestWorkspaceEndpoints_EndToEnd(t *testing.T) {
 		"/git/diff?commit=" + lp.Head,
 		"/git/diff?commit=" + lp.Head + "&path=../outside.txt",
 	} {
-		if rec := do(t, "/v1/runtimes/"+h.runtimeID+path); rec.Code != http.StatusBadRequest {
+		if rec := do(t, "/v1/projects"+path); rec.Code != http.StatusBadRequest {
 			t.Fatalf("%s code = %d, want 400, body=%s", path, rec.Code, rec.Body.String())
 		}
 	}
 
-	// An empty repository answers with head "", no commits and total 0. Its cwd
-	// comes from a second agent session pointed at it.
+	// An empty repository answers with head "", no commits and total 0.
 	empty := t.TempDir()
 	runGitCLI(t, empty, "init", "-q", "-b", "main")
-	resp2 := h.connectResilient()
-	ws2 := h.dialSessionWS(resp2.SessionID, resp2.AttachToken)
-	defer func() { _ = ws2.CloseNow() }()
-	sendWSMessage(t, ws2, `{"jsonrpc":"2.0","id":"1","method":"initialize","params":{"protocolVersion":1,"capabilities":{},"clientInfo":{"name":"test-client","version":"1.0.0"}}}`)
-	readWSMessage(t, ws2) // initialize result
-	sendWSMessage(t, ws2, `{"jsonrpc":"2.0","id":"2","method":"authenticate","params":{}}`)
-	readWSMessage(t, ws2) // authenticate result
-	emptyFrame, err := json.Marshal(map[string]any{
-		"jsonrpc": "2.0",
-		"id":      10,
-		"method":  "session/new",
-		"params":  map[string]any{"cwd": empty},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	sendWSMessage(t, ws2, string(emptyFrame))
-	readWSMessage(t, ws2) // session/new result
-	readWSMessage(t, ws2) // session_info_update notification
-
-	rec = do(t, "/v1/runtimes/"+resp2.RuntimeID+"/git/log")
+	rec = do(t, "/v1/projects/git/log?cwd="+url.QueryEscape(empty))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("empty repo log code = %d, body=%s", rec.Code, rec.Body.String())
 	}
@@ -942,7 +914,6 @@ func TestProjectWorkspaceRejectsInvalidSelectorsAndEscapingFiles(t *testing.T) {
 		{"relative", "/v1/projects/git/status?cwd=relative", 400},
 		{"nul", "/v1/projects/git/status?cwd=" + escaped + "%00", 400},
 		{"project session selector", "/v1/projects/git/status?cwd=" + escaped + "&acpSessionId=", 400},
-		{"runtime cwd selector", "/v1/runtimes/absent/git/status?cwd=" + escaped + "&acpSessionId=chat", 400},
 		{"subdirectory", "/v1/projects/git/status?cwd=" + url.QueryEscape(sub), 400},
 		{"git dir", "/v1/projects/git/status?cwd=" + url.QueryEscape(filepath.Join(root, ".git")), 400},
 		{"bare", "/v1/projects/git/status?cwd=" + url.QueryEscape(bare), 400},

@@ -78,8 +78,9 @@ against the code.
     no transfer slot.
 
   Clients join relative paths (from `/files/list`, `/git/status`) onto the
-  session or project `cwd`. Migration table in docs/api.md. `/files/list` and
-  git routes are unchanged; the deprecated runtime git routes stay in v3.
+  session or project `cwd`. Migration table in docs/api.md. `/files/list` is
+  unchanged. The deprecated `/v1/runtimes/{id}/git/*` routes are removed; use
+  `/v1/projects/git/*`.
   (2026-11-12, unreleased)
 
 - `[additive]` Shared HTTP request logs redact `path` and `acpSessionId` query
