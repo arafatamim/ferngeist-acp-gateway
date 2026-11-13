@@ -192,7 +192,8 @@ func (p *StdioPump) drainContext() context.Context {
 }
 
 // forward is the last stage: it runs the canonical delivery bookkeeping and
-// then queues the frame(s), after any BeforeDelivery presentation. It restores
+// queues the frame(s) under the same lock; only a reply with a BeforeDelivery
+// presentation is queued after it, once presentation finishes. It restores
 // the client's own request id on a reply, withholds a reply for a superseded
 // connection (a finished prompt there becomes a _ferngeist/turn_ended
 // notification), re-sends the agent's unanswered requests behind a session/load
@@ -264,9 +265,15 @@ func (p *StdioPump) prepareDelivery(f *frame) (replyDelivery, retainedParams, bo
 	delivery := replyDelivery{gen: p.connGen}
 	if bound {
 		delivery.out = p.reqIDs.scopeElicitation(p.connGen, f.probe, out)
+		if !p.presentsLocked(f) {
+			// Queued under the lock that numbered it, so a catch-up replay can
+			// neither repeat it nor overtake it: see answerCatchUp.
+			evict = p.queueLocked(delivery.out)
+			delivery.out = nil
+		}
 	}
 	p.clientMu.Unlock()
-	return delivery, params, false, nil
+	return delivery, params, false, evict
 }
 
 // restoreLocked completes a reply that restores sessionID (the last of out) for

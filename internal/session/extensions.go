@@ -226,10 +226,7 @@ func (p *StdioPump) retainReplyParams(f *clientFrame) {
 	if p.ext == nil || f.Method == "" || f.ID == nil || f.fields == nil {
 		return
 	}
-	selector := agentext.Selector{
-		Direction: agentext.ToClient, Kind: agentext.Reply, Method: agentext.Method(f.Method),
-	}
-	if !p.ext.Enabled(selector, agentext.BeforeDelivery) {
+	if !p.ext.Enabled(replySelector(f.Method), agentext.BeforeDelivery) {
 		return
 	}
 	raw := f.fields["params"]
@@ -246,24 +243,29 @@ func (p *StdioPump) retainReplyParams(f *clientFrame) {
 	p.reqIDs.setParams(f.ID, body, release)
 }
 
-// present runs the matching BeforeDelivery chain for one correlated reply, then
-// delivers. Presentation never changes canonical state; only the bytes queued
-// to the client change, and only while the asking generation is still current.
+// presentsLocked reports whether a BeforeDelivery chain presents this reply to
+// the generation that asked for it. Every other frame is queued under the lock
+// that recorded it. Caller holds clientMu.
+func (p *StdioPump) presentsLocked(f *frame) bool {
+	if p.ext == nil || !f.isReply || f.probe.Error != nil || f.origin.method == "" || f.origin.gen != p.connGen {
+		return false
+	}
+	return p.ext.Enabled(replySelector(f.origin.method), agentext.BeforeDelivery)
+}
+
+// replySelector matches the agent's reply to a client request for method.
+func replySelector(method string) agentext.Selector {
+	return agentext.Selector{Direction: agentext.ToClient, Kind: agentext.Reply, Method: agentext.Method(method)}
+}
+
+// present runs the matching BeforeDelivery chain for a reply presentsLocked
+// accepted, then delivers. Presentation never changes canonical state; only the
+// bytes queued to the client change, and only while the asking generation is
+// still current.
 func (p *StdioPump) present(f *frame, delivery replyDelivery, params retainedParams) {
 	defer params.releaseBudget()
-	if p.ext == nil || !f.isReply || f.probe.Error != nil || f.origin.method == "" ||
-		f.origin.gen != delivery.gen || delivery.gen != p.connectionGeneration() {
-		p.deliver(delivery)
-		return
-	}
-	selector := agentext.Selector{
-		Direction: agentext.ToClient, Kind: agentext.Reply, Method: agentext.Method(f.origin.method),
-	}
-	mode, ok := p.ext.Mode(selector, agentext.BeforeDelivery)
-	if !ok {
-		p.deliver(delivery)
-		return
-	}
+	selector := replySelector(f.origin.method)
+	mode, _ := p.ext.Mode(selector, agentext.BeforeDelivery) // The registry is immutable: presentsLocked matched it.
 	if params.dropped {
 		if failure, _ := p.ext.Failure(selector, agentext.BeforeDelivery); failure == agentext.Reject {
 			p.closeGeneration(delivery.gen)
@@ -332,13 +334,6 @@ func (p *StdioPump) deliver(delivery replyDelivery) {
 	if evict != nil {
 		_ = evict.CloseNow()
 	}
-}
-
-// connectionGeneration reads the current client generation under clientMu.
-func (p *StdioPump) connectionGeneration() int64 {
-	p.clientMu.Lock()
-	defer p.clientMu.Unlock()
-	return p.connGen
 }
 
 // extensionErrorFrame is the gateway's answer to a rejected request.
