@@ -169,29 +169,25 @@ working directory — PATH-resolved agents run in the gateway's own cwd, which i
 not the project.
 
 Session-free project routes (`/v1/projects/git/{status,diff,log,refs}`,
-`/v1/projects/git/commits/{sha}`, and `/v1/projects/files`) share these handlers
+and `/v1/projects/git/commits/{sha}`) share these handlers
 and payloads. An explicit route wrapper selects `workspace.CheckoutRoot`
 instead of the session resolver. Exactly one absolute `cwd` selects a non-bare
 checkout root, including a linked worktree; symlinks are canonicalized before
-checking root identity and confining file paths. Subdirectories and conflicting
+checking root identity and confining diff paths. Subdirectories and conflicting
 selectors are rejected. Runtime routes keep `acpSessionId` selection and reject
 `cwd`; project routes reject `acpSessionId`. No process is started or required.
 A paired client with `read` scope may select any checkout readable by the
 gateway OS user; checkout validation supplies no authorization allowlist.
 
+File contents are served only by `GET /v1/files?path=<absolute>`
+(`internal/api/files.go`, raw bytes, `read`+`control`); see docs/api.md.
+
 The workspace handlers live in `internal/api/workspace.go` and are gated behind
-the same `ScopeRead` auth used by `handleRuntimeLogs`. The file and git
+the same `ScopeRead` auth used by `handleRuntimeLogs`. The git
 payloads reuse the ACP **v1** schema types vendored in
 `github.com/coder/acp-go-sdk` (package `acp`) so the Ferngeist client can decode
 them with SDK types it already has:
 
-- `GET /v1/runtimes/{id}/files?path=<rel>` — bounded file read confined to the
-  project directory (streams through `io.LimitReader` at the 1 MiB cap, so a
-  huge file is never buffered in full; `truncated` flag). Text files return an
-  `acp.TextResourceContents` (`text`/`uri`/`mimeType`); binary files (NUL-byte
-  detection) return an `acp.BlobResourceContents` (`blob` base64/`uri`/`mimeType`).
-  `size`/`truncated` are gateway extensions (`size` is the full on-disk file
-  size); `uri` is the absolute `file://` URI.
 - `GET /v1/runtimes/{id}/files/list` — the tracked and untracked, non-ignored
   paths under the project directory (`git ls-files -z --cached --others
   --exclude-standard`), sorted and deduplicated, capped at 50,000 and gzipped

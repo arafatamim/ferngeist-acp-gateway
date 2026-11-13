@@ -180,20 +180,6 @@ func TestCountFileLines(t *testing.T) {
 }
 
 func TestFileHelpers(t *testing.T) {
-	// FileURI produces a file:// URI with forward slashes.
-	uri := FileURI(`C:\proj\a b.txt`)
-	if !strings.HasPrefix(uri, "file://") || !strings.Contains(uri, "a%20b.txt") {
-		t.Fatalf("FileURI(%q) = %q, want file:// with encoded space", `C:\proj\a b.txt`, uri)
-	}
-
-	// MimeTypeFor maps common extensions; unknown returns "".
-	if got := MimeTypeFor("x.json"); got != "application/json" {
-		t.Fatalf("MimeTypeFor(x.json) = %q, want application/json", got)
-	}
-	if got := MimeTypeFor("x.unknown_ext"); got != "" {
-		t.Fatalf("MimeTypeFor(x.unknown_ext) = %q, want empty", got)
-	}
-
 	// IsBinary detects a NUL byte.
 	if !IsBinary([]byte{0x00, 0x01}) {
 		t.Fatal("IsBinary should flag NUL byte")

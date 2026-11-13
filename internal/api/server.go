@@ -100,6 +100,12 @@ type Server struct {
 	streamHandlers        sync.WaitGroup
 	streamSnapshotTimeout time.Duration // test seam for the snapshot slot budget
 	streamRecheck         time.Duration // test seam for the credential recheck
+
+	fileMu      sync.Mutex
+	fileCount   int
+	fileDevices map[string]int
+	fileCtx     context.Context
+	fileCancel  context.CancelFunc
 }
 
 // ProtocolVersion identifies the current gateway-to-client protocol version.
@@ -112,7 +118,11 @@ type Server struct {
 // responses the client must read. See docs/changelog.md.
 // Backward-compatible prompt delivery and catch-up corrections retain v2;
 // see the explicit semantic-versioning exception in docs/changelog.md.
-const ProtocolVersion = "v2"
+//
+// v3: GET/HEAD /v1/files?path=<absolute> (raw bytes, read+control) replaces the
+// JSON readers GET /v1/runtimes/{id}/files and GET /v1/projects/files;
+// POST /v1/files/stat adds batch metadata.
+const ProtocolVersion = "v3"
 
 // Security and request limits.
 const (
@@ -237,6 +247,7 @@ type Deps struct {
 // a single ACP WebSocket path.
 func NewServer(deps Deps) *Server {
 	cfg := normalizeSecurityConfig(deps.Config)
+	fileCtx, fileCancel := context.WithCancel(context.Background())
 	server := &Server{
 		logger:          deps.Logger.With("component", "api"),
 		cfg:             cfg,
@@ -263,10 +274,18 @@ func NewServer(deps Deps) *Server {
 		streamStop:            make(chan struct{}),
 		streamSnapshotTimeout: turnStreamSnapshotTimeout,
 		streamRecheck:         turnStreamRecheck,
+		fileDevices:           make(map[string]int),
+		fileCtx:               fileCtx,
+		fileCancel:            fileCancel,
 	}
 
-	mux, adminMux := server.routes()
+	server.configureHTTPServers()
+	return server
+}
 
+func (server *Server) configureHTTPServers() {
+	cfg := server.cfg
+	mux, adminMux := server.routes()
 	adminAddr := strings.TrimSpace(cfg.AdminListenAddr)
 	if adminAddr == "" {
 		adminAddr = "127.0.0.1:0"
@@ -290,13 +309,14 @@ func NewServer(deps Deps) *Server {
 		IdleTimeout:       60 * time.Second,
 	}
 
-	return server
 }
 
 func (s *Server) routes() (*http.ServeMux, *http.ServeMux) {
 	mux := http.NewServeMux()
 	adminMux := http.NewServeMux()
 	mux.HandleFunc("/healthz", s.handleHealth)
+	mux.HandleFunc("/v1/files", s.handleFile)
+	mux.HandleFunc("POST /v1/files/stat", s.handleFileStat)
 	mux.HandleFunc("/v1/status", s.handleStatus)
 	mux.HandleFunc("GET /v1/quotas", s.handleQuotas)
 	mux.HandleFunc("/v1/agents", s.handleAgents)
@@ -316,7 +336,6 @@ func (s *Server) routes() (*http.ServeMux, *http.ServeMux) {
 	mux.HandleFunc("POST /v1/agents/{agentId}/connect", s.handleAgentConnect)
 	mux.HandleFunc("POST /v1/agents/{agentId}/stop", s.handleAgentStop)
 	mux.HandleFunc("POST /v1/runtimes/{runtimeId}/restart", s.handleRuntimeRestart)
-	mux.HandleFunc("GET /v1/runtimes/{runtimeId}/files", s.handleWorkspaceFile)
 	mux.HandleFunc("GET /v1/runtimes/{runtimeId}/files/list", s.handleWorkspaceFileList)
 	// Deprecated: use /v1/projects/git. Remove these routes in protocol v3.
 	mux.HandleFunc("GET /v1/runtimes/{runtimeId}/git/refs", s.handleWorkspaceGitRefs)
@@ -324,7 +343,6 @@ func (s *Server) routes() (*http.ServeMux, *http.ServeMux) {
 	mux.HandleFunc("GET /v1/runtimes/{runtimeId}/git/diff", s.handleWorkspaceGitDiff)
 	mux.HandleFunc("GET /v1/runtimes/{runtimeId}/git/log", s.handleWorkspaceGitLog)
 	mux.HandleFunc("GET /v1/runtimes/{runtimeId}/git/commits/{sha}", s.handleWorkspaceGitCommit)
-	mux.HandleFunc("GET /v1/projects/files", s.projectWorkspace(s.handleWorkspaceFile))
 	mux.HandleFunc("GET /v1/projects/git/refs", s.projectWorkspace(s.handleWorkspaceGitRefs))
 	mux.HandleFunc("GET /v1/projects/git/status", s.projectWorkspace(s.handleWorkspaceGitStatus))
 	mux.HandleFunc("GET /v1/projects/git/diff", s.projectWorkspace(s.handleWorkspaceGitDiff))
@@ -343,18 +361,22 @@ func (s *Server) routes() (*http.ServeMux, *http.ServeMux) {
 	mux.HandleFunc("GET /v1/projects", s.handleProjects)
 	mux.HandleFunc("POST /v1/devices/push-token", s.handleRegisterPushToken)
 	mux.HandleFunc("GET /v1/devices/push-config", s.handlePushConfig)
-	adminMux.HandleFunc("GET /admin/v1/status", s.handleAdminStatus)
-	adminMux.HandleFunc("POST /admin/v1/pairings/start", s.handleAdminPairingStart)
-	adminMux.HandleFunc("GET /admin/v1/pairings/{challengeId}", s.handleAdminPairingStatus)
-	adminMux.HandleFunc("DELETE /admin/v1/pairings/{challengeId}", s.handleAdminPairingCancel)
-	adminMux.HandleFunc("GET /admin/v1/devices", s.handleAdminDevices)
-	adminMux.HandleFunc("DELETE /admin/v1/devices/{deviceId}", s.handleAdminDeviceRevoke)
-	adminMux.HandleFunc("GET /admin/v1/agents", s.handleAdminCustomAgentList)
-	adminMux.HandleFunc("POST /admin/v1/agents/custom", s.handleCustomAgentCreate)
-	adminMux.HandleFunc("PUT /admin/v1/agents/custom/{id}", s.handleCustomAgentUpdate)
-	adminMux.HandleFunc("DELETE /admin/v1/agents/custom/{id}", s.handleCustomAgentDelete)
+	s.registerAdminRoutes(adminMux)
 
 	return mux, adminMux
+}
+
+func (s *Server) registerAdminRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("GET /admin/v1/status", s.handleAdminStatus)
+	mux.HandleFunc("POST /admin/v1/pairings/start", s.handleAdminPairingStart)
+	mux.HandleFunc("GET /admin/v1/pairings/{challengeId}", s.handleAdminPairingStatus)
+	mux.HandleFunc("DELETE /admin/v1/pairings/{challengeId}", s.handleAdminPairingCancel)
+	mux.HandleFunc("GET /admin/v1/devices", s.handleAdminDevices)
+	mux.HandleFunc("DELETE /admin/v1/devices/{deviceId}", s.handleAdminDeviceRevoke)
+	mux.HandleFunc("GET /admin/v1/agents", s.handleAdminCustomAgentList)
+	mux.HandleFunc("POST /admin/v1/agents/custom", s.handleCustomAgentCreate)
+	mux.HandleFunc("PUT /admin/v1/agents/custom/{id}", s.handleCustomAgentUpdate)
+	mux.HandleFunc("DELETE /admin/v1/agents/custom/{id}", s.handleCustomAgentDelete)
 }
 
 // normalizeSecurityConfig applies safe security defaults based on whether the
@@ -418,6 +440,7 @@ func (s *Server) ListenAndServe() error {
 // http.Server.Shutdown does not close hijacked connections: without the join the
 // handler never writes the 1001 close frame and the client sees 1006.
 func (s *Server) Shutdown(ctx context.Context) error {
+	s.fileCancel()
 	s.streamMu.Lock()
 	s.stopStreams.Do(func() { close(s.streamStop) })
 	s.streamMu.Unlock()
@@ -559,11 +582,12 @@ func requestPath(r *http.Request) string {
 }
 
 // sanitizeRawQuery replaces sensitive values with a fixed placeholder so logs
-// do not leak bearer tokens or other credentials.
+// do not leak credentials or file selectors. Malformed queries are fully
+// redacted because parsing may leave sensitive values unrecognized.
 func sanitizeRawQuery(rawQuery string) string {
 	values, err := url.ParseQuery(rawQuery)
 	if err != nil {
-		return rawQuery
+		return "redacted"
 	}
 	for key := range values {
 		if isSensitiveQueryKey(key) {
@@ -576,7 +600,7 @@ func sanitizeRawQuery(rawQuery string) string {
 // isSensitiveQueryKey marks query parameters that should not be logged verbatim.
 func isSensitiveQueryKey(key string) bool {
 	switch strings.ToLower(strings.TrimSpace(key)) {
-	case "access_token", "token", "authorization":
+	case "access_token", "token", "authorization", "path", "acpsessionid":
 		return true
 	default:
 		return false

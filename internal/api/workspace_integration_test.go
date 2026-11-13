@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -13,7 +12,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -227,58 +225,9 @@ func TestWorkspaceEndpoints_EndToEnd(t *testing.T) {
 	h := env.h
 	do := env.do
 
-	// 1. File reader returns committed file content as an ACP TextResourceContents.
-	rec := do(t, "/v1/runtimes/"+h.runtimeID+"/files?path=committed.txt")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("files status = %d, body=%s", rec.Code, rec.Body.String())
-	}
-	var fr fileReadResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &fr); err != nil {
-		t.Fatal(err)
-	}
-	if fr.Text != "committed\n" || fr.Truncated {
-		t.Fatalf("file response = %+v, want text %q untruncated", fr, "committed\n")
-	}
-	if fr.Uri == "" {
-		t.Fatalf("file response Uri empty: %+v", fr)
-	}
-	if fr.Size != len("committed\n") {
-		t.Fatalf("file response Size = %d, want %d", fr.Size, len("committed\n"))
-	}
-	if !strings.HasPrefix(fr.Uri, "file://") {
-		t.Fatalf("Uri = %q, want file:// prefix", fr.Uri)
-	}
-
-	// 1b. Binary file returns a BlobResourceContents whose blob base64-decodes
-	// to the original bytes.
-	rec = do(t, "/v1/runtimes/"+h.runtimeID+"/files?path=clip%20%C3%A9%20%F0%9F%98%8E.bin")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("binary files status = %d, body=%s", rec.Code, rec.Body.String())
-	}
-	var br blobReadResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &br); err != nil {
-		t.Fatal(err)
-	}
-	decoded, err := base64.StdEncoding.DecodeString(br.Blob)
-	if err != nil {
-		t.Fatalf("blob base64 decode: %v", err)
-	}
-	if !bytes.Equal(decoded, []byte{0x00, 0x01, 0x02, 0x03}) {
-		t.Fatalf("blob decoded = %v, want original bytes", decoded)
-	}
-	if br.Size != 4 || br.Truncated {
-		t.Fatalf("binary response = %+v, want size 4 untruncated", br)
-	}
-
-	// 2. File reader rejects path traversal.
-	rec = do(t, "/v1/runtimes/"+h.runtimeID+"/files?path=../../outside.txt")
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("traversal status = %d, want 400", rec.Code)
-	}
-
 	// Scoping to the ACP session the agent just created resolves the same
 	// project; a session the gateway never saw opened is unknown.
-	rec = do(t, "/v1/runtimes/"+h.runtimeID+"/git/status?acpSessionId="+env.acpSessionID)
+	rec := do(t, "/v1/runtimes/"+h.runtimeID+"/git/status?acpSessionId="+env.acpSessionID)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("scoped git status code = %d, body=%s", rec.Code, rec.Body.String())
 	}
@@ -858,8 +807,8 @@ func TestWorkspaceFileList(t *testing.T) {
 	workspace.MaxFileListEntries = origCap // restored here so later parts see the real cap; Cleanup is the safety net
 
 	// 5. A session cwd that is a repo subdirectory: paths are relative to that
-	// session's project directory, the same root /files reads from, so every
-	// listed path can go straight into /files?path=.
+	// session's project directory, so a client joins it onto that cwd to build
+	// the absolute path for /v1/files.
 	env2 := newWorkspaceEnv(t, filepath.Join(proj, "sub"))
 	rec = env2.do(t, "/v1/runtimes/"+env2.h.runtimeID+"/files/list")
 	if rec.Code != http.StatusOK {
@@ -910,7 +859,7 @@ func TestWorkspaceFileListRequiresReadScope(t *testing.T) {
 		t.Fatal(err)
 	}
 	server := newTestServerWithStore(baseDir, store)
-	for _, path := range []string{"/v1/runtimes/x/files/list", "/v1/runtimes/x/files"} {
+	for _, path := range []string{"/v1/runtimes/x/files/list"} {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
 		req.Header.Set("Authorization", "Bearer "+rawToken)
 		rec := httptest.NewRecorder()
@@ -918,117 +867,6 @@ func TestWorkspaceFileListRequiresReadScope(t *testing.T) {
 		if rec.Code != http.StatusForbidden {
 			t.Fatalf("%s scopeless status = %d, want 403 (body=%s)", path, rec.Code, rec.Body.String())
 		}
-	}
-}
-
-func TestWorkspaceFileImageReadLimit(t *testing.T) {
-	proj := t.TempDir()
-	env := newWorkspaceEnv(t, proj)
-	const limit = 8 << 20
-	for _, size := range []int{limit - 1, limit, limit + 1} {
-		t.Run(strconv.Itoa(size), func(t *testing.T) {
-			data := bytes.Repeat([]byte{0xff}, size)
-			copy(data, []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d})
-			if err := os.WriteFile(filepath.Join(proj, "image.png"), data, 0o600); err != nil {
-				t.Fatal(err)
-			}
-			rec := env.do(t, "/v1/runtimes/"+env.h.runtimeID+"/files?path=image.png&acpSessionId="+env.acpSessionID)
-			var body blobReadResponse
-			if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &body) != nil {
-				t.Fatalf("status = %d, invalid response", rec.Code)
-			}
-			got, err := base64.StdEncoding.DecodeString(body.Blob)
-			if err != nil || !bytes.Equal(got, data[:min(size, limit)]) || body.Size != size || body.Truncated != (size > limit) {
-				t.Fatalf("size=%d decoded=%d truncated=%t error=%v", body.Size, len(got), body.Truncated, err)
-			}
-		})
-	}
-	outside := filepath.Join(t.TempDir(), "outside.png")
-	if err := os.WriteFile(outside, []byte("secret"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(outside, filepath.Join(proj, "escape.png")); err != nil {
-		t.Fatal(err)
-	}
-	for path, want := range map[string]int{
-		"?path=escape.png":                     http.StatusBadRequest,
-		"?path=../outside.png":                 http.StatusBadRequest,
-		"?path=image.png&acpSessionId=unknown": http.StatusNotFound,
-	} {
-		rec := env.do(t, "/v1/runtimes/"+env.h.runtimeID+"/files"+path)
-		if rec.Code != want {
-			t.Errorf("%s status = %d, want %d", path, rec.Code, want)
-		}
-	}
-	req := httptest.NewRequest(http.MethodGet, "/v1/runtimes/"+env.h.runtimeID+"/files?path=image.png", nil)
-	recorder := httptest.NewRecorder()
-	env.h.server.Handler().ServeHTTP(recorder, req)
-	if recorder.Code != http.StatusUnauthorized {
-		t.Errorf("unauthenticated status = %d, want 401", recorder.Code)
-	}
-	svgText := "<svg><!--" + strings.Repeat("x", 2<<20) + "--></svg>"
-	if err := os.WriteFile(filepath.Join(proj, "image.svg"), []byte(svgText), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	rec := env.do(t, "/v1/runtimes/"+env.h.runtimeID+"/files?path=image.svg")
-	var svg fileReadResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &svg); err != nil || rec.Code != http.StatusOK || svg.Text != svgText || svg.Truncated || svg.Size != len(svgText) {
-		t.Fatalf("SVG status=%d size=%d text length=%d truncated=%t error=%v", rec.Code, svg.Size, len(svg.Text), svg.Truncated, err)
-	}
-}
-
-func TestWorkspaceFileTransferOutlastsServerWriteTimeout(t *testing.T) {
-	proj := t.TempDir()
-	env := newWorkspaceEnv(t, proj)
-	data := bytes.Repeat([]byte{0xff}, 8<<20)
-	if err := os.WriteFile(filepath.Join(proj, "image.png"), data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	srv := httptest.NewUnstartedServer(env.h.server.Handler())
-	srv.Config.WriteTimeout = time.Millisecond
-	srv.Start()
-	t.Cleanup(srv.Close)
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL+"/v1/runtimes/"+env.h.runtimeID+"/files?path=image.png", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.Header.Set("Authorization", "Bearer "+env.h.token)
-	resp, err := srv.Client().Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	var body blobReadResponse
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		t.Fatalf("file transfer truncated: %v", err)
-	}
-	decoded, err := base64.StdEncoding.DecodeString(body.Blob)
-	if err != nil || resp.StatusCode != http.StatusOK || !bytes.Equal(decoded, data) || body.Truncated {
-		t.Fatalf("status=%d decoded=%d truncated=%v error=%v", resp.StatusCode, len(decoded), body.Truncated, err)
-	}
-}
-
-func TestWorkspaceImageWithoutNULBytesReturnsBlob(t *testing.T) {
-	proj := t.TempDir()
-	env := newWorkspaceEnv(t, proj)
-	data := []byte{0xff, 0xd8, 0xff, 0xd9}
-	if err := os.WriteFile(filepath.Join(proj, "image.jpg"), data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	rec := env.do(t, "/v1/runtimes/"+env.h.runtimeID+"/files?path=image.jpg")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rec.Code)
-	}
-	var body blobReadResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-		t.Fatal(err)
-	}
-	got, err := base64.StdEncoding.DecodeString(body.Blob)
-	if err != nil || !bytes.Equal(got, data) {
-		t.Fatalf("decoded blob = %x, error = %v, want %x", got, err, data)
-	}
-	if body.MimeType == nil || *body.MimeType != "image/jpeg" || body.Size != len(data) || body.Truncated {
-		t.Fatalf("image metadata = %+v", body)
 	}
 }
 
@@ -1061,7 +899,6 @@ func TestProjectWorkspaceReadsCheckoutWithoutSession(t *testing.T) {
 				{"git/refs", "", "main"},
 				{"git/commits/" + sha, "", `"path":"note.txt"`},
 				{"git/diff", "&commit=" + sha + "&path=note.txt", `"newText":"committed\n"`},
-				{"files", "&path=note.txt", `"text":"working\n"`},
 			}
 			for _, tc := range cases {
 				rec := projectWorkspaceRequest(server, token, "/v1/projects/"+tc.route+"?cwd="+url.QueryEscape(cwd)+tc.query)
@@ -1111,7 +948,7 @@ func TestProjectWorkspaceRejectsInvalidSelectorsAndEscapingFiles(t *testing.T) {
 		{"bare", "/v1/projects/git/status?cwd=" + url.QueryEscape(bare), 400},
 		{"not found", "/v1/projects/git/status?cwd=" + url.QueryEscape(filepath.Join(root, "missing")), 404},
 		{"not repository", "/v1/projects/git/status?cwd=" + url.QueryEscape(t.TempDir()), 422},
-		{"traversal", "/v1/projects/files?cwd=" + escaped + "&path=../outside", 400},
+		{"traversal", "/v1/projects/git/diff?cwd=" + escaped + "&path=../outside", 400},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1146,20 +983,8 @@ func TestProjectWorkspaceCanonicalizesRootAndConfinesSymlinks(t *testing.T) {
 	}
 	server := newTestServer()
 	token := pairDevice(t, server)
-	rec := projectWorkspaceRequest(server, token, "/v1/projects/files?cwd="+url.QueryEscape(alias)+"&path=note.txt")
-	canonical, err := filepath.EvalSymlinks(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var body fileReadResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-		t.Fatal(err)
-	}
-	if rec.Code != 200 || body.Text != "inside" || body.Uri != workspace.FileURI(filepath.Join(canonical, "note.txt")) {
-		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
-	}
-	for _, route := range []string{"files", "git/diff"} {
-		rec = projectWorkspaceRequest(server, token, "/v1/projects/"+route+"?cwd="+url.QueryEscape(alias)+"&path=escape")
+	for _, route := range []string{"git/diff"} {
+		rec := projectWorkspaceRequest(server, token, "/v1/projects/"+route+"?cwd="+url.QueryEscape(alias)+"&path=escape")
 		if rec.Code != 400 {
 			t.Errorf("%s escape: status=%d body=%s", route, rec.Code, rec.Body.String())
 		}

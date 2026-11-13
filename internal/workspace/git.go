@@ -9,9 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"mime"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -524,22 +522,6 @@ func TruncateStringPtr(s string, max int) *string {
 		return nil
 	}
 	return &s
-}
-
-// FileURI returns a file:// URI for an absolute path.
-func FileURI(abs string) string {
-	u := url.URL{Scheme: "file", Path: filepath.ToSlash(abs)}
-	return u.String()
-}
-
-// MimeTypeFor returns a best-effort MIME type from a file path's extension, or
-// "" when unknown.
-func MimeTypeFor(path string) string {
-	ext := strings.ToLower(filepath.Ext(path))
-	if ext == "" {
-		return ""
-	}
-	return mime.TypeByExtension(ext)
 }
 
 // IsBinary reports whether data contains a NUL byte (the same heuristic git and

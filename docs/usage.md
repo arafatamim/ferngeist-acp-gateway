@@ -17,10 +17,10 @@ The gateway is a self-hosted backend for ACP-compatible agents:
   chat runs in its own resilient session, so a background agent can keep working
   while you use another (see [docs/api.md](api.md)).
 - **Pairing + device credentials** — pair a phone/client once; revoke anytime.
-- **Workspace browsing** — a paired client can read and list files and inspect
-  git state inside the project the agent is working on (`/files`, `/files/list`,
-  `/git/status`, `/git/diff`, `/git/log`, `/git/refs`, `/git/commits/{sha}`; see
-  [docs/api.md](api.md)).
+- **Workspace browsing** — a paired client can list files and inspect git state
+  inside the project the agent is working on (`/files/list`, `/git/status`,
+  `/git/diff`, `/git/log`, `/git/refs`, `/git/commits/{sha}`), and read any file
+  by absolute path with `/v1/files` (see [docs/api.md](api.md)).
 - **Custom agents** — register your own ACP agent (command + args) from a
   paired client or from the host with `ferngeist-gateway agents add`; it then
   lists and starts like any catalog agent.

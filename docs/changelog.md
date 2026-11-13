@@ -43,6 +43,51 @@ against the code.
 
 ## Unreleased
 
+- `[semantic]` File GET/HEAD preparation and batch stat reject metadata changes
+  after admission as `409` / per-file `busy`, keeping size and validators
+  coherent. Invalid or unsatisfiable file ranges carry `no-store` without
+  representation validators. No protocol version bump.
+
+- `[breaking]` **Protocol v3.** `GET /v1/runtimes/{id}/files` and
+  `GET /v1/projects/files` (JSON `TextResourceContents`/`BlobResourceContents`)
+  are removed. `GET`/`HEAD /v1/files?path=<absolute-host-path>` is now the only
+  file reader:
+  - Raw bytes of any regular file up to 512 MiB the gateway user can read,
+    inside or outside a workspace. Requires `read` + `control` and proof of
+    possession. No runtime, ACP session or history is needed, so a file stays
+    readable until it is deleted.
+  - `Content-Type` from the extension when it is text; other files are
+    NUL-sniffed (plus UTF-8 when the extension is known) to
+    `text/plain; charset=utf-8`, else the extension's type or
+    `application/octet-stream`.
+  - One byte range (`206`/`Content-Range`); invalid or multiple byte ranges
+    `416`; other range units are ignored (RFC 9110). Any `If-Range` forces a
+    full `200`.
+  - Weak `ETag` (hash of file identity, size, mtime and change time) and
+    `Last-Modified`; `If-None-Match` returns `304`. Successful responses are
+    `Cache-Control: private, no-cache`, so clients may cache and revalidate.
+  - Final symlinks, special files and `/proc`, `/sys`, `/dev` are refused. On
+    Windows only clean drive-letter paths on direct local disks are accepted;
+    reparse points are refused and sharing conflicts/oplock breaks return `409`.
+    Native Windows behavior is not yet verified.
+  - Four global / two per-device transfers (`429` + `Retry-After: 1`), a
+    ten-minute deadline, `nosniff`, attachment basename only.
+  - `POST /v1/files/stat` describes up to 64 paths per request as ACP
+    `resource_link` blocks (`uri`, `name`, `mimeType`, `size`, `etag`) or a per-path
+    `error` code, with the same checks and `Content-Type` as `/v1/files` and
+    no transfer slot.
+
+  Clients join relative paths (from `/files/list`, `/git/status`) onto the
+  session or project `cwd`. Migration table in docs/api.md. `/files/list` and
+  git routes are unchanged; the deprecated runtime git routes stay in v3.
+  (2026-11-12, unreleased)
+
+- `[additive]` Shared HTTP request logs redact `path` and `acpSessionId` query
+  values case-insensitively, including duplicate keys. Malformed queries log a
+  fixed `redacted` marker; existing credential redaction is preserved. This
+  covers request logs only, not optional raw ACP frames.
+  (2026-11-12, unreleased)
+
 - `[semantic]` Installing the systemd, launchd, or Windows scheduled-task service
   persists the invoking shell's non-empty PATH for agent detection and launches when no saved PATH
   exists. Reinstalls and package upgrades preserve this snapshot by default.

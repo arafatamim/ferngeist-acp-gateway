@@ -75,6 +75,14 @@ Remote diagnostics export is disabled by default unless enabled in configuration
 
 This helps avoid exposing logs and runtime details unless you explicitly want that.
 
+Shared HTTP request logs replace `path` and `acpSessionId` query values with
+`redacted`, as they do for `access_token`, `token`, and `authorization`.
+Matching is case-insensitive and covers duplicate keys and percent-encoded
+selectors. If query parsing fails, the entire query is logged as the fixed
+`redacted` marker, never as raw input. This does not add a raw-path audit event.
+The redaction applies to HTTP request logs only: optional raw ACP frame logging
+may still contain paths, ACP session IDs, and other sensitive content.
+
 ## Secrets and storage
 
 - Device credentials are hashed before being stored.
@@ -86,18 +94,88 @@ This helps avoid exposing logs and runtime details unless you explicitly want th
 - In public mode, proof-of-possession is required by default.
 - Legacy bearer-only credentials are disabled by default in public mode.
 
+## File retrieval
+
+`GET`/`HEAD /v1/files?path=<absolute-host-path>` reads any regular file the
+gateway OS user can read, subject to the file checks below. It requires `read`
+and `control` plus proof of possession. Pairing grants every device both, and a
+`control` device can already make an agent (or a custom agent command) read any
+such file, so this route adds no access a paired device lacks. It is closed to
+any future credential without `control`. It keeps no per-file state:
+nothing about agent output is recorded or consulted, so retrieval does not
+expire with session history. Pair only trusted devices.
+
+Linux/macOS opening canonicalizes the parent at fetch time, rejects supplied
+and canonical `/proc`, `/sys`, `/dev` trees, roots relative operations at the
+opened parent, rejects final symlinks and nonregular files, and checks open-file
+identity and size. A nonblocking basename open avoids a raced FIFO hang. These
+checks protect one open: a path refers to current contents, parent symlinks may
+change between requests, and files can mutate during transfer. Bind mounts and hostile local namespace races are
+not fully excluded. No immutable snapshots or content (strong) validators are promised.
+Windows uses a separate native handle traversal. Pure path checks reject
+UNC/device/NT/drive-relative/ADS/reserved/trailing-dot-space forms first.
+The current DOS drive mapping must name a direct local HarddiskVolume device;
+network, SUBST and ambiguous mappings are refused. Type checks use that pinned
+volume, never a later lookup of the mutable drive alias. Native relative opens
+forbid reparse processing and inspect every component before continuing;
+symlinks, junctions, mount points and cloud reparse placeholders are unsupported.
+Ancestors and the inspected file deny write/delete sharing while descendants
+and the final read handle are opened. Handle-derived file identity/type/size
+are rechecked; sharing conflicts and oplock breaks return 409. Native opens
+request immediate completion rather than waiting for oplock acknowledgment;
+an alternate-success handle is closed without reading. Afterwards the read handle allows
+mutable contents, preserving admission-only semantics.
+
+This follows the handle-relative and reparse-open contracts in
+[Microsoft NtCreateFile](https://learn.microsoft.com/en-us/windows/win32/api/winternl/nf-winternl-ntcreatefile)
+and the current-mapping semantics of
+[QueryDosDevice](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-querydosdevicew).
+It does not defend against privileged local replacement of device objects or
+hostile filesystem drivers. Native Windows tests are configured in CI but have
+not run in this Linux implementation session; cross-compilation/lint is not
+native proof. Other platforms remain unsupported and fail closed.
+
+Single byte ranges use the same admission and file checks; even a one-byte
+request is rejected if the full file exceeds 512 MiB. Ranged reads freeze their
+offset/length to admitted size but can still fail short if the file shrinks.
+Invalid or multiple byte ranges return 416 with no-store/nosniff; ranges in other
+units are ignored. Successful responses carry a weak ETag hashed from file
+identity, size, modification and change times, plus Last-Modified, and
+`private, no-cache`, so a client may store a copy but must revalidate it.
+`If-None-Match` can return 304; equal metadata cannot prove equal bytes, which
+is why the tag is weak. Any If-Range header still forces a full 200, including
+after same-second mutation, because a weak tag cannot satisfy it. Current-file ranges are not immutable
+resumable versions; clients must reject short bodies and avoid splicing separate
+responses together.
+
+Four global/two per-device slots bound the entire admission/open/transfer
+lifetime, including HEAD; files over 512 MiB are refused. Credential and scope
+checks apply at admission only. An admitted response may continue after
+revocation or expiry for up to ten minutes; new requests are denied. Cancellation/disconnect/shutdown releases
+the descriptor and capacity. All responses are nosniff (errors also no-store), attachment
+headers expose only a basename, and errors omit raw paths. Shared request-log
+redaction covers the `path` selector; optional raw ACP frame logs remain outside it.
+
+`POST /v1/files/stat` applies the same scopes, path validation and open checks
+to up to 64 paths per request, opening and closing each in turn without
+reading beyond the 8000-byte content-type sniff. It returns size and type only,
+takes no transfer slot, and its per-path error codes omit host paths beyond
+echoing the requested one in `uri`.
+Existing workspace confinement and cross-device turns behavior are unchanged.
+
 ## Workspace read surface
 
-The workspace endpoints (`/v1/runtimes/{id}/files`, `/files/list`, `/git/status`,
-`/git/diff`, `/git/log`, `/git/refs`, `/git/commits/{sha}`) let a paired client
-read files and git state inside the project the agent is working on.
+The workspace endpoints (`/files/list`, `/git/status`, `/git/diff`, `/git/log`,
+`/git/refs`, `/git/commits/{sha}`) let a paired client list files and read git
+state inside the project the agent is working on. File contents come only from
+`/v1/files` (above).
 
 The session-free `/v1/projects/git/{status,diff,log,refs}`,
-`/v1/projects/git/commits/{sha}`, and `/v1/projects/files` routes accept an
+and `/v1/projects/git/commits/{sha}` routes accept an
 absolute checkout-root `cwd` without an ACP session. **Any paired client with
 `read` scope can select any checkout the gateway OS user can read.** The root
 check rejects subdirectories and bare repositories and canonicalizes symlinks;
-it is not an authorization allowlist. Relative file paths remain confined to
+it is not an authorization allowlist. Relative diff paths remain confined to
 that canonical checkout. Project routes reject `acpSessionId`, and runtime
 routes reject `cwd`, so selectors cannot silently override one another.
 

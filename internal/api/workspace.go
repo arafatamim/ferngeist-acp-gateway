@@ -2,7 +2,6 @@ package api
 
 import (
 	"compress/gzip"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,7 +10,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/pairing"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/session"
@@ -19,24 +17,6 @@ import (
 	"github.com/coder/acp-go-sdk"
 	"golang.org/x/sync/errgroup"
 )
-
-// fileReadResponse is the payload for GET /v1/runtimes/{id}/files. It embeds
-// the ACP v1 resource type matching the file kind: TextResourceContents for
-// text files, BlobResourceContents for binary files. Size and Truncated are
-// gateway extensions; Size is the full on-disk file size (not the truncated
-// payload length); Uri carries the file:// URI of the absolute path.
-type fileReadResponse struct {
-	acp.TextResourceContents
-	Size      int  `json:"size"`
-	Truncated bool `json:"truncated"`
-}
-
-// blobReadResponse is the binary counterpart of fileReadResponse.
-type blobReadResponse struct {
-	acp.BlobResourceContents
-	Size      int  `json:"size"`
-	Truncated bool `json:"truncated"`
-}
 
 // fileListResponse is the payload for GET /v1/runtimes/{id}/files/list.
 type fileListResponse struct {
@@ -107,91 +87,9 @@ func (s *Server) resolveProjectCwd(w http.ResponseWriter, r *http.Request) (stri
 	return cwd, true
 }
 
-const maxWorkspaceFileBytes = 8 << 20
-
-// handleWorkspaceFile reads a file inside a runtime's project directory.
-// GET /v1/runtimes/{runtimeId}/files?path=<rel>
-// Text files return a TextResourceContents; binary files return a
-// BlobResourceContents (base64 blob). Both embed the absolute file URI and
-// size/truncated gateway extensions.
-func (s *Server) handleWorkspaceFile(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireGatewayScope(w, r, pairing.ScopeRead); !ok {
-		return
-	}
-	runtimeID := r.PathValue("runtimeId")
-	cwd, ok := s.resolveWorkspaceCwd(w, r, runtimeID)
-	if !ok {
-		return
-	}
-	rel := strings.TrimSpace(r.URL.Query().Get("path"))
-	abs, err := workspace.ResolveWithinRoot(cwd, rel)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	info, err := os.Stat(abs)
-	if err != nil {
-		writeError(w, http.StatusNotFound, "file not found")
-		return
-	}
-	if info.IsDir() {
-		writeError(w, http.StatusBadRequest, "path is a directory")
-		return
-	}
-	s.serveWorkspaceFile(w, abs, rel, info)
-}
-
-func (s *Server) serveWorkspaceFile(w http.ResponseWriter, abs, rel string, info os.FileInfo) {
-	// An 8 MiB blob expands to roughly 11 MiB of JSON. Give mobile links a
-	// bounded transfer window beyond the server's general 20-second deadline.
-	if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(2 * time.Minute)); err != nil && !errors.Is(err, http.ErrNotSupported) {
-		s.logger.Error("set workspace file write deadline", "error", err)
-		writeError(w, http.StatusInternalServerError, "failed to prepare file transfer")
-		return
-	}
-	data, err := workspace.ReadFileLimited(abs, maxWorkspaceFileBytes)
-	if err != nil {
-		s.logger.Error("read workspace file", "path", abs, "error", err)
-		writeError(w, http.StatusInternalServerError, "failed to read file")
-		return
-	}
-	truncated := len(data) > maxWorkspaceFileBytes
-	if truncated {
-		data = data[:maxWorkspaceFileBytes]
-	}
-	uri := workspace.FileURI(abs)
-	mimeType := workspace.MimeTypeFor(rel)
-	var mimePtr *string
-	if mimeType != "" {
-		mimePtr = &mimeType
-	}
-	if workspace.IsBinary(data) || (strings.HasPrefix(mimeType, "image/") && !strings.HasPrefix(mimeType, "image/svg+xml")) {
-		writeJSON(w, http.StatusOK, blobReadResponse{
-			BlobResourceContents: acp.BlobResourceContents{
-				Blob:     base64.StdEncoding.EncodeToString(data),
-				Uri:      uri,
-				MimeType: mimePtr,
-			},
-			Size:      int(info.Size()),
-			Truncated: truncated,
-		})
-		return
-	}
-	writeJSON(w, http.StatusOK, fileReadResponse{
-		TextResourceContents: acp.TextResourceContents{
-			Text:     string(data),
-			Uri:      uri,
-			MimeType: mimePtr,
-		},
-		Size:      int(info.Size()),
-		Truncated: truncated,
-	})
-}
-
 // writeJSONGzip writes payload, gzipping the body when the request's
 // Accept-Encoding includes gzip. Used by the file list and whole-tree diff, not
-// a global middleware: the other endpoints' bodies are small and /files content
-// is often already compressed. Vary is set on both paths for correct caching;
+// a global middleware: the other endpoints' bodies are small. Vary is set on both paths for correct caching;
 // the 404/422 error paths go through plain writeError on purpose, since error
 // bodies are tiny.
 func writeJSONGzip(w http.ResponseWriter, r *http.Request, status int, payload any) {
@@ -209,9 +107,8 @@ func writeJSONGzip(w http.ResponseWriter, r *http.Request, status int, payload a
 }
 
 // handleWorkspaceFileList lists a runtime's project files (tracked plus
-// untracked, ignoring rules honoured). GET /v1/runtimes/{runtimeId}/files/list,
-// shaped like handleWorkspaceFile: read scope, resolveWorkspaceCwd, then the
-// workspace listing.
+// untracked, ignoring rules honoured). GET /v1/runtimes/{runtimeId}/files/list:
+// read scope, resolveWorkspaceCwd, then the workspace listing.
 func (s *Server) handleWorkspaceFileList(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireGatewayScope(w, r, pairing.ScopeRead); !ok {
 		return
