@@ -94,17 +94,13 @@ against the code.
   exists. Reinstalls and package upgrades preserve this snapshot by default.
   (2026-11-11, unreleased)
 
-- `[semantic]` The gateway's Hermes `session/list` augmentation now runs as a
-  deferred presentation transform after canonical processing. A later agent
-  frame may reach the client before the augmented reply, which keeps its
-  request id and must be correlated as usual; no canonical state, history or
-  turn outcome changes. (2026-11-12, unreleased)
-
 - `[additive]` An ACP `session/list` reply from Hermes Agent also carries the
   chats its CLI, TUI, desktop and web clients created (at most the 200 most
   recently active). The gateway reads them
   from Hermes's local session store and appends them to the reply's final page;
-  the agent's own rows, order and cursor are unchanged. (2026-11-11, unreleased)
+  the agent's own rows, order and cursor are unchanged. The merge is deferred,
+  so a later agent frame may reach the client before the augmented reply, which
+  keeps its request id and must be correlated as usual. (2026-11-12, unreleased)
 
 - `[additive]` The agent catalog includes the locally installed OpenClaw ACP
   bridge on Linux and macOS, plus Hermes Agent, Oh My Pi, DeepSeek Harness,
