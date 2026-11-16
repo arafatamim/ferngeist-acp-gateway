@@ -91,8 +91,9 @@ brew install arafatamim/tap/ferngeist-gateway
 The installer registers the daemon as a per-user service (a LaunchAgent on
 macOS, a systemd user unit on Linuxbrew) with LAN enabled. After a manual
 `brew install`, start it with `ferngeist-gateway daemon install --keep-settings --lan`.
-`brew upgrade ferngeist-gateway` restarts it on the new version automatically;
-if you upgraded from 1.0.0 or earlier, run that `daemon install` command once.
+After `brew upgrade ferngeist-gateway`, the daemon restarts on the new version
+within seconds. Check `ferngeist-gateway daemon status` for the running version.
+If you upgraded from 1.0.0 or earlier, run the `daemon install` command once.
 
 Homebrew installs never trigger Gatekeeper, so no warnings appear. To make the
 gateway reachable only on localhost, re-run `ferngeist-gateway daemon install`.

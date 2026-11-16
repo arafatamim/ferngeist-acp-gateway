@@ -207,8 +207,9 @@ brews:
     caveats: |
       Start the daemon with:
         ferngeist-gateway daemon install --keep-settings --lan
-      It then restarts on the new version after each brew upgrade. If you
-      upgraded from 1.0.0 or earlier, run the command above once more.
+      It restarts on the new version shortly after each brew upgrade. Check
+      ferngeist-gateway daemon status for the running version. If you upgraded
+      from 1.0.0 or earlier, run the install command above once more.
 
 # .deb (Ubuntu/Debian) and .rpm (Fedora/RHEL) packages. postinstall runs
 # `daemon install` so a per-user systemd user service is created on first

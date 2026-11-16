@@ -1,8 +1,8 @@
 #!/bin/sh
 # The Homebrew flow on macOS or Linuxbrew: install the live formula from
 # arafatamim/tap, re-run the installer, `brew upgrade` to the formula built
-# from this checkout (pointed at its local archives), a later upgrade
-# restarting the daemon by itself, then the documented uninstall. Linux needs a running user manager.
+# from this checkout (pointed at its local archives), verify the automatic
+# restart, then uninstall. Linux needs a running user manager.
 # Usage: test-brew.sh dir-with-snapshot-artifacts (has homebrew/Formula/ and *_brew.tar.gz)
 set -eu
 CI="$(cd "$(dirname "$0")" && pwd)"
@@ -29,12 +29,10 @@ git -C "$TAP" -c user.name=ci -c user.email=ci@localhost commit -qam "test formu
 brew upgrade ferngeist-gateway
 NEW="$(brewver)"
 [ "$NEW" != "$OLD" ] || { echo "FAIL: brew upgrade left $OLD" >&2; exit 1; }
-# Once, per the caveat: 1.0.0 registered a copy of its binary.
-"$GW" daemon install --keep-settings --lan
+echo "== the running daemon switches to the upgraded version"
 sh "$CI/wait-daemon.sh" "$GW" "VERSION +$NEW" 'LAN ENABLED +true'
 
-echo "== later upgrades restart the daemon by itself"
-# Swapping the keg's binary stands in for brew moving opt/ to a new keg.
+echo "== replacing the keg binary restarts the daemon"
 KEG_BIN="$(cd "$(brew --prefix)/opt/ferngeist-gateway/bin" && pwd -P)/ferngeist-gateway"
 sh "$CI/swap-binary.sh" "$KEG_BIN"
 sh "$CI/wait-daemon.sh" "$GW" "VERSION +$NEW" 'LAN ENABLED +true'
