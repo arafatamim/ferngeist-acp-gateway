@@ -43,6 +43,14 @@ against the code.
 
 ## Unreleased
 
+- [additive] Admin pairing status exposes `pairingTarget.pending` while managed
+  remote setup is retrying. (2026-11-16)
+
+- [semantic] Admin pairing now rejects unavailable targets with a `503` and
+  excludes remembered managed URLs until current provisioning succeeds.
+  Pairing target availability does not verify client DNS or connectivity.
+  (2026-11-16)
+
 - `[semantic]` File GET/HEAD preparation and batch stat reject metadata changes
   after admission as `409` / per-file `busy`, keeping size and validators
   coherent. Invalid or unsatisfiable file ranges carry `no-store` without

@@ -421,6 +421,7 @@ func serveGateway(ctx context.Context, deps api.Deps, store *storage.SQLiteStore
 	}
 	if access != nil {
 		server.SetRemoteSetup(access.Snapshot)
+		server.SetPublicURL(access.URL())
 		if cfg.TailscaleAuthKey == "" {
 			// Asynchronous: first boot with a human login, or a tailnet that
 			// still needs HTTPS/Funnel enabled. Start owns the retry loop and

@@ -72,6 +72,7 @@ type RemoteStatus struct {
 
 type PairingTargetInfo struct {
 	Reachable bool   `json:"reachable"`
+	Pending   bool   `json:"pending,omitempty"`
 	Scheme    string `json:"scheme,omitempty"`
 	Host      string `json:"host,omitempty"`
 	Error     string `json:"error,omitempty"`

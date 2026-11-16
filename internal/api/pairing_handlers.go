@@ -184,13 +184,16 @@ func (s *Server) handlePairStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAdminPairingStart(w http.ResponseWriter, r *http.Request) {
+	target, err := s.pairingTarget()
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, err.Error())
+		return
+	}
 	challenge, err := s.pairing.StartPairingWithLocalApproval()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to start pairing")
 		return
 	}
-
-	target, _ := s.pairingTarget()
 
 	writeJSON(w, http.StatusOK, s.adminPairingResponse(pairing.ChallengeStatus{
 		ID:        challenge.ID,
@@ -213,6 +216,11 @@ func (s *Server) handleAdminStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	if target, err := s.pairingTarget(); err != nil {
 		response.PairingTarget = adminPairingTargetInfo{Reachable: false, Error: err.Error()}
+		if s.cfg.TailscaleMode != "" && s.cfg.TailscaleMode != "off" && s.remoteSetup != nil && s.cfg.TailscaleAuthKey == "" {
+			s.publicURLMu.Lock()
+			response.PairingTarget.Pending = s.publicURL == ""
+			s.publicURLMu.Unlock()
+		}
 	} else {
 		response.PairingTarget = adminPairingTargetInfo{Reachable: true, Scheme: target.Scheme, Host: target.Host}
 	}
@@ -315,6 +323,14 @@ func buildPairingPayload(target pairingTarget, challengeID, code string) string 
 //  5. First available LAN interface IPv4/IPv6 address
 func (s *Server) pairingTarget() (pairingTarget, error) {
 	publicBaseURL := s.publicBaseURL()
+	if s.cfg.TailscaleMode != "" && s.cfg.TailscaleMode != "off" {
+		s.publicURLMu.Lock()
+		publicBaseURL = s.publicURL
+		s.publicURLMu.Unlock()
+		if publicBaseURL == "" {
+			return pairingTarget{}, s.remotePairingError()
+		}
+	}
 	if publicBaseURL != "" {
 		parsed, err := url.Parse(publicBaseURL)
 		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
@@ -343,6 +359,26 @@ func (s *Server) pairingTarget() (pairingTarget, error) {
 		return pairingTarget{}, err
 	}
 	return pairingTarget{Scheme: "http", Host: net.JoinHostPort(lanHost, port)}, nil
+}
+
+func (s *Server) remotePairingError() error {
+	if s.remoteSetup == nil {
+		return fmt.Errorf("remote access is provisioning; check daemon status")
+	}
+	snap := s.remoteSetup()
+	if snap == nil {
+		return fmt.Errorf("remote access is provisioning; check daemon status")
+	}
+	if snap.AuthRequired {
+		return fmt.Errorf("remote access requires login: %s", snap.AuthURL)
+	}
+	if snap.Hint != "" {
+		return fmt.Errorf("remote access setup: %s", snap.Hint)
+	}
+	if snap.LastErr != "" {
+		return fmt.Errorf("remote access setup: %s", snap.LastErr)
+	}
+	return fmt.Errorf("remote access is provisioning; check daemon status")
 }
 
 // isRoutableHost returns true if the host is reachable from other devices on

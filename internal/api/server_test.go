@@ -665,7 +665,7 @@ func TestPairingRoundTripWithCodeOnlyComplete(t *testing.T) {
 }
 
 func TestAuthRefreshRotatesCredentialToken(t *testing.T) {
-	server := newConfiguredTestServer(config.Config{ListenAddr: "127.0.0.1:0", CredentialTTL: 24 * time.Hour, GatewayID: "gw-test-id"})
+	server := newConfiguredTestServer(config.Config{ListenAddr: "192.0.2.1:5788", CredentialTTL: 24 * time.Hour, GatewayID: "gw-test-id"})
 	oldToken := pairDevice(t, server)
 
 	refreshRequest := httptest.NewRequest(http.MethodPost, "/v1/auth/refresh", nil)
@@ -722,7 +722,7 @@ func TestAuthRefreshRequiresValidCredential(t *testing.T) {
 }
 
 func TestPublicModeRequiresProofKeyForPairing(t *testing.T) {
-	server := newConfiguredTestServer(config.Config{ListenAddr: "127.0.0.1:0", RequireProofOfPossession: true})
+	server := newConfiguredTestServer(config.Config{ListenAddr: "192.0.2.1:5788", RequireProofOfPossession: true})
 
 	armRequest := httptest.NewRequest(http.MethodPost, "/admin/v1/pairings/start", nil)
 	armRecorder := httptest.NewRecorder()
@@ -1323,7 +1323,7 @@ func TestPairCompleteRejectsOversizedBody(t *testing.T) {
 }
 
 func TestPairStartUsesConfiguredBurstLimit(t *testing.T) {
-	server := newConfiguredTestServer(config.Config{ListenAddr: "127.0.0.1:0", PairingBurstPerIP: 1, PairingBurstGlobal: 1})
+	server := newConfiguredTestServer(config.Config{ListenAddr: "192.0.2.1:5788", PairingBurstPerIP: 1, PairingBurstGlobal: 1})
 
 	armRequest := httptest.NewRequest(http.MethodPost, "/admin/v1/pairings/start", nil)
 	armRecorder := httptest.NewRecorder()
@@ -1405,7 +1405,7 @@ func TestDiagnosticsExportIncludesGatewayLogsAndRuntimeLogs(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(io.MultiWriter(io.Discard, logSvc), nil))
 	logger.Info("diagnostic export ready", slog.String("component", "test"))
 
-	cfg := config.Config{ListenAddr: "127.0.0.1:0", LogDir: filepath.Join(baseDir, "logs"), StateDBPath: filepath.Join(baseDir, "state.db"), GatewayName: "test-gateway", AllowDiagnosticsExport: true}
+	cfg := config.Config{ListenAddr: "192.0.2.1:5788", LogDir: filepath.Join(baseDir, "logs"), StateDBPath: filepath.Join(baseDir, "state.db"), GatewayName: "test-gateway", AllowDiagnosticsExport: true}
 	server := newTestServerFromDeps(Deps{
 		Config:    cfg,
 		Build:     config.BuildInfo{Version: "1.2.3", Commit: "abc123", BuiltAt: "2026-03-25T10:00:00Z", GoVersion: "go1.test"},
@@ -1628,7 +1628,7 @@ func TestRuntimeRestartEndpointReturnsFreshConnectDescriptor(t *testing.T) {
 	baseDir := newHarnessBaseDir(t)
 	buildMockAgent(t, baseDir)
 
-	server := newConfiguredTestServerWithBaseDir(baseDir, config.Config{ListenAddr: "127.0.0.1:0", AllowRuntimeRestartEnv: true})
+	server := newConfiguredTestServerWithBaseDir(baseDir, config.Config{ListenAddr: "192.0.2.1:5788", AllowRuntimeRestartEnv: true})
 	attachTestSessionService(t, server)
 	token := pairDevice(t, server)
 
@@ -1668,7 +1668,7 @@ func TestRuntimeRestartRefusesAnotherDevicesRuntime(t *testing.T) {
 	baseDir := newHarnessBaseDir(t)
 	buildMockAgent(t, baseDir)
 
-	server := newConfiguredTestServerWithBaseDir(baseDir, config.Config{ListenAddr: "127.0.0.1:0"})
+	server := newConfiguredTestServerWithBaseDir(baseDir, config.Config{ListenAddr: "192.0.2.1:5788"})
 	attachTestSessionService(t, server)
 	owner := pairDevice(t, server)
 	other := pairDevice(t, server)
@@ -1698,7 +1698,7 @@ func TestRuntimeRestartWithEnvRequiresElevatedScopeByDefault(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	runtimeSvc := runtime.NewSupervisor(logger, baseDir, nil, nil)
 	server := newTestServerFromDeps(Deps{
-		Config:    config.Config{ListenAddr: "127.0.0.1:0"},
+		Config:    config.Config{ListenAddr: "192.0.2.1:5788"},
 		Logger:    logger,
 		Catalog:   catalog.New(baseDir, nil),
 		Runtime:   runtimeSvc,
@@ -1798,13 +1798,13 @@ func dialTestWebSocketConn(wsURL string) (*websocket.Conn, *http.Response, error
 }
 
 func newTestServer() *Server {
-	return newConfiguredTestServer(config.Config{ListenAddr: "127.0.0.1:0"})
+	return newConfiguredTestServer(config.Config{ListenAddr: "192.0.2.1:5788"})
 }
 
 func newConfiguredTestServer(cfg config.Config) *Server {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	if cfg.ListenAddr == "" {
-		cfg.ListenAddr = "127.0.0.1:0"
+		cfg.ListenAddr = "192.0.2.1:5788"
 	}
 	return newTestServerFromDeps(Deps{
 		Config:  cfg,
@@ -1823,13 +1823,13 @@ func newConfiguredTestServer(cfg config.Config) *Server {
 }
 
 func newTestServerWithBaseDir(baseDir string) *Server {
-	return newConfiguredTestServerWithBaseDir(baseDir, config.Config{ListenAddr: "127.0.0.1:0"})
+	return newConfiguredTestServerWithBaseDir(baseDir, config.Config{ListenAddr: "192.0.2.1:5788"})
 }
 
 func newConfiguredTestServerWithBaseDir(baseDir string, cfg config.Config) *Server {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	if cfg.ListenAddr == "" {
-		cfg.ListenAddr = "127.0.0.1:0"
+		cfg.ListenAddr = "192.0.2.1:5788"
 	}
 	return newTestServerFromDeps(Deps{
 		Config:  cfg,
@@ -1850,7 +1850,7 @@ func newConfiguredTestServerWithBaseDir(baseDir string, cfg config.Config) *Serv
 func newTestServerWithBaseDirAndRegistry(baseDir string, registrySource catalog.RegistrySource) *Server {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	return newTestServerFromDeps(Deps{
-		Config:    config.Config{ListenAddr: "127.0.0.1:0"},
+		Config:    config.Config{ListenAddr: "192.0.2.1:5788"},
 		Logger:    logger,
 		Catalog:   catalog.New(baseDir, registrySource),
 		Runtime:   runtime.NewSupervisor(logger, baseDir, nil, nil),
@@ -1864,7 +1864,7 @@ func newTestServerWithStore(baseDir string, store *storage.SQLiteStore) *Server 
 	catalogSvc := catalog.New(baseDir, nil)
 	runtimeSvc := runtime.NewSupervisor(logger, baseDir, store, nil)
 	server := newTestServerFromDeps(Deps{
-		Config:       config.Config{ListenAddr: "127.0.0.1:0"},
+		Config:       config.Config{ListenAddr: "192.0.2.1:5788"},
 		Logger:       logger,
 		Catalog:      catalogSvc,
 		Runtime:      runtimeSvc,
@@ -2607,7 +2607,7 @@ func TestAgentControlEndpointsReturnServiceUnavailableWithoutSessionSvc(t *testi
 
 func TestAuthRefreshRecoversExpiredCredentialWithinGrace(t *testing.T) {
 	server := newConfiguredTestServer(config.Config{
-		ListenAddr:            "127.0.0.1:0",
+		ListenAddr:            "192.0.2.1:5788",
 		CredentialTTL:         time.Hour,
 		CredentialGracePeriod: 24 * time.Hour,
 	})
@@ -2672,7 +2672,7 @@ func TestAuthRefreshRecoversExpiredCredentialWithinGrace(t *testing.T) {
 
 func TestAuthRefreshRejectsPastGraceWithDistinctError(t *testing.T) {
 	server := newConfiguredTestServer(config.Config{
-		ListenAddr:            "127.0.0.1:0",
+		ListenAddr:            "192.0.2.1:5788",
 		CredentialTTL:         time.Hour,
 		CredentialGracePeriod: time.Hour,
 	})
@@ -2707,7 +2707,7 @@ func TestAuthRefreshRejectsPastGraceWithDistinctError(t *testing.T) {
 // gateway exchanges the rotated token for the live one instead.
 func TestAuthRefreshExchangesRotatedTokenWithinOverlap(t *testing.T) {
 	server := newConfiguredTestServer(config.Config{
-		ListenAddr:    "127.0.0.1:0",
+		ListenAddr:    "192.0.2.1:5788",
 		CredentialTTL: 24 * time.Hour,
 	})
 	credential := pairDeviceWithProof(t, server)
@@ -2815,6 +2815,7 @@ func TestPairingUsesLiveTunnelURL(t *testing.T) {
 			server.cfg.ListenAddr = "127.0.0.1:5788"
 			server.cfg.EnableLAN = false
 			server.cfg.PublicBaseURL = bootURL
+			server.cfg.TailscaleMode = "auto"
 			server.SetPublicURL("https://gateway-b.tail.ts.net")
 			recorder := httptest.NewRecorder()
 			server.AdminHandler().ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/admin/v1/pairings/start", nil))
@@ -2826,5 +2827,81 @@ func TestPairingUsesLiveTunnelURL(t *testing.T) {
 				t.Fatalf("status=%d pairing host=%q; want 200 and live gateway-b endpoint", recorder.Code, response.Host)
 			}
 		})
+	}
+}
+
+func TestManagedPairingRejectsRememberedURLUntilProvisioned(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		snapshot *remote.RemoteSetupSnapshot
+		message  string
+	}{
+		{"pending", nil, "provision"},
+		{"blocked", &remote.RemoteSetupSnapshot{Hint: "enable Funnel"}, "enable Funnel"},
+		{"failed", &remote.RemoteSetupSnapshot{LastErr: "connection refused"}, "connection refused"},
+		{"login", &remote.RemoteSetupSnapshot{AuthRequired: true, AuthURL: "https://login.example"}, "https://login.example"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := newTestServer()
+			server.cfg.TailscaleMode = "auto"
+			server.cfg.PublicBaseURL = "https://old.tail.ts.net"
+			server.SetRemoteSetup(func() *remote.RemoteSetupSnapshot { return tc.snapshot })
+			status := httptest.NewRecorder()
+			server.AdminHandler().ServeHTTP(status, httptest.NewRequest(http.MethodGet, "/admin/v1/status", nil))
+			var response adminStatusResponse
+			if err := json.Unmarshal(status.Body.Bytes(), &response); err != nil {
+				t.Fatal(err)
+			}
+			if response.PairingTarget.Reachable || !strings.Contains(response.PairingTarget.Error, tc.message) {
+				t.Fatalf("pairing target = %+v", response.PairingTarget)
+			}
+			var wire struct {
+				PairingTarget struct {
+					Pending bool `json:"pending"`
+				} `json:"pairingTarget"`
+			}
+			if err := json.Unmarshal(status.Body.Bytes(), &wire); err != nil {
+				t.Fatal(err)
+			}
+			if !wire.PairingTarget.Pending {
+				t.Fatal("managed provisioning should be reported as pending")
+			}
+			start := httptest.NewRecorder()
+			server.AdminHandler().ServeHTTP(start, httptest.NewRequest(http.MethodPost, "/admin/v1/pairings/start", nil))
+			if start.Code != http.StatusServiceUnavailable || !strings.Contains(start.Body.String(), tc.message) {
+				t.Fatalf("start = %d %s", start.Code, start.Body.String())
+			}
+			if _, ok := server.pairing.ActiveChallenge(); ok {
+				t.Fatal("created a challenge without a usable target")
+			}
+		})
+	}
+}
+
+func TestPairingStartReportsInvalidTarget(t *testing.T) {
+	server := newTestServer()
+	server.cfg.PublicBaseURL = "://invalid"
+	recorder := httptest.NewRecorder()
+	server.AdminHandler().ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/admin/v1/pairings/start", nil))
+	if recorder.Code != http.StatusServiceUnavailable || !strings.Contains(recorder.Body.String(), "public base URL is invalid") {
+		t.Fatalf("start = %d %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestFailedNonRetryingRemoteSetupIsNotPending(t *testing.T) {
+	server := newTestServer()
+	server.cfg.TailscaleMode = "auto"
+	server.cfg.TailscaleAuthKey = "test-key"
+	server.SetRemoteSetup(func() *remote.RemoteSetupSnapshot {
+		return &remote.RemoteSetupSnapshot{LastErr: "setup failed"}
+	})
+	recorder := httptest.NewRecorder()
+	server.AdminHandler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/admin/v1/status", nil))
+	var response adminStatusResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.PairingTarget.Pending || !strings.Contains(response.PairingTarget.Error, "setup failed") {
+		t.Fatalf("pairing target = %+v", response.PairingTarget)
 	}
 }

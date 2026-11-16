@@ -1636,12 +1636,18 @@ The admin API is bound to localhost and is meant for local management only.
 
 - `GET /admin/v1/status`
   - Returns detailed daemon status, including pairing target info and active pairing state.
+  - `pairingTarget.reachable` means a target is available for pairing; it does
+    not verify the phone's DNS resolution or network connectivity.
+  - `pairingTarget.pending` indicates managed remote setup is retrying; the
+    target error describes its current state or the action needed.
 
 ### Pairing management
 
 - `POST /admin/v1/pairings/start`
   - Starts a pairing challenge locally.
   - Returns the pairing code and deep-link payload.
+  - Returns `503` with an actionable error when no target is available, including
+    while managed remote access is provisioning or requires setup.
 
 - `GET /admin/v1/pairings/{challengeId}`
   - Returns pairing state for a challenge.

@@ -401,6 +401,9 @@ func runPair() error {
 	defer stop()
 
 	client := adminclient.New(config.Load())
+	if err := waitForPairingTarget(ctx, client); err != nil {
+		return err
+	}
 	status, err := client.StartPairing(ctx)
 	if err != nil {
 		return fmt.Errorf("start pairing: %w", err)
@@ -451,6 +454,34 @@ func runPair() error {
 			default:
 				return fmt.Errorf("unexpected pairing state: %s", current.State)
 			}
+		}
+	}
+}
+
+func waitForPairingTarget(ctx context.Context, client *adminclient.Client) error {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	lastMessage := ""
+	for {
+		status, err := client.Status(ctx)
+		if err != nil {
+			return fmt.Errorf("read pairing target: %w", err)
+		}
+		if status.PairingTarget.Reachable {
+			return nil
+		}
+		message := status.PairingTarget.Error
+		if !status.PairingTarget.Pending {
+			return fmt.Errorf("pairing unavailable: %s", message)
+		}
+		if message != lastMessage {
+			fmt.Printf("Waiting for remote access: %s\nPress Ctrl-C to cancel.\n", message)
+			lastMessage = message
+		}
+		select {
+		case <-ctx.Done():
+			return errors.New("pairing cancelled")
+		case <-ticker.C:
 		}
 	}
 }

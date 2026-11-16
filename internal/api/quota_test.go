@@ -81,7 +81,7 @@ func TestQuotasReturnAuthorizedResponse(t *testing.T) {
 		Quotas: func(context.Context) (json.RawMessage, error) {
 			return json.RawMessage(`{"providers":[{"provider":"codex"}]}`), nil
 		},
-		Config:    config.Config{ListenAddr: "127.0.0.1:0"},
+		Config:    config.Config{ListenAddr: "192.0.2.1:5788"},
 		Logger:    logger,
 		Catalog:   catalog.New(base, nil),
 		Runtime:   runtime.NewSupervisor(logger, base, nil, nil),

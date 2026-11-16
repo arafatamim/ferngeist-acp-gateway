@@ -214,6 +214,7 @@ type adminStatusResponse struct {
 // for pairing (scheme + host), or why pairing is unavailable.
 type adminPairingTargetInfo struct {
 	Reachable bool   `json:"reachable"`
+	Pending   bool   `json:"pending,omitempty"`
 	Scheme    string `json:"scheme,omitempty"`
 	Host      string `json:"host,omitempty"`
 	Error     string `json:"error,omitempty"`

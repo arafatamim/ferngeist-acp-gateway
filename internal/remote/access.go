@@ -197,6 +197,16 @@ func (a *Access) Snapshot() *RemoteSetupSnapshot {
 	return a.snapshot.Load()
 }
 
+// URL returns the URL of the currently provisioned remote access, if any.
+func (a *Access) URL() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.result == nil {
+		return ""
+	}
+	return a.result.URL
+}
+
 // snapshotFor converts a provisioning error into a status-API snapshot.
 func snapshotFor(err error) *RemoteSetupSnapshot {
 	snap := &RemoteSetupSnapshot{}
