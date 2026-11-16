@@ -131,6 +131,7 @@ func TestBundledAgentsUseUpstreamACPCommands(t *testing.T) {
 		{"letta", "letta-acp", []string{}},
 		{"openhands", "openhands", []string{"acp"}},
 		{"codewhale", "codewhale", []string{"serve", "--acp"}},
+		{"command-code", "command-code", []string{"acp"}},
 	} {
 		t.Run(tc.id, func(t *testing.T) {
 			agent, err := New(t.TempDir(), nil).Get(tc.id)

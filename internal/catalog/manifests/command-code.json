@@ -1,0 +1,26 @@
+{
+  "id": "command-code",
+  "displayName": "Command Code",
+  "protocol": "acp",
+  "platformSupport": ["darwin", "linux", "windows"],
+  "detection": {
+    "mode": "path_lookup",
+    "command": "command-code"
+  },
+  "launch": {
+    "mode": "external",
+    "command": "command-code",
+    "args": ["acp"]
+  },
+  "capabilities": ["acp"],
+  "security": {
+    "curatedLaunch": true,
+    "allowsRemoteStart": true,
+    "userConfigurableFields": []
+  },
+  "registry": {
+    "required": false,
+    "validationStatus": "not_required"
+  },
+  "hint": "Install Command Code and log in or configure a provider."
+}
