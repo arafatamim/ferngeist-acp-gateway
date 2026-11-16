@@ -468,16 +468,19 @@ through the CLI: `ferngeist-gateway agents add|list|update|rm`
 
 ### Workspace browsing
 
-The workspace endpoints are **read-only** views into a checkout. Runtime-scoped
-routes are anchored to the **project directory the client
-opened in the agent** — captured from the ACP `session/new` request's
+The workspace endpoints are **read-only** views into a checkout. The remaining
+runtime-scoped route (`/files/list`) is anchored to the **project directory the
+client opened in the agent** — captured from the ACP `session/new` request's
 `params.cwd` as it flows through the gateway (and re-captured from
 `session/load`, which Ferngeist sends when resuming a session) — not to the
-gateway's own launch working directory. All file and git access is confined to
-that directory: any path that escapes it (absolute path, `..` traversal, or
-symlink escape) is rejected with `400`. "Not found / not known yet" cases return
-`404`, and git failures (no `git` on PATH, or the cwd is not a git repository)
-return `422`.
+gateway's own launch working directory. Git browsing is project-scoped: it takes
+an explicit `cwd` (see [Session-free project browsing](#session-free-project-browsing)).
+All file listings and Git access are confined to the selected directory: any
+relative path that escapes it (absolute path, `..` traversal, or symlink escape)
+is rejected with `400`. "Not found / not known yet" cases return `404`, and git
+failures (no `git` on PATH, or the cwd is not a git repository) return `422`.
+File *contents* are outside this confinement: `GET /v1/files?path=` reads any
+host file, as documented in [File retrieval](#file-retrieval).
 
 When that directory is inside a [managed worktree](#worktrees), `/git/status` and
 `/git/diff` compare against the worktree's base — the merge-base of the branch
@@ -487,9 +490,9 @@ the branch is rebased onto a newer base.
 
 Because `HEAD` and the worktree's base are the only references the endpoints
 can use, a client can also point them at another branch: `GET
-/v1/runtimes/{id}/git/refs` lists the refs to choose from, and `compare=<ref>`
-on `/git/status`, `/git/diff` and `/git/log` compares against that ref's tip
-instead of `HEAD` (or a managed worktree's base). This is a **two-dot,
+/v1/projects/git/refs?cwd=<absolute-checkout-root>` lists the refs to choose
+from, and `compare=<ref>` on `/git/status`, `/git/diff` and `/git/log` compares
+against that ref's tip instead of `HEAD` (or a managed worktree's base). This is a **two-dot,
 tip-to-tip** comparison with uncommitted work included, not a merge-base one:
 the file list and per-file diffs are `git diff <ref>` read from the working
 tree, and the history range is `<ref>..HEAD`. When the target has moved ahead
@@ -499,12 +502,13 @@ shape. While a target is selected, the worktree's own base ref plays no part,
 except that `/git/log` still reports the worktree's `baseCommit` next to the
 compare range (see below).
 
-One agent can host several ACP sessions, each with its own `cwd`. Every
-runtime workspace endpoint accepts an optional `acpSessionId=<id>` query parameter (the
-ACP session id from `session/new` or `session/load`, not the gateway session id)
-to read that session's project. Without it, the endpoints use the most recently
-opened or loaded session's directory. An `acpSessionId` the gateway has not seen
-opened or loaded on this runtime returns `404`.
+One agent can host several ACP sessions, each with its own `cwd`. The runtime
+file-list route accepts an optional `acpSessionId=<id>` query parameter (the ACP
+session id from `session/new` or `session/load`, not the gateway session id) to
+read that session's project. Without it, the route uses the most recently opened
+or loaded session's directory. An `acpSessionId` the gateway has not seen opened
+or loaded on this runtime returns `404`. The Git routes are project-scoped and
+take `cwd` instead; they reject `acpSessionId`.
 
 #### Session-free project browsing
 
@@ -519,7 +523,7 @@ runtime, or ACP session:
 
 For example, `/v1/projects/git/status?cwd=%2Fhome%2Falice%2Fapp`. File contents
 come from [`/v1/files`](#file-retrieval). These routes share the response shapes, limits, managed-worktree behavior, and
-query parameters documented for the corresponding runtime routes below:
+query parameters documented for the shared Git sections below:
 `compare` for status/diff/log; `path`, `commit`, and `oldPath` for diff;
 `head`, `skip`, `limit`, and `beyond` for log. Diff paths stay confined to the
 selected checkout, including traversal and symlink escape checks.
@@ -535,19 +539,20 @@ subdirectory, a file, a bare repository, or any `acpSessionId` parameter returns
 the gateway OS user can read. Checkout validation is not an authorization
 allowlist. There is no project-scoped `/files/list` route.
 
-#### Runtime workspace responses
+#### Runtime file listing
 
 Protocol v3 removes the runtime-scoped Git routes (`refs`, `status`, `diff`,
-`log`, and `commits/{sha}`). Use the `/v1/projects/git/...` routes; the Git
-sections below document the shared response shapes. The runtime file-list
-route remains available for non-Git projects. File contents come from [`/v1/files`](#file-retrieval).
+`log`, and `commits/{sha}`). The runtime file-list route remains available for
+non-Git projects. File contents come from [`/v1/files`](#file-retrieval), and
+Git browsing uses the `/v1/projects/git/...` routes whose response shapes are
+documented under [Git response shapes](#git-response-shapes).
 
 - `GET /v1/runtimes/{runtimeId}/files/list`
   - Lists the files of the runtime's project directory so a client can resolve
     the bare file names an agent writes out locally. Requires `read` scope.
-    Same `acpSessionId=<id>` semantics as the other workspace endpoints; the
-    listing root is that session's project directory; join a listed path onto
-    it to read the file through `/v1/files`.
+    Accepts the optional `acpSessionId` selector described above; the listing
+    root is that session's project directory; join a listed path onto it to
+    read the file through `/v1/files`.
   - Response:
     ```json
     {
@@ -582,7 +587,17 @@ route remains available for non-Git projects. File contents come from [`/v1/file
     read as "unsupported" and treat as a fallback to the file names they
     already know.
 
-- `GET /v1/runtimes/{runtimeId}/git/refs`
+#### Git response shapes
+
+The `GET /v1/projects/git/{refs,status,diff,log,commits/{sha}}` routes share the
+shapes, limits and query parameters below. They require `read` scope and the
+exactly-one-absolute-`cwd` selector documented in [Session-free project
+browsing](#session-free-project-browsing); `acpSessionId` is rejected. In
+addition to the per-route errors listed, a malformed selector or route parameter
+is `400`, a missing checkout is `404`, and missing `git` or a non-repository is
+`422`.
+
+- `GET /v1/projects/git/refs?cwd=<absolute-checkout-root>`
   - Lists the refs a client can compare against: every local branch, every
     remote-tracking ref (`origin/*`, with `origin/HEAD`-style aliases dropped),
     and every tag.
@@ -614,12 +629,12 @@ route remains available for non-Git projects. File contents come from [`/v1/file
     entry's `kind` — which `compare` accepts and resolves unambiguously.
   - An empty repository returns `200` with `"refs": []` and `"default": ""`.
   - Error responses:
-    - `404` — runtime has no session, or working directory unknown (see above)
+    - `404` — the selected checkout is missing
     - `422` — `git` is missing from PATH, or the directory is not a git repository
 
-- `GET /v1/runtimes/{runtimeId}/git/status`
+- `GET /v1/projects/git/status?cwd=<absolute-checkout-root>`
   - Returns branch, ahead/behind counts, and changed files (with per-file line
-    counts) for the runtime's project directory.
+    counts) for the selected checkout.
   - `changed` is always an array: `[]` when no files differ, including in
     compare mode.
   - Requires `read` scope.
@@ -690,10 +705,10 @@ route remains available for non-Git projects. File contents come from [`/v1/file
   - Error responses:
     - `400` — `compare` is malformed (option-like, whitespace, control
       characters, `..`, `@{`, or `~^:?*[\`) or names no commit
-    - `404` — runtime has no session, or working directory unknown (see above)
+    - `404` — the selected checkout is missing
     - `422` — `git` is missing from PATH, or the directory is not a git repository
 
-- `GET /v1/runtimes/{runtimeId}/git/diff?path=<rel>`
+- `GET /v1/projects/git/diff?cwd=<absolute-checkout-root>&path=<rel>`
   - Returns the diff for a single file (`?path=`), or for the whole working tree
     when `path` is omitted.
   - Requires `read` scope.
@@ -751,7 +766,7 @@ route remains available for non-Git projects. File contents come from [`/v1/file
       symlink escape)
     - `400` — `compare` is malformed (option-like, whitespace, control
       characters, `..`, `@{`, or `~^:?*[\`) or names no commit
-    - `404` — runtime has no session, or working directory unknown (see above)
+    - `404` — the selected checkout is missing
     - `422` — `git` is missing from PATH, or the directory is not a git repository
   - **Commit mode:** `?commit=<sha>&path=<rel>[&oldPath=<rel>]` diffs one file
     of a commit against its first parent instead of the working tree. `oldText`
@@ -763,7 +778,7 @@ route remains available for non-Git projects. File contents come from [`/v1/file
     without `path`, an invalid or unknown sha, an escaping path, or a
     submodule path; `422` when the path is in neither side of the commit.
 
-- `GET /v1/runtimes/{runtimeId}/git/log?head=<sha>&skip=<n>&limit=<n>`
+- `GET /v1/projects/git/log?cwd=<absolute-checkout-root>&head=<sha>&skip=<n>&limit=<n>`
   - Returns one page of commit history reachable from `head`, newest first in
     topological order. The whole repository is walked, not just the project
     directory, so the parent links form a complete graph.
@@ -851,10 +866,10 @@ route remains available for non-Git projects. File contents come from [`/v1/file
       `skip`/`limit` not integers
     - `400` — `compare` is malformed (option-like, whitespace, control
       characters, `..`, `@{`, or `~^:?*[\`) or names no commit
-    - `404` — runtime has no session, or working directory unknown (see above)
+    - `404` — the selected checkout is missing
     - `422` — `git` is missing from PATH, or the directory is not a git repository
 
-- `GET /v1/runtimes/{runtimeId}/git/commits/{sha}`
+- `GET /v1/projects/git/commits/{sha}?cwd=<absolute-checkout-root>`
   - Returns the files a commit changed under the project directory, compared
     with its first parent (so a merge lists what it brought in; a root commit
     lists everything).
@@ -866,7 +881,7 @@ route remains available for non-Git projects. File contents come from [`/v1/file
     commit that touched nothing under the directory returns `changed: []`.
   - Error responses:
     - `400` — invalid or unknown sha
-    - `404` — runtime has no session, or working directory unknown (see above)
+    - `404` — the selected checkout is missing
     - `422` — `git` is missing from PATH, or the directory is not a git repository
 
 ### Worktrees
@@ -915,7 +930,7 @@ clean. Worktrees outlive the chats that use them: they are removed only on an ex
 
 - `GET /v1/worktrees/refs?repo=<absolute path>`
   - Requires `control` scope, like `POST /v1/worktrees`.
-  - Returns the `GET /v1/runtimes/{runtimeId}/git/refs` payload (`default` and `refs`) for the
+  - Returns the `GET /v1/projects/git/refs?cwd=` payload (`default` and `refs`) for the
     repository at `repo`, so a client can offer a base branch before any chat
     exists in it. `default` is the repository's default branch as described there.
   - Error responses:

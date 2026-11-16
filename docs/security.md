@@ -161,12 +161,12 @@ to up to 64 paths per request, opening and closing each in turn without
 reading beyond the 8000-byte content-type sniff. It returns size and type only,
 takes no transfer slot, and its per-path error codes omit host paths beyond
 echoing the requested one in `uri`.
-Existing workspace confinement and cross-device turns behavior are unchanged.
 
 ## Workspace read surface
 
-The workspace endpoints (`/files/list`, `/git/status`, `/git/diff`, `/git/log`,
-`/git/refs`, `/git/commits/{sha}`) let a paired client list files and read git
+The workspace endpoints (`/files/list`,
+`/v1/projects/git/{status,diff,log,refs,commits/{sha}}`) let a paired client
+list files and read git
 state inside the project the agent is working on. File contents come only from
 `/v1/files` (above).
 

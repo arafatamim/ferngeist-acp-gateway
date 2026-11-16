@@ -191,8 +191,9 @@ and payloads. An explicit route wrapper selects `workspace.CheckoutRoot`
 instead of the session resolver. Exactly one absolute `cwd` selects a non-bare
 checkout root, including a linked worktree; symlinks are canonicalized before
 checking root identity and confining diff paths. Subdirectories and conflicting
-selectors are rejected. Runtime routes keep `acpSessionId` selection and reject
-`cwd`; project routes reject `acpSessionId`. No process is started or required.
+selectors are rejected. The runtime file-list route keeps `acpSessionId`
+selection and rejects `cwd`; project routes take `cwd` and reject
+`acpSessionId`. No process is started or required.
 A paired client with `read` scope may select any checkout readable by the
 gateway OS user; checkout validation supplies no authorization allowlist.
 
@@ -209,14 +210,14 @@ them with SDK types it already has:
   paths under the project directory (`git ls-files -z --cached --others
   --exclude-standard`), sorted and deduplicated, capped at 50,000 and gzipped
   on request. Lets a client resolve the bare file names an agent writes out.
-- `GET /v1/runtimes/{id}/git/status` — `git -C <cwd> status --porcelain=v2 --branch`,
+- `GET /v1/projects/git/status?cwd=<checkout-root>` — `git -C <cwd> status --porcelain=v2 --branch`,
   enriched with per-file line counts (`git diff HEAD --numstat`, covering the
   whole HEAD → working-tree delta so staged + unstaged edits count together;
   a `--cached` fallback covers repos with no HEAD commit) and raw line counts
   for untracked files, plus a `staged` flag (the index side, `X`, of the
   porcelain `XY` pair; false for unmerged and untracked entries). Has **no ACP
   equivalent**; the shape is gateway-defined and documented as such.
-- `GET /v1/runtimes/{id}/git/diff?path=<rel>` — always returns
+- `GET /v1/projects/git/diff?cwd=<checkout-root>&path=<rel>` — always returns
   `acp.ToolCallContentDiff` (`path`/`oldText`/`newText`/`type:"diff"`): a single
   object with `?path=`, otherwise a JSON array with one entry per changed file.
   `oldText` comes from `git show HEAD:<path>`, `newText` from the working copy.
@@ -226,14 +227,14 @@ them with SDK types it already has:
   against `HEAD`; `oldText` is present only when the file exists in `HEAD`, so
   new/untracked files and files renamed within the working tree have it
   omitted. Committed history beyond `HEAD` is not included.
-- `GET /v1/runtimes/{id}/git/log?head=<sha>&skip=<n>&limit=<n>` — paged commit
+- `GET /v1/projects/git/log?cwd=<checkout-root>&head=<sha>&skip=<n>&limit=<n>` — paged commit
   history, newest first, with per-commit refs and `pushed`, the walk's `total`,
   and `baseCommit` (a managed worktree's base or a plain checkout's branch
   start). `compare=<ref>` restricts the walk to `<ref>..HEAD`; `beyond=<n>`
   also returns the target's own tip commits.
-- `GET /v1/runtimes/{id}/git/commits/{sha}` — the files a commit changed under
+- `GET /v1/projects/git/commits/{sha}?cwd=<checkout-root>` — the files a commit changed under
   the project directory, compared with its first parent.
-- `GET /v1/runtimes/{id}/git/refs` — local branches, `origin/*` refs and tags
+- `GET /v1/projects/git/refs?cwd=<checkout-root>` — local branches, `origin/*` refs and tags
   for the compare picker, plus a `default` labelling hint.
 
 `compare=<ref>` on `/git/status`, `/git/diff` and `/git/log` points them at
@@ -243,8 +244,9 @@ instead of `HEAD` or the managed worktree's base.
 **Path confinement.** `resolveWithinRoot` rejects any path that escapes the
 project directory: absolute paths, `..` traversal, and symlink escapes (both the
 root and the resolved target are `EvalSymlinks`-checked). Rejections are `400`.
-Because runtimes are gateway-global resources (the same model as
-`handleRuntimeLogs`), there is no per-device runtime ownership on these routes.
+Runtimes are gateway-global resources (the same model as `handleRuntimeLogs`), so
+the file-list route has no per-device runtime ownership; the project Git routes
+are selected by `cwd` alone.
 
 **Git.** Every invocation is `git -C <cwd> <subcommand>` under a 15-second
 context timeout (the server `WriteTimeout` is 20s), so a locked or hanging repo
