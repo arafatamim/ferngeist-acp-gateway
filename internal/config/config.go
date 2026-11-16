@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	goruntime "runtime"
@@ -145,7 +146,7 @@ func Load() Config {
 		RegistryURL:            envOrDefault("FERNGEIST_GATEWAY_REGISTRY_URL", "https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json"),
 		PublicBaseURL:          strings.TrimSpace(os.Getenv("FERNGEIST_GATEWAY_PUBLIC_BASE_URL")),
 		EnableLAN:              os.Getenv("FERNGEIST_GATEWAY_ENABLE_LAN") == "1",
-		StateDBPath:            envOrDefault("FERNGEIST_GATEWAY_STATE_DB", "ferngeist-gateway.db"),
+		StateDBPath:            envOrDefault("FERNGEIST_GATEWAY_STATE_DB", defaultStateDBPath()),
 		GatewayName:            gatewayName,
 		ManagedBinDir:          envOrDefault("FERNGEIST_GATEWAY_MANAGED_BIN_DIR", defaultManagedBinDir()),
 		PairingArmTTL:          envDurationSecondsOrDefault("FERNGEIST_GATEWAY_PAIRING_ARM_TTL_SECONDS", defaultPairingArmTTL),
@@ -342,4 +343,16 @@ func defaultManagedBinDir() string {
 	default:
 		return filepath.Join(home, ".local", "share", "ferngeist-gateway", "bin")
 	}
+}
+
+func defaultStateDBPath() string {
+	root := filepath.Dir(defaultManagedBinDir())
+	if goruntime.GOOS == "windows" {
+		root = filepath.Join(root, "data")
+	}
+	path := filepath.Join(root, "ferngeist-gateway.db")
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		return path
+	}
+	return "ferngeist-gateway.db"
 }

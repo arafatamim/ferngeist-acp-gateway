@@ -26,7 +26,7 @@ Foreground runs inherit the shell environment directly.
 | `FERNGEIST_GATEWAY_NAME` | Gateway name advertised to clients (falls back to the hostname) | hostname |
 | `FERNGEIST_GATEWAY_ENABLE_LAN` | Enable LAN discovery and access | `false` |
 | `FERNGEIST_GATEWAY_PUBLIC_BASE_URL` | Public URL used for remote access | unset |
-| `FERNGEIST_GATEWAY_STATE_DB` | SQLite state database path | platform default |
+| `FERNGEIST_GATEWAY_STATE_DB` | SQLite state database path | existing installed database, otherwise `ferngeist-gateway.db` in the working directory |
 | `FERNGEIST_GATEWAY_LOG_LEVEL` | Log level: `debug`, `info`, `warn`, or `error` | `info` |
 | `FERNGEIST_GATEWAY_LOG_DIR` | Log directory | platform default |
 | `FERNGEIST_GATEWAY_MANAGED_BIN_DIR` | Managed binary install directory | platform default |
