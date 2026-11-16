@@ -100,6 +100,9 @@ type Config struct {
 	// harness profile. nil, or a set with no transformers, passes frames through
 	// unchanged.
 	Extensions func(agentID string) agentext.Set
+	// TurnFinished resolves the hook an agent's harness profile runs after each
+	// answered prompt, given its ACP session id. nil, or a nil hook, runs nothing.
+	TurnFinished func(agentID string) func(ctx context.Context, acpSessionID string) error
 	// ExtensionBudget is the daemon-wide budget every session's extension engine
 	// shares. nil keeps only the per-engine limits.
 	ExtensionBudget *agentext.Budget
@@ -164,9 +167,10 @@ type Session struct {
 	CreatedAt      time.Time
 	DisconnectedAt *time.Time // set when client detaches, nil when attached
 
-	proc       *runtime.Process   // the agent process this session owns
-	pump       *StdioPump         // long-lived stdout drain + stdin writer
-	cancelPump context.CancelFunc // stops the StdoutDrainLoop on session close
+	proc          *runtime.Process   // the agent process this session owns
+	pump          *StdioPump         // long-lived stdout drain + stdin writer
+	cancelPump    context.CancelFunc // stops the StdoutDrainLoop on session close
+	afterTurnDone <-chan struct{}    // closes when the after-turn worker stops
 
 	// exited is closed once the exit watcher has recorded the process exit on
 	// the runtime and reclaimed the session. Close waits on it so a stopped

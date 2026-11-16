@@ -90,6 +90,7 @@ func (rs *RuntimeSession) create(ctx context.Context, agent catalog.Agent, devic
 	}
 
 	pumpCtx, pumpCancel := context.WithCancel(context.Background())
+	afterTurn, afterTurnDone := rs.afterTurnWorker(pumpCtx, agent.ID)
 
 	onPushNotification := func(e PushEvent) {
 		rs.mu.Lock()
@@ -117,6 +118,7 @@ func (rs *RuntimeSession) create(ctx context.Context, agent catalog.Agent, devic
 		onTurnFinished: func(st turns.Status) {
 			rs.outcomes.Record(st)
 			rs.feed.Changed()
+			afterTurn(st.SessionID)
 		},
 		reqIDs:           requestIDs{turnsChanged: rs.feed.Changed},
 		ProgressInterval: rs.cfg.ProgressInterval,
@@ -138,6 +140,7 @@ func (rs *RuntimeSession) create(ctx context.Context, agent catalog.Agent, devic
 		proc:           proc,
 		pump:           pump,
 		cancelPump:     pumpCancel,
+		afterTurnDone:  afterTurnDone,
 		exited:         make(chan struct{}),
 	}
 
@@ -650,6 +653,7 @@ func (rs *RuntimeSession) closeSession(ctx context.Context, sess *Session) error
 	// just waits for that teardown to stop the process.
 	if !sess.stopping.CompareAndSwap(false, true) {
 		rs.awaitExit(sess)
+		rs.awaitAfterTurn(sess)
 		return nil
 	}
 	sess.mu.Lock()
@@ -728,6 +732,7 @@ func (rs *RuntimeSession) closeSession(ctx context.Context, sess *Session) error
 		rs.logger.Warn("agent process did not stop cleanly", "runtime_id", sess.RuntimeID, "error", err)
 	}
 	rs.awaitExit(sess)
+	rs.awaitAfterTurn(sess)
 
 	// Step 6: delete from storage — cascades to outbound/inbound rows.
 	if err := rs.store.DeleteSession(ctx, sess.ID); err != nil {
@@ -735,6 +740,18 @@ func (rs *RuntimeSession) closeSession(ctx context.Context, sess *Session) error
 	}
 
 	return nil
+}
+
+// awaitAfterTurn bounds teardown if a filesystem operation does not return.
+func (rs *RuntimeSession) awaitAfterTurn(sess *Session) {
+	if sess.afterTurnDone == nil {
+		return
+	}
+	select {
+	case <-sess.afterTurnDone:
+	case <-time.After(2 * time.Second):
+		rs.logger.Warn("timed out waiting for harness after-turn work", "runtime_id", sess.RuntimeID)
+	}
 }
 
 // awaitExit waits, bounded, for the exit watcher to record the session's
@@ -948,6 +965,7 @@ func (rs *RuntimeSession) Shutdown() {
 			defer wg.Done()
 			if !sess.stopping.CompareAndSwap(false, true) {
 				rs.awaitExit(sess) // a Close already owns the teardown
+				rs.awaitAfterTurn(sess)
 				return
 			}
 			if sess.cancelPump != nil {
@@ -957,6 +975,7 @@ func (rs *RuntimeSession) Shutdown() {
 				rs.logger.Warn("agent process did not stop cleanly", "runtime_id", sess.RuntimeID, "error", err)
 			}
 			rs.awaitExit(sess)
+			rs.awaitAfterTurn(sess)
 		}()
 	}
 	stopped := make(chan struct{})

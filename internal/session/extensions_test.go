@@ -82,6 +82,44 @@ func rejectTransform(name string, selector agentext.Selector) agentext.Transform
 	})
 }
 
+func TestSessionCloseWaitsForAfterTurnWork(t *testing.T) {
+	rs, store, agent, _, ctx := setupTest(t, Config{})
+	defer store.Close()
+	defer rs.Shutdown()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	rs.cfg.TurnFinished = func(string) func(context.Context, string) error {
+		return func(context.Context, string) error {
+			close(started)
+			<-release
+			return nil
+		}
+	}
+	sess, _, err := rs.Create(ctx, agent, "device", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess.pump.onTurnFinished(turns.Status{SessionID: "chat"})
+	<-started
+	closed := make(chan error, 1)
+	go func() { closed <- rs.Close(ctx, sess.ID, "device") }()
+	select {
+	case err := <-closed:
+		close(release)
+		t.Fatalf("session closed while after-turn work was running: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("session did not close after after-turn work finished")
+	}
+}
+
 func TestBeforeStateCwdBecomesCanonical(t *testing.T) {
 	p := newPump()
 	p.agentID, p.sessionID, p.runtimeID = "agent", "gs", "rt"

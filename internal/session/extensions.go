@@ -27,6 +27,46 @@ func bindExtensions(ctx context.Context, cfg Config, registry *agentext.Registry
 	}, cfg.ExtensionBudget, nil)
 }
 
+// afterTurnWorker keeps filesystem work off the drain loop and bounds pending
+// work per session. Cancellation stops the worker after its current hook.
+func (rs *RuntimeSession) afterTurnWorker(ctx context.Context, agentID string) (func(string), <-chan struct{}) {
+	if rs.cfg.TurnFinished == nil {
+		return func(string) {}, nil
+	}
+	hook := rs.cfg.TurnFinished(agentID)
+	if hook == nil {
+		return func(string) {}, nil
+	}
+	queue := make(chan string, 32)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case id := <-queue:
+				if ctx.Err() != nil {
+					return
+				}
+				if err := hook(ctx, id); err != nil && ctx.Err() == nil {
+					rs.logger.Warn("harness after-turn hook failed", "agent_id", agentID, "acp_session_id", id, "error", err)
+				}
+			}
+		}
+	}()
+	return func(id string) {
+		if id == "" || ctx.Err() != nil {
+			return
+		}
+		select {
+		case queue <- id:
+		default:
+			rs.logger.Warn("harness after-turn queue full", "agent_id", agentID, "acp_session_id", id)
+		}
+	}, done
+}
+
 // extensionRegistry builds the immutable registration snapshot for agentID. It
 // runs before the agent process starts, so an invalid profile fails the connect
 // instead of leaving the session without its transforms.
@@ -284,6 +324,9 @@ func (p *StdioPump) present(f *frame, delivery replyDelivery, params retainedPar
 		Message: agentext.Message{Selector: selector, Body: body, RequestParams: requestParams},
 		Stage:   agentext.BeforeDelivery,
 	}
+	// The input owns a copy the engine charges itself; release the retained one
+	// now, before a deferred worker can deliver and the client asks again.
+	params.releaseBudget()
 	if mode == agentext.Inline {
 		out, err := p.ext.TransformInline(p.drainContext(), in)
 		p.finishPresentation(delivery, out, err)

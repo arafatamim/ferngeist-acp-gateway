@@ -25,7 +25,6 @@ import (
 
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/acquire"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/catalog"
-	"github.com/arafatamim/ferngeist-acp-gateway/internal/harness"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/storage"
 )
 
@@ -93,100 +92,6 @@ func TestLaunchProducesDistinctRuntimes(t *testing.T) {
 	if got := len(supervisor.List()); got != 2 {
 		t.Fatalf("len(List()) = %d, want 2", got)
 	}
-}
-
-func TestLaunchAppliesHarnessProfileEnvToTheChild(t *testing.T) {
-	t.Setenv("FERNGEIST_TEST_ENV", "")
-	baseDir := t.TempDir()
-	binDir := filepath.Join(baseDir, "bin")
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll() error = %v", err)
-	}
-	buildMockStdioAgent(t, filepath.Join(binDir, namedBinary("mock-acp")))
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	agent := catalog.Agent{
-		ID:          "mock-acp",
-		DisplayName: "Mock ACP",
-		Detected:    true,
-		Security:    catalog.SecurityConfig{AllowsRemoteStart: true},
-		Launch:      catalog.LaunchConfig{Mode: "external", Command: "mock-acp"},
-	}
-	for _, test := range []struct {
-		name      string
-		overrides map[string]string
-		want      string
-	}{
-		{name: "profile env reaches the child", want: "from-profile"},
-		{name: "caller overrides win", overrides: map[string]string{"FERNGEIST_TEST_ENV": "from-caller"}, want: "from-caller"},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			supervisor := NewSupervisor(slog.New(slog.NewTextHandler(io.Discard, nil)), baseDir, nil, nil)
-			supervisor.SetProfiles(harness.New(harness.Profile{
-				ID:        "mock-acp",
-				LaunchEnv: map[string]string{"FERNGEIST_TEST_ENV": "from-profile"},
-			}))
-			proc, err := supervisor.Launch(agent, test.overrides)
-			if err != nil {
-				t.Fatalf("Launch() error = %v", err)
-			}
-			defer func() { _ = proc.Stop(2 * time.Second) }()
-
-			if got := initializeAgentEnv(t, proc); got != test.want {
-				t.Fatalf("agentInfo.env = %q, want %q", got, test.want)
-			}
-		})
-	}
-}
-
-func TestLaunchAppliesHarnessProfileEnvToAClaimedSpare(t *testing.T) {
-	t.Setenv("FERNGEIST_TEST_ENV", "")
-	supervisor := newSpareSupervisor(t)
-	supervisor.SetProfiles(harness.New(harness.Profile{
-		ID:        "mock-acp",
-		LaunchEnv: map[string]string{"FERNGEIST_TEST_ENV": "from-profile"},
-	}))
-
-	launchMock(t, supervisor)
-	spare := waitSpare(t, supervisor, "mock-acp")
-
-	// A normal connect passes no overrides and claims the spare.
-	claimed, err := supervisor.Launch(mockAgent(), nil)
-	if err != nil {
-		t.Fatalf("Launch() error = %v", err)
-	}
-	t.Cleanup(func() { _ = claimed.Stop(2 * time.Second) })
-	if claimed != spare {
-		t.Fatal("Launch did not claim the pre-booted spare")
-	}
-	if got := initializeAgentEnv(t, claimed); got != "from-profile" {
-		t.Fatalf("claimed spare agentInfo.env = %q, want from-profile", got)
-	}
-}
-
-// initializeAgentEnv performs the ACP handshake the mock agent needs to report
-// the FERNGEIST_TEST_ENV it was started with.
-func initializeAgentEnv(t *testing.T, proc *Process) string {
-	t.Helper()
-	scanner := bufio.NewScanner(proc.Stdout)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	if _, err := io.WriteString(proc.Stdin, `{"jsonrpc":"2.0","id":"1","method":"initialize","params":{"protocolVersion":1,"capabilities":{},"clientInfo":{"name":"test","version":"0"}}}`+"\n"); err != nil {
-		t.Fatalf("WriteString() error = %v", err)
-	}
-	if !scanner.Scan() {
-		t.Fatal("expected an initialize response from the mock agent")
-	}
-	var resp struct {
-		Result struct {
-			AgentInfo struct {
-				Env string `json:"env"`
-			} `json:"agentInfo"`
-		} `json:"result"`
-	}
-	if err := json.Unmarshal(scanner.Bytes(), &resp); err != nil {
-		t.Fatalf("unmarshal initialize response: %v", err)
-	}
-	return resp.Result.AgentInfo.Env
 }
 
 func TestConnectReturnsDescriptorForRunningRuntime(t *testing.T) {

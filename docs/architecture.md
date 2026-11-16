@@ -10,11 +10,11 @@ Its main job is to expose ACP agents through a unified WebSocket API. It discove
 - `internal/api` — public and admin HTTP APIs, WebSocket bridge, session handlers
 - `internal/push` — platform-neutral push dispatcher with pluggable delivery providers (Web Push)
 - `internal/pairing` — pairing flow and device credentials
-- `internal/runtime` — agent process launching, the per-runtime log ring buffer, and persisted failure records. The supervisor does not own the process: `Launch` hands the caller a `*exec.Cmd` plus its pipes, the caller reports the exit back with `RecordExit`, and there is no automatic restart. It applies the agent's harness profile launch environment at spawn, under any caller overrides.
+- `internal/runtime` — agent process launching, the per-runtime log ring buffer, and persisted failure records. The supervisor does not own the process: `Launch` hands the caller a `*exec.Cmd` plus its pipes, the caller reports the exit back with `RecordExit`, and there is no automatic restart.
 - `internal/session` — resilient session domain: session lifecycle, the stdio pump, agent process ownership (a session owns the `*exec.Cmd` it launched), attach tokens, and inbound diagnostics
 - `internal/turns` — the `GET /v1/turns` wire shape, the outcome classification of a finished prompt reply, and the daemon-wide in-memory store of finished outcomes (no project imports)
 - `internal/catalog` — supported agent discovery and validation
-- `internal/harness` — per-agent harness profiles: the launch overrides and non-ACP behaviours that the registry and protocol do not describe, keyed by catalog agent id. An agent with no profile behaves like a plain ACP agent.
+- `internal/harness` — per-agent harness profiles: the non-ACP behaviours that the registry and protocol do not describe, keyed by catalog agent id. An agent with no profile behaves like a plain ACP agent.
 - `internal/registry` — ACP registry fetch and cache
 - `internal/storage` — SQLite persistence (sessions, pairings, runtimes, push tokens, gateway identity, inbound diagnostics)
 - `internal/discovery` — LAN advertising via mDNS
@@ -26,7 +26,7 @@ Its main job is to expose ACP agents through a unified WebSocket API. It discove
 
 ## Harness profiles
 
-ACP describes the protocol, not the harness behind it. `internal/harness` holds gateway-side deviations for known harnesses, keyed by catalog agent id; an agent with no profile is a plain ACP agent, and quota providers, icons and logos stay catalog metadata rather than profiles. A profile carries two kinds of deviation. `LaunchEnv` is applied by `runtime` at the single process spawn site under any caller overrides, so cold launches, claimed spares and `Supervisor.Spawn` all share it; the Claude Agent profile tags the adapter with `CLAUDE_CODE_ENTRYPOINT=cli`, because Claude Code's `/resume` hides the SDK-labelled transcripts and the SDK only defaults that variable when it is unset. `Sessions` answers for chats the harness's ACP adapter leaves out of `session/list`: the Hermes profile reads its read-only session store for the chats its CLI, TUI, desktop and web clients created, and registers a deferred `BeforeDelivery` transform (see [Agent extensions](#agent-extensions)) that appends them to the reply's final page. Hermes's owner resumes those rows on `session/load`, so the merged entries are real sessions, not a display-only list. `internal/daemon` injects `harness.Default()` during composition.
+ACP describes the protocol, not the harness behind it. `internal/harness` holds gateway-side deviations for known harnesses, keyed by catalog agent id; an agent with no profile is a plain ACP agent, and quota providers, icons and logos stay catalog metadata rather than profiles. A profile carries three kinds of deviation. `TurnFinished` runs after the agent answers a `session/prompt`, from any connection generation, on a bounded per-session worker off the drain loop; cancellation drops pending work and stops the worker after its current hook. The Claude Agent profile relabels the chat's transcript so Claude Code's `/resume` picker lists it. The picker hides a chat whose transcript's first `entrypoint` is an Agent SDK one, and headless Claude Code always records one, so the hook rewrites that first value to `"cli"` padded with spaces to the same byte length; Claude Code only appends to a live transcript, so the in-place overwrite cannot collide with its writes. `Sessions` answers for chats the harness's ACP adapter leaves out of `session/list`: the Hermes profile reads its read-only session store for the chats its CLI, TUI, desktop and web clients created, and registers a deferred `BeforeDelivery` transform (see [Agent extensions](#agent-extensions)) that appends them to the reply's final page. Hermes's owner resumes those rows on `session/load`, so the merged entries are real sessions, not a display-only list. `Extensions` is that transform registry itself — the payload rewrites a profile supplies, today only Hermes's list merge. `internal/daemon` injects `harness.Default()` during composition.
 
 ## Agent extensions
 
@@ -56,8 +56,8 @@ Every connection creates a persistent gateway session with:
 > "Fresh" does not mean cold: after each launch without caller env overrides the
 > supervisor pre-boots one spare process of that agent (`internal/runtime/spare.go`),
 > unlisted until claimed, and the next connect takes it instead of spawning.
-> The spare runs on the daemon environment plus the agent's harness profile
-> defaults, the same environment a cold launch without overrides would get.
+> The spare runs on the daemon environment, the same environment a cold launch
+> without overrides would get.
 > Agent startup is 300–900ms of a cold connect; a booted spare answers
 > `initialize` in a few ms. The spare has never seen a client, so the contract
 > is unchanged. A spare is dropped when its launch command or args no longer

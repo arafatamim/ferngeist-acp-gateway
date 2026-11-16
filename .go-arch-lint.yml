@@ -109,7 +109,7 @@ deps:
 
   # domain tier 2: agent processes, which need acquired binaries.
   runtime:
-    mayDependOn: [harness, acquire, catalog, push, storage, registry, discovery, service]
+    mayDependOn: [acquire, catalog, push, storage, registry, discovery, service]
 
   # domain tier 3: things that drive a running agent.
   session:

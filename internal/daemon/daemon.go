@@ -347,7 +347,6 @@ func newAgentRuntime(cfg config.Config, logger *slog.Logger, store *storage.SQLi
 	installer.SetJSRuntime(cfg.JSRuntime)
 	installer.PruneNpm() // before any agent launches from an install dir
 	runtimeSvc := gatewayruntime.NewSupervisor(logger, ".", store, installer)
-	runtimeSvc.SetProfiles(harness.Default())
 
 	return catalogSvc, runtimeSvc
 }
@@ -369,6 +368,7 @@ func composeServer(deps api.Deps, store *storage.SQLiteStore) (*api.Server, *ses
 		PushSvc:            deps.Push,
 		BranchOf:           worktrees.BranchOf,
 		Extensions:         profiles.Extensions,
+		TurnFinished:       profiles.TurnFinished,
 		ExtensionBudget:    extensionBudget,
 		GatewayID:          cfg.GatewayID,
 		FrameLogEnabled:    cfg.FrameLogEnabled,

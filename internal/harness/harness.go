@@ -1,12 +1,11 @@
 // Package harness owns gateway-side knowledge about individual agent
-// harnesses: the launch overrides and non-ACP behaviours that the ACP registry
+// harnesses: the non-ACP behaviours that the ACP registry
 // and protocol do not describe. A harness with no profile behaves like a plain
 // ACP agent.
 package harness
 
 import (
 	"context"
-	"maps"
 	"slices"
 
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/agentext"
@@ -30,8 +29,10 @@ type SessionSource interface {
 type Profile struct {
 	// ID is the catalog agent id, e.g. "claude-acp".
 	ID string
-	// LaunchEnv is set on the agent process. Caller overrides win.
-	LaunchEnv map[string]string
+	// TurnFinished runs after the agent answers a session/prompt, off the frame
+	// pipeline, with the prompt's ACP session id. nil when the harness needs
+	// nothing then.
+	TurnFinished func(ctx context.Context, acpSessionID string) error
 	// Sessions lists chats the harness's ACP adapter leaves out of session/list.
 	// nil when the harness lists everything itself.
 	Sessions SessionSource
@@ -45,8 +46,7 @@ type Registry struct {
 	byID map[string]Profile
 }
 
-// New returns a registry serving the given profiles. It keeps each profile's
-// LaunchEnv map; callers must not mutate it after construction.
+// New returns a registry serving the given profiles.
 func New(profiles ...Profile) *Registry {
 	byID := make(map[string]Profile, len(profiles))
 	for _, profile := range profiles {
@@ -55,17 +55,12 @@ func New(profiles ...Profile) *Registry {
 	return &Registry{byID: byID}
 }
 
-// LaunchEnv returns a copy of the environment the harness needs at process
-// start, or nil when it has none.
-func (r *Registry) LaunchEnv(agentID string) map[string]string {
+// TurnFinished returns agentID's after-turn hook, or nil when it has none.
+func (r *Registry) TurnFinished(agentID string) func(ctx context.Context, acpSessionID string) error {
 	if r == nil {
 		return nil
 	}
-	env := r.byID[agentID].LaunchEnv
-	if len(env) == 0 {
-		return nil
-	}
-	return maps.Clone(env)
+	return r.byID[agentID].TurnFinished
 }
 
 // Extensions returns the payload transformers agentID's profile registers. The
