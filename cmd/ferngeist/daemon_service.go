@@ -211,6 +211,7 @@ func runDaemonStatus() error {
 	fmt.Fprintf(writer, "LAN ENABLED\t%t\n", daemonStatus.LANEnabled)
 	fmt.Fprintf(writer, "REMOTE MODE\t%s\n", valueOrFallback(daemonStatus.Remote.Mode, "unknown"))
 	fmt.Fprintf(writer, "REMOTE SCOPE\t%s\n", valueOrFallback(daemonStatus.Remote.Scope, "unknown"))
+	fmt.Fprintf(writer, "REMOTE STATE\t%s\n", valueOrFallback(daemonStatus.Remote.ProvisioningState, "unknown"))
 	fmt.Fprintf(writer, "PAIRED DEVICES\t%d\n", daemonStatus.PairedDeviceCount)
 	fmt.Fprintf(writer, "UPTIME\t%s\n", formatUptime(daemonStatus.UptimeSeconds))
 	if daemonStatus.Remote.PublicURL != "" {

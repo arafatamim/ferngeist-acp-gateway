@@ -243,7 +243,7 @@ Base path: `/v1`
       "authUrl": ""
     }
     ```
-  - `mode` is one of: `tailscale`, `cloudflare_tunnel`, `lan_direct`, `local_only`, `tsnet`.
+  - `mode` is one of: `tailscale`, `cloudflare_tunnel`, `manual_reverse_proxy`, `configured` (invalid URL), `lan_direct`, `local_only`, `tsnet`.
   - `scope` is one of: `public`, `private`, `unknown`, `lan`, `local`. Managed Tailscale scope comes from its Funnel or Serve configuration; manual URL exposure is unknown.
   - `provisioningState` is `pending`, `failed`, `ready`, `unverified` (manual URL), or `not_applicable` (LAN/local). For managed access, `healthy` is true only when provisioning succeeded; for manual URLs it is false because readiness is unverified. LAN/local retain their existing health semantics. `ready` does not verify external connectivity or continued provider availability.
   - `authRequired` is `true` when an interactive Tailscale login is pending;
