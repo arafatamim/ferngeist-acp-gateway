@@ -30,11 +30,6 @@ Entries end with the date and the short hash of the commit that introduced
 the change, linked to the commit on GitHub, so any claim can be checked
 against the code.
 
-## Unreleased
-
-- [additive] Remote status includes `provisioningState` to distinguish managed readiness from manual, unverified access.
-- [semantic] Managed Tailscale scope follows Funnel or Serve configuration; pending and failed provisioning is unhealthy. Manual URL scope and readiness are unverified, and `healthy` is false. Readiness does not verify external connectivity.
-
 ## Versioning policy
 
 - `protocolVersion` (served in `GET /v1/status` and the mDNS
@@ -48,18 +43,30 @@ against the code.
 
 ## Unreleased
 
-- [additive] Admin pairing status exposes `pairingTarget.pending` while managed
-  remote setup is retrying. (2026-11-16)
+- `[additive]` Remote status includes `provisioningState` to distinguish
+  managed readiness from manual, unverified access.
+  (2026-11-16, [`e6f4c0e`](https://github.com/arafatamim/ferngeist-acp-gateway/commit/e6f4c0e))
 
-- [semantic] Admin pairing now rejects unavailable targets with a `503` and
+- `[semantic]` Managed Tailscale scope follows Funnel or Serve configuration;
+  pending and failed provisioning is unhealthy. Manual URL scope and readiness
+  are unverified, and `healthy` is false. Readiness does not verify external
+  connectivity.
+  (2026-11-16, [`e6f4c0e`](https://github.com/arafatamim/ferngeist-acp-gateway/commit/e6f4c0e))
+
+- `[additive]` Admin pairing status exposes `pairingTarget.pending` while managed
+  remote setup is retrying.
+  (2026-11-16, [`bfa4146`](https://github.com/arafatamim/ferngeist-acp-gateway/commit/bfa4146))
+
+- `[semantic]` Admin pairing now rejects unavailable targets with a `503` and
   excludes remembered managed URLs until current provisioning succeeds.
   Pairing target availability does not verify client DNS or connectivity.
-  (2026-11-16)
+  (2026-11-16, [`bfa4146`](https://github.com/arafatamim/ferngeist-acp-gateway/commit/bfa4146))
 
 - `[semantic]` File GET/HEAD preparation and batch stat reject metadata changes
   after admission as `409` / per-file `busy`, keeping size and validators
   coherent. Invalid or unsatisfiable file ranges carry `no-store` without
   representation validators. No protocol version bump.
+  (2026-11-13, [`2f04251`](https://github.com/arafatamim/ferngeist-acp-gateway/commit/2f04251))
 
 - `[breaking]` **Protocol v3.** `GET /v1/runtimes/{id}/files` and
   `GET /v1/projects/files` (JSON `TextResourceContents`/`BlobResourceContents`)
@@ -94,18 +101,19 @@ against the code.
   session or project `cwd`. Migration table in docs/api.md. `/files/list` is
   unchanged. The deprecated `/v1/runtimes/{id}/git/*` routes are removed; use
   `/v1/projects/git/*`.
-  (2026-11-12, unreleased)
+  (2026-11-13, [`2f04251`](https://github.com/arafatamim/ferngeist-acp-gateway/commit/2f04251), [`4c21993`](https://github.com/arafatamim/ferngeist-acp-gateway/commit/4c21993))
 
 - `[additive]` Shared HTTP request logs redact `path` and `acpSessionId` query
   values case-insensitively, including duplicate keys. Malformed queries log a
   fixed `redacted` marker; existing credential redaction is preserved. This
   covers request logs only, not optional raw ACP frames.
-  (2026-11-12, unreleased)
+  (2026-11-13, [`2f04251`](https://github.com/arafatamim/ferngeist-acp-gateway/commit/2f04251))
 
 - `[semantic]` Installing the systemd, launchd, or Windows scheduled-task service
-  persists the invoking shell's non-empty PATH for agent detection and launches when no saved PATH
-  exists. Reinstalls and package upgrades preserve this snapshot by default.
-  (2026-11-11, unreleased)
+  persists the invoking shell's non-empty PATH for agent detection and launches
+  when no saved PATH exists. Reinstalls and package upgrades preserve this
+  snapshot by default.
+  (2026-11-11, [`7068e4b`](https://github.com/arafatamim/ferngeist-acp-gateway/commit/7068e4b))
 
 - `[additive]` An ACP `session/list` reply from Hermes Agent also carries the
   chats its CLI, TUI, desktop and web clients created (at most the 200 most
@@ -113,29 +121,35 @@ against the code.
   from Hermes's local session store and appends them to the reply's final page;
   the agent's own rows, order and cursor are unchanged. The merge is deferred,
   so a later agent frame may reach the client before the augmented reply, which
-  keeps its request id and must be correlated as usual. (2026-11-12, unreleased)
+  keeps its request id and must be correlated as usual.
+  (2026-11-16, [`a61442d`](https://github.com/arafatamim/ferngeist-acp-gateway/commit/a61442d))
 
 - `[additive]` The agent catalog includes the locally installed OpenClaw ACP
   bridge on Linux and macOS, plus Hermes Agent, Oh My Pi, DeepSeek Harness,
   Reasonix, Letta ACP, OpenHands, Codewhale, and Command Code. OpenClaw requires
   a configured, running OpenClaw gateway; the others' own setup and provider
-  configuration remain prerequisites. (2026-11-10, unreleased)
+  configuration remain prerequisites.
+  (2026-11-16, [`32131e6`](https://github.com/arafatamim/ferngeist-acp-gateway/commit/32131e6), [`791a913`](https://github.com/arafatamim/ferngeist-acp-gateway/commit/791a913))
 
-- `[semantic]` The runtime-scoped Git routes are deprecated in favor of
-  `/v1/projects/git/...`. They remain available for existing clients and are
-  planned for removal in protocol v3. Runtime file and file-list routes are not
-  deprecated.
-  (2026-11-08, unreleased)
+- `[additive]` Session-free `GET /v1/projects/git/{status,diff,log,refs}` and
+  `/v1/projects/git/commits/{sha}` accept exactly one absolute checkout-root
+  `cwd`, reject `acpSessionId`, and require `read` scope. Paired clients may
+  select any checkout readable by the gateway OS user. Response shapes match
+  the former runtime Git routes.
+  (2026-11-09, [`74c2228`](https://github.com/arafatamim/ferngeist-acp-gateway/commit/74c2228))
 
-- `[additive]` Session-free `GET /v1/projects/git/{status,diff,log,refs}`,
-  `/v1/projects/git/commits/{sha}`, and `/v1/projects/files` accept exactly one
-  absolute checkout-root `cwd` and require `read` scope. Paired clients may
-  select any checkout readable by the gateway OS user; file paths remain
-  confined to that checkout. Existing runtime workspace routes retain
-  `acpSessionId` selection and reject `cwd`; project routes reject
-  `acpSessionId`. Response shapes and `protocolVersion` are unchanged.
-  (2026-11-08, unreleased)
+## Release tags
 
+The **build** version (the daemon binary's `--version` and the mDNS
+`gateway_version` TXT record) is separate from the **contract** version above.
+Releases are tagged with semver (`v0.6.0` … `v1.4.0` so far); the Taskfile
+derives the build version from `git describe`. They are independent and should
+not be coupled. Full release notes live in GitHub Releases.
+
+## History
+
+- `v1.4.0` — turn streaming, one-call attach with catch-up cursors, CodexBar
+  quotas and larger workspace file reads; `protocolVersion` stays `v2`:
 - `[additive]` `GET /v1/turns/stream` (`read` scope) streams the
   `GET /v1/turns` snapshot over a WebSocket, then each change as a `changes`
   message. A client that cannot use it keeps polling `GET /v1/turns`, which is
@@ -199,16 +213,6 @@ against the code.
   and size/truncation meanings are preserved; protocol version remains `v2`.
   (2026-10-31)
 
-## Release tags
-
-The **build** version (the daemon binary's `--version` and the mDNS
-`gateway_version` TXT record) is separate from the **contract** version above.
-Releases are tagged with semver (`v0.6.0` … `v1.2.0` so far); the Taskfile
-derives the build version from `git describe`. They are independent and should
-not be coupled. Full release notes live in GitHub Releases.
-
-## History
-
 - `[additive]` `GET /v1/quotas` — identify a missing CodexBar executable with the `codexbar_not_found` error code.
   (2026-10-31)
 - `[additive]` `GET /v1/quotas` — identify an invalid CodexBar provider list with the `codexbar_invalid_response` error code.
@@ -228,7 +232,8 @@ not be coupled. Full release notes live in GitHub Releases.
 - `[additive]` `GET /v1/quotas` — report CodexBar plan quota windows from a background-refreshed snapshot.
   (2026-10-31, [9cf1d30](https://github.com/arafatamim/ferngeist-acp-gateway/commit/9cf1d30))
 
-- Unreleased:
+- `v1.3.0` — turn status, project listing, external worktrees and agent icons;
+  additive only, `protocolVersion` stays `v2`:
 - `[additive]` Agent catalog entries may include a top-level `icon` containing a
   bundled monochrome SVG data URL when no ACP registry icon is available. Known
   agents get their logo; others get a generic agent icon. Clients can use it after
