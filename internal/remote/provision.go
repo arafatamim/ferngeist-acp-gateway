@@ -52,8 +52,10 @@ type Result struct {
 // RemoteSetupSnapshot is the daemon's live remote-access provisioning state
 // as seen by the status API: whether setup is blocked on an interactive
 // Tailscale login (and the link), plus plain-English guidance for whatever is
-// blocking setup. A nil snapshot means provisioning has no pending issue.
+// blocking setup, together with its current lifecycle state.
 type RemoteSetupSnapshot struct {
+	State        string `json:"state"`
+	URL          string `json:"url,omitempty"`
 	AuthRequired bool   `json:"authRequired,omitempty"`
 	AuthURL      string `json:"authUrl,omitempty"`
 	Hint         string `json:"hint,omitempty"`

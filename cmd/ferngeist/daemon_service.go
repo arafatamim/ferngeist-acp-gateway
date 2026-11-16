@@ -84,7 +84,7 @@ func printRemoteSetupAfterInstall(ctx context.Context) {
 		fmt.Println("\nAfter logging in, the daemon finishes provisioning on its own")
 		fmt.Println("(it retries in the background) — no restart needed.")
 		fmt.Println("Confirm the public URL anytime with: ferngeist-gateway daemon status")
-	case status.Remote.PublicURL != "":
+	case status.Remote.ProvisioningState == "ready" && status.Remote.PublicURL != "":
 		fmt.Printf("\nRemote access ready: %s\n", status.Remote.PublicURL)
 	default:
 		fmt.Println("\nRemote access is provisioning in the background.")
@@ -103,7 +103,7 @@ func waitForRemoteSetup(ctx context.Context, fetch func(context.Context) (adminc
 		st, err := fetch(ctx)
 		if err == nil {
 			last = st
-			if st.Remote.PublicURL != "" || st.Remote.AuthRequired {
+			if (st.Remote.ProvisioningState == "ready" && st.Remote.PublicURL != "") || st.Remote.AuthRequired {
 				return st, nil
 			}
 		}

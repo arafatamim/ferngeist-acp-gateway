@@ -30,6 +30,11 @@ Entries end with the date and the short hash of the commit that introduced
 the change, linked to the commit on GitHub, so any claim can be checked
 against the code.
 
+## Unreleased
+
+- [additive] Remote status includes `provisioningState` to distinguish managed readiness from manual, unverified access.
+- [semantic] Managed Tailscale scope follows Funnel or Serve configuration; pending and failed provisioning is unhealthy. Manual URL scope and readiness are unverified, and `healthy` is false. Readiness does not verify external connectivity.
+
 ## Versioning policy
 
 - `protocolVersion` (served in `GET /v1/status` and the mDNS

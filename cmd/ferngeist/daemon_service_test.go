@@ -30,7 +30,7 @@ func TestWaitForRemoteSetup_returns_login_link_when_auth_pending(t *testing.T) {
 func TestWaitForRemoteSetup_returns_public_url_when_ready(t *testing.T) {
 	fetch := func(context.Context) (adminclient.DaemonStatus, error) {
 		return adminclient.DaemonStatus{Remote: adminclient.RemoteStatus{
-			PublicURL: "https://gw.tail1234.ts.net",
+			PublicURL: "https://gw.tail1234.ts.net", ProvisioningState: "ready",
 		}}, nil
 	}
 	status, err := waitForRemoteSetup(context.Background(), fetch, 2*time.Second)
@@ -39,6 +39,22 @@ func TestWaitForRemoteSetup_returns_public_url_when_ready(t *testing.T) {
 	}
 	if status.Remote.PublicURL != "https://gw.tail1234.ts.net" {
 		t.Fatalf("PublicURL = %q, want the ready URL", status.Remote.PublicURL)
+	}
+}
+
+func TestWaitForRemoteSetupIgnoresRememberedURLUntilReady(t *testing.T) {
+	calls := 0
+	fetch := func(context.Context) (adminclient.DaemonStatus, error) {
+		calls++
+		state := "pending"
+		if calls > 1 {
+			state = "ready"
+		}
+		return adminclient.DaemonStatus{Remote: adminclient.RemoteStatus{PublicURL: "https://gw.tail.ts.net", ProvisioningState: state}}, nil
+	}
+	status, err := waitForRemoteSetup(context.Background(), fetch, 3*time.Second)
+	if err != nil || status.Remote.ProvisioningState != "ready" || calls < 2 {
+		t.Fatalf("status = %+v, calls = %d, error = %v", status.Remote, calls, err)
 	}
 }
 

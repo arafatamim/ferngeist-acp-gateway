@@ -187,17 +187,17 @@ type statusResponse struct {
 	RuntimeCounts     runtimeCounts      `json:"runtimeCounts"`
 }
 
-// remoteStatus describes the gateway's remote access configuration as detected
-// from the PublicBaseURL setting (tailscale, cloudflare tunnel, manual proxy, etc).
+// remoteStatus describes the gateway's remote access configuration and provisioning state.
 type remoteStatus struct {
-	Configured   bool   `json:"configured"`
-	Mode         string `json:"mode,omitempty"`  // e.g. "tailscale", "cloudflare_tunnel", "lan_direct"
-	Scope        string `json:"scope,omitempty"` // "public", "private", or "local"
-	Healthy      bool   `json:"healthy"`
-	Warning      string `json:"warning,omitempty"`
-	PublicURL    string `json:"publicUrl,omitempty"`
-	AuthRequired bool   `json:"authRequired,omitempty"`
-	AuthURL      string `json:"authUrl,omitempty"`
+	Configured        bool   `json:"configured"`
+	ProvisioningState string `json:"provisioningState"`
+	Mode              string `json:"mode,omitempty"`  // e.g. "tailscale", "cloudflare_tunnel", "lan_direct"
+	Scope             string `json:"scope,omitempty"` // "public", "private", "unknown", "lan", or "local"
+	Healthy           bool   `json:"healthy"`
+	Warning           string `json:"warning,omitempty"`
+	PublicURL         string `json:"publicUrl,omitempty"`
+	AuthRequired      bool   `json:"authRequired,omitempty"`
+	AuthURL           string `json:"authUrl,omitempty"`
 }
 
 // adminStatusResponse is the comprehensive status returned by the admin
@@ -687,57 +687,56 @@ func (s *Server) gatewayDisplayName() string {
 }
 
 // remoteStatus builds a description of how this gateway is reachable from outside.
-// It classifies the connection mode (tailscale, cloudflare tunnel, LAN, local)
-// and detects the network scope (public vs private) for security warnings.
+// It combines configured scope with the managed provider lifecycle for security warnings.
 func (s *Server) remoteStatus(includePublicURL bool) remoteStatus {
-	publicBaseURL := s.publicBaseURL()
-	status := remoteStatus{
-		Configured: publicBaseURL != "",
-		Healthy:    true,
-	}
-
+	publicURL := s.publicBaseURL()
+	status := remoteStatus{Configured: publicURL != "", Healthy: true, ProvisioningState: "not_applicable"}
+	managed := s.cfg.TailscaleMode != "" && s.cfg.TailscaleMode != "off"
 	switch {
-	case publicBaseURL != "":
-		status.Mode, status.Scope, status.Warning, status.Healthy = classifyRemoteURL(publicBaseURL)
-		if warning := s.remoteSecurityWarning(status.Scope); warning != "" {
-			status.Warning = strings.TrimSpace(strings.Join([]string{status.Warning, warning}, "; "))
+	case managed:
+		status.Mode, status.Scope = "tailscale", "public"
+		if s.cfg.TailscalePrivate {
+			status.Scope = "private"
 		}
-		if includePublicURL {
-			status.PublicURL = publicBaseURL
-		}
-	case s.cfg.EnableLAN:
-		status.Mode = "lan_direct"
-		status.Scope = "lan"
-	default:
-		status.Mode = "local_only"
-		status.Scope = "local"
-	}
-
-	// Overlay the daemon's live provisioning state: an interactive Tailscale
-	// login still pending, or a setup blocker. This is what lets `daemon
-	// status` surface the login link instead of forcing a log-file dig.
-	if s.remoteSetup != nil {
-		if snap := s.remoteSetup(); snap != nil {
-			if snap.AuthRequired {
-				status.Mode = "tsnet"
-				if s.cfg.TailscalePrivate {
-					status.Scope = "private"
-				} else {
-					status.Scope = "public"
+		status.Healthy = false
+		status.ProvisioningState = "failed"
+		// Live setup state surfaces interactive login and provisioning blockers.
+		if s.remoteSetup != nil {
+			status.ProvisioningState = "pending"
+			if snap := s.remoteSetup(); snap != nil {
+				status.ProvisioningState = snap.State
+				if snap.State == "" {
+					status.ProvisioningState = "failed"
 				}
-				status.Healthy = false
-				status.AuthRequired = true
-				status.AuthURL = snap.AuthURL
-			}
-			if hint := strings.TrimSpace(snap.Hint); hint != "" {
-				status.Warning = strings.TrimSpace(strings.Join([]string{status.Warning, hint}, "; "))
-			}
-			if lastErr := strings.TrimSpace(snap.LastErr); lastErr != "" {
-				status.Warning = strings.TrimSpace(strings.Join([]string{status.Warning, "setup issue: " + lastErr}, "; "))
+				status.Healthy = snap.State == "ready"
+				if status.Healthy && snap.URL != "" {
+					publicURL = snap.URL
+					status.Configured = true
+				}
+				status.AuthRequired, status.AuthURL = snap.AuthRequired, snap.AuthURL
+				if snap.AuthRequired {
+					status.Mode = "tsnet"
+				}
+				status.Warning = strings.TrimSpace(snap.Hint)
+				if snap.LastErr != "" {
+					status.Warning = strings.Trim(strings.Join([]string{status.Warning, "setup issue: " + snap.LastErr}, "; "), "; ")
+				}
 			}
 		}
+	case publicURL != "":
+		status.Mode, status.Warning = classifyRemoteURL(publicURL)
+		status.Scope, status.Healthy, status.ProvisioningState = "unknown", false, "unverified"
+	case s.cfg.EnableLAN:
+		status.Mode, status.Scope = "lan_direct", "lan"
+	default:
+		status.Mode, status.Scope = "local_only", "local"
 	}
-
+	if includePublicURL {
+		status.PublicURL = publicURL
+	}
+	if warning := s.remoteSecurityWarning(status.Scope); warning != "" {
+		status.Warning = strings.Trim(strings.Join([]string{status.Warning, warning}, "; "), "; ")
+	}
 	return status
 }
 
@@ -745,7 +744,7 @@ func (s *Server) remoteStatus(includePublicURL bool) remoteStatus {
 // Public mode should require proof-of-possession and should not allow legacy
 // bearer credentials.
 func (s *Server) remoteSecurityWarning(scope string) string {
-	if strings.TrimSpace(scope) != "public" {
+	if strings.TrimSpace(scope) != "public" && strings.TrimSpace(scope) != "unknown" {
 		return ""
 	}
 	warnings := make([]string, 0, 2)
@@ -758,51 +757,26 @@ func (s *Server) remoteSecurityWarning(scope string) string {
 	return strings.Join(warnings, "; ")
 }
 
-// classifyRemoteURL inspects a public base URL to determine the remote access
-// mode and network scope. It recognizes Tailscale (.ts.net), Cloudflare tunnels
-// (.trycloudflare.com), and private hostnames (.local, .internal, .lan).
-// It also flags non-HTTPS URLs as unhealthy.
-func classifyRemoteURL(raw string) (mode, scope, warning string, healthy bool) {
+// classifyRemoteURL identifies familiar URL forms and warns about invalid or
+// insecure URLs. Even internal-looking hostnames cannot establish exposure.
+func classifyRemoteURL(raw string) (mode, warning string) {
 	parsed, err := url.Parse(raw)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return "configured", "unknown", "public base URL is invalid", false
+		return "configured", "public base URL is invalid"
 	}
-
 	host := strings.ToLower(parsed.Hostname())
-	healthy = true
-
 	switch {
 	case strings.HasSuffix(host, ".ts.net") || strings.Contains(host, "tailscale"):
 		mode = "tailscale"
-		scope = "private"
 	case strings.HasSuffix(host, ".trycloudflare.com") || strings.Contains(host, "cloudflare"):
 		mode = "cloudflare_tunnel"
-		scope = "public"
-	case isPrivateHostname(host):
-		mode = "manual_reverse_proxy"
-		scope = "private"
 	default:
 		mode = "manual_reverse_proxy"
-		scope = "public"
 	}
-
 	if parsed.Scheme != "https" {
 		warning = "remote access should use HTTPS"
 	}
-
-	return mode, scope, warning, healthy
-}
-
-// isPrivateHostname returns true for hostnames that are clearly internal
-// (localhost, .local, .internal, .lan suffixes).
-func isPrivateHostname(host string) bool {
-	if host == "localhost" || host == "127.0.0.1" || host == "::1" {
-		return true
-	}
-	if strings.HasSuffix(host, ".local") || strings.HasSuffix(host, ".internal") || strings.HasSuffix(host, ".lan") {
-		return true
-	}
-	return false
+	return mode, warning
 }
 
 func normalizeBuildInfo(build config.BuildInfo) config.BuildInfo {

@@ -276,7 +276,7 @@ manual tunnel/proxy). Provisioning lives in one package:
   tsnet node, runs funnel or serve, and returns a `Result` with the stable
   public URL. It defines the domain types: `Result` (mode + URL),
   `ErrAuthRequired` (interactive login pending), and `RemoteSetupSnapshot`
-  (status API payload). The lifecycle manager, `Access`, wraps a
+  (status API payload, including pending, failed, and ready states). The lifecycle manager, `Access`, wraps a
   `ProvisionFunc` (the seam the daemon injects), owns the provisioning
   snapshot (`atomic.Pointer`), persists the public URL to SQLite, and
   notifies paired devices via push. On interactive Tailscale login, the

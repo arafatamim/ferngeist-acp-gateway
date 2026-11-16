@@ -53,7 +53,7 @@ type Access struct {
 // New creates an Access module. provision is the seam for tests; in production
 // it wraps Provisioner with logging hooks.
 func New(provision ProvisionFunc, store *storage.SQLiteStore, pushSvc push.PushService, logger *slog.Logger, cfg config.Config, port int) *Access {
-	return &Access{
+	a := &Access{
 		provision: provision,
 		store:     store,
 		pushSvc:   pushSvc,
@@ -61,13 +61,19 @@ func New(provision ProvisionFunc, store *storage.SQLiteStore, pushSvc push.PushS
 		cfg:       cfg,
 		port:      port,
 	}
+	a.snapshot.Store(&RemoteSetupSnapshot{State: "pending"})
+	return a
 }
 
 // loginHook stores the auth-required snapshot so the status API can surface
 // the login link while the node stays alive for the human to finish logging in.
 func (a *Access) loginHook(authURL string) {
 	a.logger.Info("remote access waiting on one-time Tailscale login", slog.String("url", authURL))
-	a.snapshot.Store(&RemoteSetupSnapshot{AuthRequired: true, AuthURL: authURL})
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !a.closed {
+		a.snapshot.Store(&RemoteSetupSnapshot{State: "pending", AuthRequired: true, AuthURL: authURL})
+	}
 }
 
 // Provision calls the underlying provisioner, then persists the public URL
@@ -76,7 +82,11 @@ func (a *Access) loginHook(authURL string) {
 func (a *Access) Provision(ctx context.Context) (*Result, error) {
 	res, err := a.provision(ctx, a.cfg, a.cfg.ListenAddr, a.port, a.loginHook)
 	if err != nil {
-		a.snapshot.Store(snapshotFor(err))
+		a.mu.Lock()
+		if !a.closed {
+			a.snapshot.Store(snapshotFor(err))
+		}
+		a.mu.Unlock()
 		return nil, err
 	}
 	if res == nil {
@@ -93,6 +103,7 @@ func (a *Access) Provision(ctx context.Context) (*Result, error) {
 		return nil, errAccessClosed
 	}
 	a.result = res
+	a.snapshot.Store(&RemoteSetupSnapshot{State: "ready", URL: res.URL})
 	a.mu.Unlock()
 
 	// Persist the public URL so the daemon reports it on restart without
@@ -125,7 +136,6 @@ func (a *Access) Provision(ctx context.Context) (*Result, error) {
 	}
 
 	a.logger.Info("remote access ready", slog.String("url", res.URL), slog.String("mode", res.Mode))
-	a.snapshot.Store(nil) // clear any prior blocker
 	return res, nil
 }
 
@@ -182,6 +192,7 @@ func (a *Access) Close() error {
 	}
 	a.mu.Lock()
 	a.closed = true
+	a.snapshot.Store(&RemoteSetupSnapshot{State: "failed"})
 	res := a.result
 	a.result = nil
 	a.mu.Unlock()
@@ -191,8 +202,7 @@ func (a *Access) Close() error {
 	return nil
 }
 
-// Snapshot returns the current provisioning state for the status API. Nil
-// means no pending issue — provisioning either succeeded or hasn't started.
+// Snapshot returns the current provisioning state for the status API.
 func (a *Access) Snapshot() *RemoteSetupSnapshot {
 	return a.snapshot.Load()
 }
@@ -209,9 +219,10 @@ func (a *Access) URL() string {
 
 // snapshotFor converts a provisioning error into a status-API snapshot.
 func snapshotFor(err error) *RemoteSetupSnapshot {
-	snap := &RemoteSetupSnapshot{}
+	snap := &RemoteSetupSnapshot{State: "failed"}
 	var authErr *ErrAuthRequired
 	if errors.As(err, &authErr) {
+		snap.State = "pending"
 		snap.AuthRequired = true
 		snap.AuthURL = authErr.AuthURL
 	} else if err != nil {

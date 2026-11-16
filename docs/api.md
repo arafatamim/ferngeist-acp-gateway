@@ -237,13 +237,15 @@ Base path: `/v1`
       "mode": "tailscale",
       "scope": "public",
       "healthy": true,
+      "provisioningState": "ready",
       "publicUrl": "https://ferngeist-gateway.tail123.ts.net",
       "authRequired": false,
       "authUrl": ""
     }
     ```
   - `mode` is one of: `tailscale`, `cloudflare_tunnel`, `lan_direct`, `local_only`, `tsnet`.
-  - `scope` is one of: `public`, `private`, `lan`, `local`.
+  - `scope` is one of: `public`, `private`, `unknown`, `lan`, `local`. Managed Tailscale scope comes from its Funnel or Serve configuration; manual URL exposure is unknown.
+  - `provisioningState` is `pending`, `failed`, `ready`, `unverified` (manual URL), or `not_applicable` (LAN/local). For managed access, `healthy` is true only when provisioning succeeded; for manual URLs it is false because readiness is unverified. LAN/local retain their existing health semantics. `ready` does not verify external connectivity or continued provider availability.
   - `authRequired` is `true` when an interactive Tailscale login is pending;
     `authUrl` carries the link the operator must open. Both clear after login.
   - `warning` (omitted when empty) carries setup hints (e.g. "HTTPS must be

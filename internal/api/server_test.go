@@ -140,7 +140,7 @@ func TestStatusUsesConfiguredGatewayName(t *testing.T) {
 func TestStatusSurfacesPendingTailscaleAuth(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	server := newTestServerFromDeps(Deps{
-		Config:    config.Config{ListenAddr: "127.0.0.1:0"},
+		Config:    config.Config{ListenAddr: "127.0.0.1:0", TailscaleMode: "tsnet"},
 		Logger:    logger,
 		Catalog:   catalog.New(".", nil),
 		Runtime:   runtime.NewSupervisor(logger, ".", nil, nil),
@@ -272,11 +272,11 @@ func TestStatusIncludesRemoteConfigurationState(t *testing.T) {
 	if response.Remote.Mode != "manual_reverse_proxy" {
 		t.Fatalf("Remote.Mode = %q, want %q", response.Remote.Mode, "manual_reverse_proxy")
 	}
-	if response.Remote.Scope != "public" {
-		t.Fatalf("Remote.Scope = %q, want %q", response.Remote.Scope, "public")
+	if response.Remote.Scope != "unknown" {
+		t.Fatalf("Remote.Scope = %q, want %q", response.Remote.Scope, "unknown")
 	}
-	if !response.Remote.Healthy {
-		t.Fatal("Remote.Healthy should be true for valid PublicBaseURL")
+	if response.Remote.Healthy {
+		t.Fatal("Remote.Healthy should be false for an unverified URL")
 	}
 	if response.Remote.PublicURL != "" {
 		t.Fatalf("Remote.PublicURL should not be exposed on public status, got %q", response.Remote.PublicURL)
@@ -342,8 +342,44 @@ func TestStatusClassifiesTailscaleRemoteVisibility(t *testing.T) {
 	if response.Remote.Mode != "tailscale" {
 		t.Fatalf("Remote.Mode = %q, want %q", response.Remote.Mode, "tailscale")
 	}
-	if response.Remote.Scope != "private" {
-		t.Fatalf("Remote.Scope = %q, want %q", response.Remote.Scope, "private")
+	if response.Remote.Scope != "unknown" {
+		t.Fatalf("Remote.Scope = %q, want %q", response.Remote.Scope, "unknown")
+	}
+}
+
+func TestManagedRemoteStatusUsesProvisioningState(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		private     bool
+		snapshot    *remote.RemoteSetupSnapshot
+		wantScope   string
+		wantState   string
+		wantHealthy bool
+	}{
+		{"public failure", false, &remote.RemoteSetupSnapshot{State: "failed", LastErr: "setup failed"}, "public", "failed", false},
+		{"private pending", true, nil, "private", "pending", false},
+		{"public ready", false, &remote.RemoteSetupSnapshot{State: "ready"}, "public", "ready", true},
+		{"private ready", true, &remote.RemoteSetupSnapshot{State: "ready"}, "private", "ready", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+			server := newTestServerFromDeps(Deps{Config: config.Config{ListenAddr: "127.0.0.1:0", PublicBaseURL: "https://gw.tail.ts.net", TailscaleMode: "tsnet", TailscalePrivate: tc.private}, Logger: logger, Catalog: catalog.New(".", nil), Runtime: runtime.NewSupervisor(logger, ".", nil, nil), Pairing: pairing.NewService(logger, nil), Discovery: discovery.New(logger)})
+			server.SetRemoteSetup(func() *remote.RemoteSetupSnapshot { return tc.snapshot })
+			server.cfg.RequireProofOfPossession = false
+			recorder := httptest.NewRecorder()
+			server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v1/status", nil))
+			var response statusResponse
+			if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+				t.Fatal(err)
+			}
+			got := response.Remote
+			if got.Scope != tc.wantScope || got.ProvisioningState != tc.wantState || got.Healthy != tc.wantHealthy {
+				t.Fatalf("remote status = %+v, want scope %q state %q healthy %t", got, tc.wantScope, tc.wantState, tc.wantHealthy)
+			}
+			if !tc.private && !strings.Contains(got.Warning, "proof-of-possession") {
+				t.Fatalf("public security warning missing: %+v", got)
+			}
+		})
 	}
 }
 
@@ -525,8 +561,8 @@ func TestStatusReportsLiveSetPublicURL(t *testing.T) {
 	if response.Remote.Mode != "tailscale" {
 		t.Fatalf("Remote.Mode = %q, want %q after SetPublicURL", response.Remote.Mode, "tailscale")
 	}
-	if !response.Remote.Healthy {
-		t.Fatal("Remote.Healthy should be true for a valid ts.net URL")
+	if response.Remote.Healthy {
+		t.Fatal("Remote.Healthy should be false for an unverified URL")
 	}
 
 	// Clearing the live URL falls back to the boot config (empty here).

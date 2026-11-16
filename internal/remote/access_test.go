@@ -33,8 +33,8 @@ func TestProvisionSuccessClearsSnapshot(t *testing.T) {
 	if res.URL != "https://gw.tail.ts.net" {
 		t.Fatalf("URL = %q", res.URL)
 	}
-	if a.Snapshot() != nil {
-		t.Fatal("snapshot should be nil after success")
+	if a.Snapshot().State != "ready" {
+		t.Fatal("snapshot should report ready after success")
 	}
 }
 
@@ -131,8 +131,8 @@ func TestProvisionNilResultNoSideEffects(t *testing.T) {
 	if res != nil {
 		t.Fatalf("result should be nil for disabled mode, got %+v", res)
 	}
-	if a.Snapshot() != nil {
-		t.Fatal("snapshot should be nil when provision returns nil")
+	if a.Snapshot().State != "pending" {
+		t.Fatal("snapshot should remain pending when provision returns nil")
 	}
 }
 
@@ -163,7 +163,7 @@ func TestProvisionClearsPriorSnapshot(t *testing.T) {
 	if _, err := a.Provision(context.Background()); err != nil {
 		t.Fatalf("Provision() error = %v", err)
 	}
-	if a.Snapshot() != nil {
-		t.Fatal("snapshot should be nil after successful provision")
+	if a.Snapshot().State != "ready" {
+		t.Fatal("snapshot should report ready after successful provision")
 	}
 }
