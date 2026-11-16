@@ -181,7 +181,7 @@ func runDaemonStatus() error {
 		fmt.Fprintf(writer, "DETAIL\t%s\n", serviceStatus.UnitFileState)
 	}
 
-	daemonStatus, err := fetchDaemonStatus(context.Background())
+	daemonStatus, err := fetchDaemonStatusWithStartupRetry(serviceStatus)
 	if err != nil {
 		// The service rows above are a report worth keeping, so print them and
 		// carry the failure in the exit code instead: 2 when the daemon is down
@@ -238,6 +238,25 @@ func runDaemonStatus() error {
 	}
 
 	return writer.Flush()
+}
+
+func fetchDaemonStatusWithStartupRetry(status service.Status) (adminclient.DaemonStatus, error) {
+	if status.ActiveState != "active" && status.ActiveState != "activating" {
+		return fetchDaemonStatus(context.Background())
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	for {
+		daemonStatus, err := fetchDaemonStatus(ctx)
+		if err == nil || !adminclient.IsDaemonUnreachable(err) {
+			return daemonStatus, err
+		}
+		select {
+		case <-ctx.Done():
+			return daemonStatus, err
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
 }
 
 func fetchDaemonStatus(ctx context.Context) (adminclient.DaemonStatus, error) {
