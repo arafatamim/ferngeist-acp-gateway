@@ -280,10 +280,9 @@ func TestFeedDropsASlowSubscriberWithoutStallingOthers(t *testing.T) {
 		feed.Changed()
 		waitForSamples(t, feed, before+1)
 	}
-	deadline := time.Now().Add(5 * time.Second)
-	for feed.Stats().Subscribers != 1 && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
+	// Samples is incremented before delivery, so wait for Run to finish the
+	// sample before inspecting the slow subscription's channel.
+	fast.Ready()
 	// Ending drops the backlog, so the slow client is sent the close next
 	// instead of maxQueuedChanges stale frames first.
 	if n := len(slow.Changes()); n != 0 {
@@ -292,7 +291,7 @@ func TestFeedDropsASlowSubscriberWithoutStallingOthers(t *testing.T) {
 	if err := drainSubscription(t, slow); !errors.Is(err, ErrSlowConsumer) {
 		t.Fatalf("slow subscription ended with %v, want %v", err, ErrSlowConsumer)
 	}
-	deadline = time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(5 * time.Second)
 	for len(received) < maxQueuedChanges+1 && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
