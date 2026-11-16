@@ -1,3 +1,45 @@
+## [2.0.0] - 2026-11-16
+
+### 🚀 Features
+
+- *(api)* Support session-free Git browsing
+- *(api)* [**breaking**] Serve host files by path at /v1/files (protocol v3)
+- *(api)* [**breaking**] Remove runtime git routes (protocol v3)
+- *(harness)* Add a per-agent profile registry
+- *(agents)* Bundle missing agents
+- *(agentext)* Transform ACP payloads before canonical handling
+- *(harness)* Present Hermes native chats as deferred list transforms
+- *(catalog)* Add Command Code agent
+
+### 🐛 Bug Fixes
+
+- *(service)* Capture installer PATH for user services
+- *(service)* Preserve captured PATH across reinstalls on all platforms
+- *(daemon)* Wait for server startup before closing dependencies
+- *(session)* Queue frames under the lock that numbers them
+- *(agentext)* Release budget before delivering replies
+- *(harness)* Expose Claude chats in native resume picker
+- *(config)* Reuse installed state database
+- *(pairing)* Wait for remote access readiness
+- *(api)* Log agent launch failures
+- *(remote)* Report provisioning state and scope
+- *(status)* Expose remote provisioning state
+
+### 🚜 Refactor
+
+- *(runtime)* Source launch env from harness profiles
+
+### 📚 Documentation
+
+- Document the harness profile seam
+- *(changelog)* Merge the Hermes session/list entries
+- *(files)* Clarify transfer limits and authorization
+- *(workspace)* Correct project Git route references
+- *(changelog)* File shipped entries under their releases
+
+### 🧪 Testing
+
+- *(runtime)* Cover profile env on a claimed spare
 ## [1.4.0] - 2026-11-07
 
 ### 🚀 Features

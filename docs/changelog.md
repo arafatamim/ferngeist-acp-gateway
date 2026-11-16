@@ -43,6 +43,21 @@ against the code.
 
 ## Unreleased
 
+Nothing yet.
+
+## Release tags
+
+The **build** version (the daemon binary's `--version` and the mDNS
+`gateway_version` TXT record) is separate from the **contract** version above.
+Releases are tagged with semver (`v0.6.0` … `v2.0.0` so far); the Taskfile
+derives the build version from `git describe`. They are independent and should
+not be coupled. Full release notes live in GitHub Releases.
+
+## History
+
+- `v2.0.0` — host files by path at `/v1/files`, session-free Git, harness
+  profiles, nine new catalog agents and remote provisioning state;
+  `protocolVersion` bumped to `v3`:
 - `[additive]` Remote status includes `provisioningState` to distinguish
   managed readiness from manual, unverified access.
   (2026-11-16, [`e6f4c0e`](https://github.com/arafatamim/ferngeist-acp-gateway/commit/e6f4c0e))
@@ -137,16 +152,6 @@ against the code.
   select any checkout readable by the gateway OS user. Response shapes match
   the former runtime Git routes.
   (2026-11-09, [`74c2228`](https://github.com/arafatamim/ferngeist-acp-gateway/commit/74c2228))
-
-## Release tags
-
-The **build** version (the daemon binary's `--version` and the mDNS
-`gateway_version` TXT record) is separate from the **contract** version above.
-Releases are tagged with semver (`v0.6.0` … `v1.4.0` so far); the Taskfile
-derives the build version from `git describe`. They are independent and should
-not be coupled. Full release notes live in GitHub Releases.
-
-## History
 
 - `v1.4.0` — turn streaming, one-call attach with catch-up cursors, CodexBar
   quotas and larger workspace file reads; `protocolVersion` stays `v2`:
