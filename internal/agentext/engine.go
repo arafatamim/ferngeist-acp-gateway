@@ -272,20 +272,27 @@ func (e *Engine) worker(queue chan transformJob) {
 // without running the callback.
 func (e *Engine) runJob(job transformJob) {
 	defer job.cancel()
-	defer job.reserve.release()
+	out, err := e.jobResult(job)
+	// Release before completing: the completion delivers the reply, and the
+	// client's next request must find this job's bytes already returned.
+	job.reserve.release()
+	job.done(out, err)
+}
+
+// jobResult runs an admitted job's chain, or applies its failure policy when
+// the job expired or the engine closed first.
+func (e *Engine) jobResult(job transformJob) (Payload, error) {
 	if err := e.stopReason(job.ctx); err != nil {
-		out, failure := e.failed(job.chain, job.input.Stage, job.input.Message.Body, err)
-		job.done(out, failure)
-		return
+		return e.failed(job.chain, job.input.Stage, job.input.Message.Body, err)
 	}
 	out, err := e.executeChain(job.ctx, job.chain, job.input, job.reserve)
 	if err == nil {
 		if ctxErr := job.ctx.Err(); ctxErr != nil {
 			// The deadline or the caller won the race: discard the late result.
-			out, err = e.failed(job.chain, job.input.Stage, job.input.Message.Body, ctxErr)
+			return e.failed(job.chain, job.input.Stage, job.input.Message.Body, ctxErr)
 		}
 	}
-	job.done(out, err)
+	return out, err
 }
 
 // stopReason reports why an admitted job must not run its callback: the job
