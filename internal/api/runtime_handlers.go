@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/catalog"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/pairing"
@@ -157,7 +158,7 @@ func (s *Server) handleAgentConnect(w http.ResponseWriter, r *http.Request) {
 
 	sess, attachToken, err := s.sessionSvc.Create(r.Context(), agent, credential.DeviceID, nil)
 	if err != nil {
-		writeAgentLaunchError(w, err)
+		s.writeAgentLaunchError(w, agent.ID, err)
 		return
 	}
 
@@ -174,7 +175,7 @@ func (s *Server) handleAgentConnect(w http.ResponseWriter, r *http.Request) {
 
 // writeAgentLaunchError maps the session service's launch failures onto the
 // agent-control HTTP contract.
-func writeAgentLaunchError(w http.ResponseWriter, err error) {
+func (s *Server) writeAgentLaunchError(w http.ResponseWriter, agentID string, err error) {
 	switch {
 	case errors.Is(err, runtime.ErrAgentNotDetected),
 		errors.Is(err, runtime.ErrUnsupportedLaunch),
@@ -186,6 +187,11 @@ func writeAgentLaunchError(w http.ResponseWriter, err error) {
 	case errors.Is(err, session.ErrSessionNotActive):
 		writeError(w, http.StatusServiceUnavailable, "session service is shutting down")
 	default:
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) {
+			err = urlErr.Err
+		}
+		s.logger.Error("agent launch failed", "agent_id", agentID, "error", err)
 		writeError(w, http.StatusInternalServerError, "failed to start agent")
 	}
 }
@@ -282,7 +288,7 @@ func (s *Server) handleRuntimeRestart(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "runtime belongs to another device")
 		return
 	case err != nil:
-		writeAgentLaunchError(w, err)
+		s.writeAgentLaunchError(w, agent.ID, err)
 		return
 	}
 

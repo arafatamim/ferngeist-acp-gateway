@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -2572,6 +2573,57 @@ func TestAgentConnectReturnsSessionIDAndAttachToken(t *testing.T) {
 	}
 	if len(connectResp.AttachToken) != 64 {
 		t.Fatalf("AttachToken = %q, want 64-char hex string", connectResp.AttachToken)
+	}
+}
+
+func TestAgentConnectLogsLaunchFailure(t *testing.T) {
+	baseDir := newHarnessBaseDir(t)
+	buildMockAgent(t, baseDir)
+	server := newTestServerWithBaseDir(baseDir)
+	store, err := storage.Open(filepath.Join(t.TempDir(), "sessions.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	server.sessionSvc = session.NewRuntimeSession(logger, store, server.runtime, session.NewTokenService(logger), session.Config{})
+	t.Cleanup(server.sessionSvc.Shutdown)
+	token := pairDevice(t, server)
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	server.logger = slog.New(slog.NewJSONHandler(&logs, nil))
+	req := httptest.NewRequest(http.MethodPost, "/v1/agents/mock-acp/connect", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError || rec.Body.String() != "{\"error\":\"failed to start agent\"}\n" {
+		t.Fatalf("response = %d %q", rec.Code, rec.Body.String())
+	}
+	var record struct {
+		Level   string `json:"level"`
+		AgentID string `json:"agent_id"`
+		Error   string `json:"error"`
+	}
+	if err := json.NewDecoder(bytes.NewReader(logs.Bytes())).Decode(&record); err != nil {
+		t.Fatalf("decode log %q: %v", logs.String(), err)
+	}
+	if record.Level != "ERROR" || record.AgentID != "mock-acp" || !strings.Contains(record.Error, "database is closed") {
+		t.Fatalf("unexpected log: %s", logs.String())
+	}
+	if strings.Contains(logs.String(), token) {
+		t.Fatal("log contains bearer token")
+	}
+}
+
+func TestAgentLaunchErrorOmitsDownloadURL(t *testing.T) {
+	var logs bytes.Buffer
+	server := newTestServer()
+	server.logger = slog.New(slog.NewJSONHandler(&logs, nil))
+	rec := httptest.NewRecorder()
+	server.writeAgentLaunchError(rec, "agent", &url.Error{Op: "Get", URL: "https://example.com/?token=secret", Err: context.DeadlineExceeded})
+	if rec.Code != http.StatusInternalServerError || !strings.Contains(logs.String(), "context deadline exceeded") || strings.Contains(logs.String(), "secret") {
+		t.Fatalf("response = %d, log = %s", rec.Code, logs.String())
 	}
 }
 

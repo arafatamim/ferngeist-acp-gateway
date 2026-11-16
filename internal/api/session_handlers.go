@@ -70,7 +70,7 @@ func (s *Server) handleSessionAttach(w http.ResponseWriter, r *http.Request) {
 	}
 	sess, attachToken, launched, err := s.sessionSvc.AttachACP(r.Context(), agent, credential.DeviceID, req.ACPSessionID)
 	if err != nil {
-		writeAgentLaunchError(w, err)
+		s.writeAgentLaunchError(w, agent.ID, err)
 		return
 	}
 	descriptor, err := s.runtime.Connect(sess.RuntimeID)
