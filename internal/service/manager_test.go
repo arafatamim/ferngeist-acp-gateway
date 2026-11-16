@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-func TestReinstallKeepsCapturedPathWhileUpdatingSettings(t *testing.T) {
+func TestReinstallRefreshesCapturedPathWhileUpdatingSettings(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("PATH", "/user tools/bin:/line\nbreak:/quote\"/bin")
 	if err := saveInstallOptions(dir, InstallOptions{}); err != nil {
@@ -29,7 +29,7 @@ func TestReinstallKeepsCapturedPathWhileUpdatingSettings(t *testing.T) {
 	if err := json.Unmarshal(content, &saved); err != nil {
 		t.Fatal(err)
 	}
-	if saved.Path != "/user tools/bin:/line\nbreak:/quote\"/bin" || saved.Port != 9000 {
+	if saved.Path != "/usr/bin:/bin" || saved.Port != 9000 {
 		t.Fatalf("reinstalled settings = %+v", saved)
 	}
 }
@@ -50,6 +50,26 @@ func TestReinstallDoesNotOverwriteMalformedSettings(t *testing.T) {
 	}
 	if string(content) != broken {
 		t.Fatalf("saved settings changed after failure: %s", content)
+	}
+}
+
+func TestFailedPackagePathCaptureKeepsPreviousPath(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("PATH", "/user/bin:/usr/bin")
+	if err := saveInstallOptions(dir, InstallOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", "/usr/bin:/bin")
+	t.Setenv("FERNGEIST_GATEWAY_PRESERVE_INSTALL_PATH", "1")
+	if err := saveInstallOptions(dir, InstallOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := readInstallOptions(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.Path != "/user/bin:/usr/bin" {
+		t.Fatalf("saved PATH = %q, want previous PATH", saved.Path)
 	}
 }
 

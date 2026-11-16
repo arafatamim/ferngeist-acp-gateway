@@ -43,7 +43,11 @@ against the code.
 
 ## Unreleased
 
-Nothing yet.
+- `[semantic]` Every service install (systemd, launchd, Windows scheduled task)
+  now saves the installing environment's PATH, replacing the snapshot kept by
+  earlier installs. Linux package installs and upgrades capture the invoking
+  user's login-shell PATH; if that fails they keep the previously saved PATH.
+  (2026-11-16)
 
 ## Release tags
 

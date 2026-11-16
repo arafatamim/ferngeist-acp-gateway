@@ -59,7 +59,7 @@ type InstallOptions struct {
 	Host      string
 	Port      int
 	PublicURL string
-	// Path is the executable search path captured on first install.
+	// Path is the executable search path captured at installation.
 	Path string
 	// TailscaleMode is written into the service environment; "off" writes
 	// nothing. Valid: "off", "auto", "cli", "tsnet".
@@ -289,7 +289,7 @@ func stableExecutable(resolved string) (string, bool) {
 }
 
 // installOptionsFile records install options and the captured PATH. Reinstalls
-// preserve PATH; `daemon install --keep-settings` also reapplies the other options
+// refresh PATH; `daemon install --keep-settings` also reapplies the other options
 // instead of resetting them to package defaults.
 const installOptionsFile = "install-options.json"
 
@@ -331,7 +331,7 @@ func servicePath(configDir string) (string, error) {
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return "", err
 	}
-	if saved.Path != "" {
+	if os.Getenv("FERNGEIST_GATEWAY_PRESERVE_INSTALL_PATH") == "1" && saved.Path != "" {
 		return saved.Path, nil
 	}
 	return os.Getenv("PATH"), nil

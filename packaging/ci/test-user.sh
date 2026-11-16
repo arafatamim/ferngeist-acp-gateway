@@ -46,7 +46,13 @@ running "VERSION +$OLD" 'LAN ENABLED +false'
 # Last package change before removal: re-running install.sh against the repo
 # would put the repo version back (pacman -S downgrades).
 echo "== upgrading the package restarts the daemon on the new version, keeping settings"
+# postinstall captures PATH from the user's login shell, not sudo's.
+profile="$HOME/.profile"
+for f in "$HOME/.bash_login" "$HOME/.bash_profile"; do [ -e "$f" ] && profile="$f"; done
+echo 'export PATH="$HOME/ferngeist-path-marker:$PATH"' >> "$profile"
 upgrade
+grep -q "^PATH=.*/ferngeist-path-marker:" "$HOME/.local/share/ferngeist-gateway/config/daemon.env" ||
+    { echo "FAIL: upgrade did not capture the login shell PATH" >&2; exit 1; }
 NEW="$(pkgver)"
 [ "$NEW" != "$OLD" ] || { echo "FAIL: upgrade left $GW at $OLD" >&2; exit 1; }
 running "VERSION +$NEW" 'LAN ENABLED +false'

@@ -12,7 +12,7 @@ import (
 	"testing"
 )
 
-func TestWindowsWrapperUsesSavedPathBeforeOverrides(t *testing.T) {
+func TestWindowsWrapperUsesInstallPathBeforeOverrides(t *testing.T) {
 	powershell, err := exec.LookPath("powershell.exe")
 	if err != nil {
 		t.Fatal(err)
@@ -37,7 +37,6 @@ func TestWindowsWrapperUsesSavedPathBeforeOverrides(t *testing.T) {
 			if err := saveInstallOptions(dir, InstallOptions{}); err != nil {
 				t.Fatal(err)
 			}
-			t.Setenv("PATH", systemDir)
 			paths := windowsPaths{
 				serviceConfigDir: dir, binaryPath: filepath.Join(systemDir, "where.exe"),
 				wrapperScriptPath: filepath.Join(dir, "wrapper.ps1"), overrideScriptPath: filepath.Join(dir, "overrides.ps1"),
