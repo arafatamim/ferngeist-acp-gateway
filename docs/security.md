@@ -148,10 +148,10 @@ after same-second mutation, because a weak tag cannot satisfy it. Current-file r
 resumable versions; clients must reject short bodies and avoid splicing separate
 responses together.
 
-Four global/two per-device slots bound the entire admission/open/transfer
-lifetime, including HEAD; files over 512 MiB are refused. Credential and scope
-checks apply at admission only. An admitted response may continue after
-revocation or expiry for up to ten minutes; new requests are denied. Cancellation/disconnect/shutdown releases
+Four global/two per-device slots bound the admission/open/transfer lifetime,
+including HEAD; files over 512 MiB are refused. Credential and scope checks run
+before admission; an admitted response may continue after revocation or expiry
+for up to ten minutes, but new requests are denied. Cancellation/disconnect/shutdown releases
 the descriptor and capacity. All responses are nosniff (errors also no-store), attachment
 headers expose only a basename, and errors omit raw paths. Shared request-log
 redaction covers the `path` selector; optional raw ACP frame logs remain outside it.

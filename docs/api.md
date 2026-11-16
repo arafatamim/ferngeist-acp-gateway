@@ -64,7 +64,10 @@ reading the whole file.
 Describes up to 64 files in one request without reading their contents, for
 example to label attachment cards. Same scopes, proof of possession, path rules
 and file checks as `/v1/files`, and the same `Content-Type` a later `GET` would
-return. It takes no transfer slot.
+return. It takes no transfer slot. A credential that signs request bodies (proof
+of possession) hashes at most 16 KiB, so the whole `{"paths": [...]}` body must
+fit in 16 KiB; a larger body fails proof with `401`. A keyless legacy credential
+is bounded at 512 KiB.
 
 ```json
 POST /v1/files/stat
@@ -73,7 +76,7 @@ POST /v1/files/stat
 200
 {"files": [
   {"type": "resource_link", "uri": "file:///tmp/rec.mp4", "name": "rec.mp4",
-   "mimeType": "video/mp4", "size": 12345678, "etag": "W/\"3q2-7wQx…\""},
+   "mimeType": "video/mp4", "size": 12345678, "etag": "W/\"3q2-7wQx9m5v1s0p4n8r6t\""},
   {"type": "resource_link", "uri": "file:///tmp/gone.pdf", "name": "gone.pdf",
    "error": "not_found"}
 ]}
@@ -117,7 +120,7 @@ basename, with an ASCII fallback and encoded filename for non-ASCII names. All
 responses carry `X-Content-Type-Options: nosniff`. Successful responses carry
 `Cache-Control: private, no-cache` (store, but revalidate before each use) with
 validators described below; errors carry `Cache-Control: no-store`.
-Successful responses advertise `Accept-Ranges: bytes`. GET accepts one byte
+Successful `200` and `206` responses advertise `Accept-Ranges: bytes`. GET accepts one byte
 range: `bytes=start-end`, `bytes=start-`, or `bytes=-suffixLength`. A satisfiable
 range returns `206`, the selected `Content-Length`, and
 `Content-Range: bytes start-end/fullSize`. End positions/suffix lengths beyond
@@ -167,12 +170,13 @@ The full on-disk file must be at most **512 MiB**, including for HEAD or a tiny
 range. All ranges use the same credentials/proof, scope, slots and
 lifetime checks as full downloads. Transfers stream only the checked length: file growth cannot extend the response, and
 shrinkage can cause a short body. Admission is bounded to **4 requests globally,
-2 per device**, including authorization, opening, HEAD and transfer; exhaustion
-returns `429` with `Retry-After: 1` without queuing. Each admitted request has a
-**ten-minute absolute deadline**; cancellation, disconnect or gateway shutdown
-releases its file and slot. Credential and scope checks happen at admission
-only: revocation or expiry blocks new requests, but an already admitted
-response may finish within that window.
+2 per device**, including opening, HEAD and transfer; authentication and scope
+checks run before a slot is taken, so an unauthenticated request never consumes
+one; exhaustion returns `429` with `Retry-After: 1` without queuing. Each
+admitted request has a **ten-minute absolute deadline**; cancellation,
+disconnect or gateway shutdown releases its file and slot. Credential and scope
+checks run on every request, but revocation or expiry only blocks new requests:
+an already admitted response may finish within that window.
 
 Only regular files are eligible. Final symlinks, directories, devices and FIFOs
 are rejected. On Linux/macOS, the parent is canonicalized at fetch time and opened as a root;
