@@ -197,6 +197,17 @@ func main() {
 				},
 			},
 			{
+				Name:  "logs",
+				Usage: "print the daemon's gateway log in readable form",
+				Flags: []cli.Flag{
+					&cli.IntFlag{Name: "tail", Usage: "print only the last N lines (0 prints all)"},
+					&cli.BoolFlag{Name: "follow", Aliases: []string{"f"}, Usage: "keep printing new lines as they are written"},
+				},
+				Action: func(_ context.Context, cmd *cli.Command) error {
+					return runLogs(cmd.Int("tail"), cmd.Bool("follow"))
+				},
+			},
+			{
 				Name:  "pair",
 				Usage: "start an interactive pairing flow (needs a running daemon)",
 				Action: func(_ context.Context, _ *cli.Command) error {

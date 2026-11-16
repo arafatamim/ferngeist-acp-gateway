@@ -117,6 +117,11 @@ func (m *windowsManager) Install(options InstallOptions) error {
 	return fmt.Errorf("daemon task did not enter running state after install")
 }
 
+func (m *windowsManager) LogDir() (string, error) {
+	paths, err := resolveWindowsPaths()
+	return paths.dataLogsDir, err
+}
+
 func (m *windowsManager) SavedInstallOptions() (InstallOptions, bool) {
 	paths, err := resolveWindowsPaths()
 	if err != nil {

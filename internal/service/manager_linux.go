@@ -128,6 +128,11 @@ func ensureLinger() {
 	_ = exec.Command("loginctl", "enable-linger").Run()
 }
 
+func (m *linuxManager) LogDir() (string, error) {
+	paths, err := resolveLinuxPaths()
+	return paths.logDir, err
+}
+
 func (m *linuxManager) SavedInstallOptions() (InstallOptions, bool) {
 	paths, err := resolveLinuxPaths()
 	if err != nil {

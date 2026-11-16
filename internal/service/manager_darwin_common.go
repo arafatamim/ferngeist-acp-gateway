@@ -130,6 +130,11 @@ func (m *darwinManager) Install(options InstallOptions) error {
 }
 
 // SavedInstallOptions returns the options persisted by the last Install.
+func (m *darwinManager) LogDir() (string, error) {
+	paths, err := resolveDarwinPaths()
+	return paths.logDir, err
+}
+
 func (m *darwinManager) SavedInstallOptions() (InstallOptions, bool) {
 	paths, err := resolveDarwinPaths()
 	if err != nil {

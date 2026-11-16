@@ -67,6 +67,7 @@ Scan the QR code with the Ferngeist app. That's it.
 ferngeist-gateway daemon status   # is it running, and on which URL?
 ferngeist-gateway devices list    # paired phones
 ferngeist-gateway agents list     # agents the gateway can launch
+ferngeist-gateway logs -f --tail 50  # recent daemon log, then follow
 ```
 
 Prefer not to install a service? Run it in the foreground with

@@ -76,6 +76,8 @@ type Manager interface {
 	Stop() error
 	Restart() error
 	Status() (Status, error)
+	// LogDir is where the installed daemon writes gateway.log.
+	LogDir() (string, error)
 }
 
 func NewManager() Manager {
@@ -112,6 +114,10 @@ func (m unsupportedManager) Restart() error {
 
 func (m unsupportedManager) Status() (Status, error) {
 	return Status{}, m.err
+}
+
+func (m unsupportedManager) LogDir() (string, error) {
+	return "", m.err
 }
 
 func ValidateInstallOptions(options InstallOptions) error {

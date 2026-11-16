@@ -55,6 +55,7 @@ Then pair the device from the client app.
 ferngeist-gateway daemon status
 ferngeist-gateway devices list
 ferngeist-gateway agents list
+ferngeist-gateway logs -f --tail 50
 ```
 
 Commands that read or change gateway state — `pair`, `devices …`, `agents …` —

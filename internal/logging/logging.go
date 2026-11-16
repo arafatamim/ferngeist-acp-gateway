@@ -2,6 +2,8 @@ package logging
 
 import (
 	"bufio"
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -9,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 )
 
 const defaultLogFileName = "gateway.log"
@@ -122,7 +125,89 @@ func (s *Service) TailLines(limit int) ([]string, error) {
 	paths := s.logPathsLocked()
 	s.mu.Unlock()
 
-	lines := make([]string, 0, limit)
+	return tailFiles(paths, limit)
+}
+
+// ReadGatewayLog returns the last limit lines (all when limit <= 0) of the
+// gateway log in dir, oldest rotation first, without opening it for writing.
+func ReadGatewayLog(dir string, limit int) ([]string, error) {
+	paths := []string{filepath.Join(dir, defaultLogFileName)}
+	// Rotation keeps backups numbered contiguously from 1, so stop at the first gap.
+	for index := 1; ; index++ {
+		path := filepath.Join(dir, fmt.Sprintf("%s.%d", defaultLogFileName, index))
+		if _, err := os.Stat(path); err != nil {
+			break
+		}
+		paths = append([]string{path}, paths...)
+	}
+	return tailFiles(paths, limit)
+}
+
+// FollowGatewayLog emits each complete line appended to the gateway log in dir
+// from now until ctx is done, following the active file across rotations.
+// shortcut: a file rotated out and back past within one poll is skipped; fine at 1 MiB rotations, track backups if logs grow faster.
+func FollowGatewayLog(ctx context.Context, dir string, poll time.Duration, emit func(string)) error {
+	path := filepath.Join(dir, defaultLogFileName)
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = file.Close() }() // read-only; close errors lose nothing
+	if _, err := file.Seek(0, io.SeekEnd); err != nil {
+		return err
+	}
+
+	reader := bufio.NewReader(file)
+	var partial string
+	ticker := time.NewTicker(poll)
+	defer ticker.Stop()
+	for {
+		if partial, err = emitLines(reader, partial, emit); err != nil {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+		}
+		current, statErr := os.Stat(path)
+		opened, err := file.Stat()
+		if statErr != nil || err != nil || os.SameFile(current, opened) {
+			continue // not rotated, or the new file is not created yet
+		}
+		// Rotated: drain what was written before the rename, then switch files.
+		if partial, err = emitLines(reader, partial, emit); err != nil {
+			return err
+		}
+		next, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		_ = file.Close()
+		file = next
+		reader.Reset(file)
+	}
+}
+
+// emitLines emits every complete line available and returns the unterminated rest.
+func emitLines(reader *bufio.Reader, partial string, emit func(string)) (string, error) {
+	for {
+		chunk, err := reader.ReadString('\n')
+		if errors.Is(err, io.EOF) {
+			return partial + chunk, nil
+		}
+		if err != nil {
+			return partial, err
+		}
+		emit(strings.TrimSuffix(partial+chunk, "\n"))
+		partial = ""
+	}
+}
+
+// tailFiles concatenates the lines of paths in order, skipping missing files,
+// and keeps the last limit lines (all when limit <= 0).
+func tailFiles(paths []string, limit int) ([]string, error) {
+	var lines []string
 	for _, path := range paths {
 		file, err := os.Open(path)
 		if err != nil {
@@ -147,7 +232,7 @@ func (s *Service) TailLines(limit int) ([]string, error) {
 		}
 	}
 
-	if len(lines) > limit {
+	if limit > 0 && len(lines) > limit {
 		lines = lines[len(lines)-limit:]
 	}
 	return lines, nil
