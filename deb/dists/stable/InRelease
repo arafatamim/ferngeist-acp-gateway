@@ -1,0 +1,41 @@
+-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA512
+
+Architectures: amd64 arm64
+Codename: stable
+Components: main
+Date: Tue, 17 Nov 2026 07:42:24 +0000
+Label: Ferngeist
+Origin: Ferngeist
+Suite: stable
+MD5Sum:
+ 69fa49ad13dc059a76fe671ebccfd18c              148 Release
+ b74a03616898a927b8ae686543fa4206             4104 main/binary-amd64/Packages
+ 646469f22cc5cabe7e38d56e2af1c671             1433 main/binary-amd64/Packages.gz
+ b74a03616898a927b8ae686543fa4206             4104 main/binary-arm64/Packages
+ 646469f22cc5cabe7e38d56e2af1c671             1433 main/binary-arm64/Packages.gz
+SHA1:
+ bf3622018da652db3fb46f165b9c4d1f25d768be              148 Release
+ c734964938500cf4d17729a7f1230cdb2b44e2c8             4104 main/binary-amd64/Packages
+ e6cbe9ce7b84f3d79ed31aa375da1f7040147b99             1433 main/binary-amd64/Packages.gz
+ c734964938500cf4d17729a7f1230cdb2b44e2c8             4104 main/binary-arm64/Packages
+ e6cbe9ce7b84f3d79ed31aa375da1f7040147b99             1433 main/binary-arm64/Packages.gz
+SHA256:
+ d2993044a6bff727611109e0f42b02707b15f7b71eba6c830da9621b4b5f1b75              148 Release
+ e6494df22245805be8074964ce3a42a7148f421282dc1f6a1316f23cf1103937             4104 main/binary-amd64/Packages
+ 7aae90a9e8c6864eb5980883ec7ed9fce1dbd0a5d6cb3cc00360aed01fb52f8b             1433 main/binary-amd64/Packages.gz
+ e6494df22245805be8074964ce3a42a7148f421282dc1f6a1316f23cf1103937             4104 main/binary-arm64/Packages
+ 7aae90a9e8c6864eb5980883ec7ed9fce1dbd0a5d6cb3cc00360aed01fb52f8b             1433 main/binary-arm64/Packages.gz
+SHA512:
+ debccc9e0e3073e5baaeb9ca00ec45986adc45dd486a58153be7d455db5425cd6d5fd9f899b51b59648dddb0eb16b6b618d4fe8c22f383b6bf511a9e6046320e              148 Release
+ 53dddbcd201fae71f412a812fd8084e7f33f6e779ff251e9052be9f05ef62340c2b94b1cabdd27c9760a2d602b055f52afab42613e28485dd5364aa89db34f80             4104 main/binary-amd64/Packages
+ ac72e5b53f282b434ac02422eb9d79b5b0cfd7e3c65b5fecf9328ffc127ea62f8fdd74c04330c43f3919e15802d8b7e0914d7c21424620a0afa830c51675428f             1433 main/binary-amd64/Packages.gz
+ 53dddbcd201fae71f412a812fd8084e7f33f6e779ff251e9052be9f05ef62340c2b94b1cabdd27c9760a2d602b055f52afab42613e28485dd5364aa89db34f80             4104 main/binary-arm64/Packages
+ ac72e5b53f282b434ac02422eb9d79b5b0cfd7e3c65b5fecf9328ffc127ea62f8fdd74c04330c43f3919e15802d8b7e0914d7c21424620a0afa830c51675428f             1433 main/binary-arm64/Packages.gz
+-----BEGIN PGP SIGNATURE-----
+
+iHUEARYKAB0WIQRtZpM0YZqoMQFFf1IHiJyOljdWhgUCavwFYAAKCRAHiJyOljdW
+hnvAAQDmo9vxowhpBRV+cZxE50dQHmbGZGOfCkVglvd77zgr9wEAqEDC9iXoWTem
+rt0k3N47mFyRxougu7DSqhDBqpx8VAw=
+=wwM1
+-----END PGP SIGNATURE-----
