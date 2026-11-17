@@ -43,21 +43,23 @@ against the code.
 
 ## Unreleased
 
-- `[semantic]` Every service install (systemd, launchd, Windows scheduled task)
-  now saves the installing environment's PATH, replacing the snapshot kept by
-  earlier installs. Linux package installs and upgrades capture the invoking
-  user's login-shell PATH; if that fails they keep the previously saved PATH.
-  (2026-11-16)
-
 ## Release tags
 
 The **build** version (the daemon binary's `--version` and the mDNS
 `gateway_version` TXT record) is separate from the **contract** version above.
-Releases are tagged with semver (`v0.6.0` … `v2.0.0` so far); the Taskfile
-derives the build version from `git describe`. They are independent and should
-not be coupled. Full release notes live in GitHub Releases.
+Releases are tagged with semver; the Taskfile derives the build version from
+`git describe`. They are independent and should not be coupled. Full release
+notes live in GitHub Releases.
 
 ## History
+
+- `v2.1.0` — CLI log viewing and service startup and PATH fixes;
+  `protocolVersion` remains `v3`:
+- `[semantic]` Every service install (systemd, launchd, Windows scheduled task)
+  now saves the installing environment's PATH, replacing the snapshot kept by
+  earlier installs. Linux package installs and upgrades capture the invoking
+  user's login-shell PATH; if that fails they keep the previously saved PATH.
+  (2026-11-16, [`e40c48b`](https://github.com/arafatamim/ferngeist-acp-gateway/commit/e40c48b))
 
 - `v2.0.0` — host files by path at `/v1/files`, session-free Git, harness
   profiles, nine new catalog agents and remote provisioning state;

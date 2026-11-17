@@ -30,7 +30,7 @@ go build ./...
 ## Run
 
 ```powershell
-go run .\cmd\ferngeist daemon run
+go run -ldflags "-X main.buildVersion=dev" .\cmd\ferngeist daemon run
 ```
 
 ## Test

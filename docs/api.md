@@ -286,7 +286,8 @@ Base path: `/v1`
 ### Pairing
 
 - `POST /v1/pair/start`
-  - Starts a new pairing challenge.
+  - Starts a new pairing challenge while pairing is armed locally; returns
+    `403` if the pairing window is not armed.
   - Returns the challenge ID and expiration time.
 
 - `POST /v1/pair/complete`

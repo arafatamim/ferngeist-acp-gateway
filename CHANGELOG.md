@@ -1,3 +1,22 @@
+## [2.1.0] - 2026-11-17
+
+### 🚀 Features
+
+- *(cli)* Add logs command with --tail and --follow
+
+### 🐛 Bug Fixes
+
+- *(service)* Refresh captured PATH on every install
+- *(daemon)* Retry status during service startup
+
+### 📚 Documentation
+
+- *(changelog)* Release v2.0.0
+
+### 🧪 Testing
+
+- *(packaging)* Verify Homebrew upgrade restarts daemon
+- *(turns)* Synchronize slow subscriber shutdown assertion
 ## [2.0.0] - 2026-11-16
 
 ### 🚀 Features

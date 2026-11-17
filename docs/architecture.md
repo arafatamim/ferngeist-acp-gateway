@@ -42,7 +42,7 @@ A failed chain rolls back to the body from before the whole chain. `KeepOriginal
 
 Every connection creates a persistent gateway session with:
 
-- **StdioPump** — a long-lived goroutine that drains agent stdout and forwards frames to the WebSocket when a client is attached. When no client is connected, output is discarded after end-turn detection and log append. The pump owns the pipe lifecycle and runs independently of WebSocket connectivity.
+- **StdioPump** — a long-lived goroutine that drains agent stdout and forwards frames to the WebSocket when a client is attached. When no client is connected, session updates are buffered for recovery while turn detection and logging continue. The pump owns the pipe lifecycle and runs independently of WebSocket connectivity.
 - **Agent process ownership** — connecting starts the agent, so the session owns the `*exec.Cmd` it launched directly: it drains stdout, writes stdin, waits for the process, and stops it on close. A session and its runtime are 1:1 — there is no pipe lease and no exit-callback registry. The runtime record is only diagnostics (status, log ring, failure records); the session reports the exit to it with `RecordExit`.
 
 > A **device may run multiple sessions for the same agent concurrently** — one
@@ -69,12 +69,12 @@ Every connection creates a persistent gateway session with:
 - **ACP session/close** — before stopping the runtime on session close, the gateway sends a `session/close` JSON-RPC request to the agent if it advertised `sessionCapabilities.close` during initialize. The mock agent supports this for testing.
 
 The pump buffers each ACP session's `session/update` history (bounded, 8 MiB, trimmed from the oldest end to a turn boundary) so a reconnect can be restored. On WebSocket disconnect:
-1. The pump continues running, discarding agent output for any detached client.
+1. The pump continues running and buffers session updates for recovery; it cannot deliver live frames to a detached client.
 2. On notable events (turn complete, permission request, agent error, agent crash, or live progress), a push notification is dispatched. Pushes also fire while a client is attached — the client suppresses foreground notifications — so disconnection is not what gates them.
 3. The client reconnects and calls `session/load` on the agent. If the agent rejects the duplicate as already loaded — it still holds the session — the gateway restores it itself: an explicit `_ferngeist/resumed` notification, then the buffered history, then a synthesized `session/load` success. The signal tells the client that the restore came from the gateway, not the agent (see [docs/api.md](api.md#acp-bridge)).
 4. Or the client sends a catch-up `session/resume` naming the last update number it holds. Every buffered update carries a per-session `ferngeist/seq` under a per-pump epoch, numbered and queued under the pump's client lock so the gateway can answer the resume itself with exactly the updates after that number. Any gap it cannot fill sends the client back to `session/load`.
 
-A disconnected session is reaped after `SESSION_MAX_DISCONNECTED_SECONDS` measured from its last disconnect or agent output, extended to 24 hours while the agent waits on an unanswered client request. A running turn with no such request uses the normal silence bound, so a stalled prompt cannot retain a session slot and sleep inhibitor for a whole day.
+A disconnected session is reaped after `FERNGEIST_GATEWAY_SESSION_MAX_DISCONNECTED_SECONDS` measured from its last disconnect or agent output, extended to 24 hours while the agent waits on an unanswered client request. A running turn with no such request uses the normal silence bound, so a stalled prompt cannot retain a session slot and sleep inhibitor for a whole day.
 
 ## Session lifecycle
 

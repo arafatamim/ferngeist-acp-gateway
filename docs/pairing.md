@@ -2,7 +2,7 @@
 
 Ferngeist Gateway supports two pairing flows:
 
-- **Public API pairing** for paired clients
+- **Public API pairing** for a client enrolling a new device
 - **Admin API pairing** for local setup and management
 
 ## Public pairing
@@ -11,10 +11,11 @@ Use the public API when a client app needs to pair with a gateway remotely.
 
 Flow:
 
-1. Start a pairing challenge.
-2. Enter the pairing code in the client app.
-3. Complete pairing with the challenge ID, code, and device name.
-4. Receive a device credential.
+1. Arm pairing locally with `ferngeist-gateway pair` or the admin API.
+2. Start a pairing challenge while the pairing window is armed.
+3. Enter the pairing code in the client app.
+4. Complete pairing with the challenge ID, code, and device name.
+5. Receive a device credential.
 
 Public pairing does not expose the pairing code.
 
@@ -68,6 +69,6 @@ In that mode:
 
 ## Related docs
 
-- [docs/api.md](docs/api.md)
-- [docs/usage.md](docs/usage.md)
-- [docs/configuration.md](docs/configuration.md)
+- [docs/api.md](api.md)
+- [docs/usage.md](usage.md)
+- [docs/configuration.md](configuration.md)

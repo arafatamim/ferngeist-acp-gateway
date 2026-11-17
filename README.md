@@ -120,8 +120,9 @@ The Android app is one client of a documented HTTP + WebSocket API:
 - **Discovery.** mDNS advertisement on the LAN, with a protocol version for
   compatibility checks.
 
-Minimal flow: pair (`POST /v1/pair/start`, `/complete`), connect to an agent,
-open `websocketUrl`, speak ACP. The full contract is in
+Minimal flow: arm pairing locally with `ferngeist-gateway pair`, complete the
+pairing challenge, connect to an agent, open `websocketUrl`, and speak ACP. The
+full contract is in
 [docs/api.md](docs/api.md), and contract changes are tracked in
 [docs/changelog.md](docs/changelog.md).
 
