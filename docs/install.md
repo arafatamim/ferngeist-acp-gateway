@@ -191,6 +191,23 @@ tar -xzf ferngeist-gateway_<ver>_linux_amd64.tar.gz
 ./ferngeist-gateway daemon install
 ```
 
+## packslip (any platform)
+
+Each release carries a signed [packslip](https://packslip.dev) that lists the
+archives above with their digests. With the `packslip` CLI installed:
+
+```sh
+packslip install github.com/arafatamim/ferngeist-acp-gateway
+ferngeist-gateway daemon install
+```
+
+To check a tarball you downloaded yourself against it:
+
+```sh
+packslip verify packslip.sigstore.json --artifact ferngeist-gateway_<ver>_linux_amd64.tar.gz
+gh attestation verify ferngeist-gateway_<ver>_linux_amd64.tar.gz --repo arafatamim/ferngeist-acp-gateway
+```
+
 ## Uninstalling
 
 `ferngeist-gateway daemon uninstall` stops the daemon and removes the

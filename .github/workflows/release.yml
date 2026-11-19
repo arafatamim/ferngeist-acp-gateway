@@ -40,6 +40,9 @@ env:
 jobs:
   release:
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.release_tag.outputs.tag }}
+      commit: ${{ steps.release_tag.outputs.commit }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -68,6 +71,9 @@ jobs:
             exit 1
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          # packslip records the source commit; on manual dispatch github.sha
+          # is the dispatched ref, not the tag.
+          echo "commit=$(git rev-list -n 1 "$TAG")" >> "$GITHUB_OUTPUT"
 
       - name: Generate changelog
         uses: orhun/git-cliff-action@v4
@@ -150,6 +156,60 @@ jobs:
           name: archpkgs
           path: dist/*.pkg.tar.zst
           if-no-files-found: error
+
+  # Signs a packslip (https://packslip.dev) over the self-update archives so
+  # `packslip install github.com/arafatamim/ferngeist-acp-gateway` can pick
+  # and verify the right download. Keyless: signed with this workflow's OIDC
+  # identity and logged publicly in Rekor. Consumers pin that identity, so
+  # keep signing from this file and keep attestations on.
+  packslip:
+    needs: release
+    if: ${{ !inputs.dry_run }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read       # Download release assets; cannot change the release.
+      id-token: write      # Sign with the workflow's identity.
+      attestations: write  # Attest the downloaded files.
+    steps:
+      - uses: jdx/packslip@v1
+        id: packslip
+        with:
+          tag: ${{ needs.release.outputs.tag }}
+          commit: ${{ needs.release.outputs.commit }}
+          # Patterns end in the arch so the _brew duplicates are left out;
+          # deb/rpm/pacman packages are verified through their own repos.
+          download: >-
+            ferngeist-gateway_*_amd64.tar.gz
+            ferngeist-gateway_*_arm64.tar.gz
+            ferngeist-gateway_*.zip
+          bin: ferngeist-gateway
+          upload: false
+      - uses: actions/upload-artifact@v7
+        with:
+          name: packslip-bundle
+          path: ${{ steps.packslip.outputs.bundle }}
+          if-no-files-found: error
+
+  # Separate job so the packslip action never holds release write access.
+  publish-packslip:
+    needs: [release, packslip]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # Upload the bundle to the release.
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: packslip-bundle
+          path: packslip
+      - name: Upload the signed bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          test -f packslip/packslip.sigstore.json
+          gh release upload "$TAG" packslip/packslip.sigstore.json \
+            --repo "$GITHUB_REPOSITORY" --clobber
 
   # Builds a signed apt repository on the gh-pages branch, served via
   # GitHub Pages. The repo is signed with a self-generated PGP key (the
