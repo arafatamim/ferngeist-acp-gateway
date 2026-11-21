@@ -1064,7 +1064,7 @@ clean. Worktrees outlive the chats that use them: they are removed only on an ex
 > mid-turn, client disconnected) can coexist with a foreground chat against a
 > separate process of the same agent. Every `POST /v1/agents/{agentId}/connect`
 > launches a new process and session; the per-device session limit
-> (`MaxSessionsPerDevice`, default 5) is the parallelism ceiling across all agents.
+> (`MaxSessionsPerDevice`, default 7) is the parallelism ceiling across all agents.
 
 - `POST /v1/sessions/{sessionId}/resume`
   - Prepares a disconnected gateway session for WebSocket reconnection.

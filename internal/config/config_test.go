@@ -71,6 +71,13 @@ func TestApplyPersistedSettingsKeepsExplicitEnvOverrides(t *testing.T) {
 	}
 }
 
+func TestLoadDefaultsDeviceSessionCapToSeven(t *testing.T) {
+	t.Setenv("FERNGEIST_GATEWAY_MAX_SESSIONS_PER_DEVICE", "")
+	if got := Load().MaxSessionsPerDevice; got != 7 {
+		t.Fatalf("MaxSessionsPerDevice = %d, want 7", got)
+	}
+}
+
 func TestLoadUpdateCheckDefaults(t *testing.T) {
 	cfg := Load()
 	if !cfg.UpdateCheckEnabled {

@@ -43,6 +43,9 @@ against the code.
 
 ## Unreleased
 
+- [semantic] The default per-device session limit is seven across all agents.
+  `FERNGEIST_GATEWAY_MAX_SESSIONS_PER_DEVICE` overrides the default. (2026-11-22)
+
 - [semantic] Agent catalog entries with no bundled logo no longer receive a
   generic fallback `icon`; the field is omitted.
 

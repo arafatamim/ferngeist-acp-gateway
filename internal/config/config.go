@@ -34,7 +34,7 @@ const (
 	defaultCredentialTTL          = 7 * 24 * time.Hour
 	defaultCredentialGracePeriod  = 90 * 24 * time.Hour
 	defaultSessionMaxDisconnected = 15 * time.Minute
-	defaultMaxSessionsPerDevice   = 5
+	defaultMaxSessionsPerDevice   = 7
 	defaultProgressInterval       = 15 * time.Second
 	defaultUpdateCheckInterval    = 24 * time.Hour
 )
