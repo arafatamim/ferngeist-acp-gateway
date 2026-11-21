@@ -441,13 +441,27 @@ func (rs *RuntimeSession) AttachClient(ctx context.Context, sessionID, attachTok
 	}
 
 	sess.mu.Lock()
+	defer sess.mu.Unlock()
 	if sess.DeviceID != claimDeviceID {
-		sess.mu.Unlock()
 		return "", 0, ErrDeviceMismatch
 	}
 	if sess.Status == StatusFailed || sess.Status == StatusClosing {
-		sess.mu.Unlock()
 		return "", 0, ErrSessionNotActive
+	}
+
+	// Save before claiming the pump. A cancelled attach must leave an existing
+	// WebSocket or the disconnected session's expiry intact.
+	now := time.Now().UTC()
+	if err := rs.store.SaveSession(ctx, storage.SessionRecord{
+		SessionID:           sess.ID,
+		RuntimeID:           sess.RuntimeID,
+		DeviceID:            sess.DeviceID,
+		AgentID:             sess.AgentID,
+		Status:              StatusActive,
+		CreatedAt:           sess.CreatedAt,
+		LastClientConnectAt: &now,
+	}); err != nil {
+		return "", 0, fmt.Errorf("save session: %w", err)
 	}
 
 	// Claim the pump for this attach: bump the connection generation and evict
@@ -459,24 +473,7 @@ func (rs *RuntimeSession) AttachClient(ctx context.Context, sessionID, attachTok
 	gen := sess.pump.Attach()
 	sess.Status = StatusActive
 	sess.DisconnectedAt = nil
-	record := storage.SessionRecord{
-		SessionID: sess.ID,
-		RuntimeID: sess.RuntimeID,
-		DeviceID:  sess.DeviceID,
-		AgentID:   sess.AgentID,
-		Status:    StatusActive,
-		CreatedAt: sess.CreatedAt,
-	}
-	runtimeID := sess.RuntimeID
-	sess.mu.Unlock()
-
-	now := time.Now().UTC()
-	record.LastClientConnectAt = &now
-	if err := rs.store.SaveSession(ctx, record); err != nil {
-		return "", 0, fmt.Errorf("save session: %w", err)
-	}
-
-	return runtimeID, gen, nil
+	return sess.RuntimeID, gen, nil
 }
 
 // BindConn attaches the upgraded WebSocket to the session pump for the given

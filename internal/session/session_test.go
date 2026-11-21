@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -273,6 +274,34 @@ func TestCreateSessionLimit(t *testing.T) {
 	_, _, err = rs.Create(ctx, agent, "dev-lim", nil)
 	if err != ErrSessionLimitReached {
 		t.Errorf("expected ErrSessionLimitReached, got %v", err)
+	}
+}
+
+func TestCancelledAttachLeavesSessionEligibleForReaping(t *testing.T) {
+	rs, store, agent, _, ctx := setupTest(t, Config{MaxPerDevice: 1, ReaperInterval: time.Hour})
+	defer store.Close()
+	defer rs.Shutdown()
+
+	const deviceID = "dev-cancelled-attach"
+	sess, token, err := rs.Create(ctx, agent, deviceID, nil)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// Put the session past its disconnect timeout without waiting for the ticker.
+	past := time.Now().Add(-2 * rs.cfg.MaxDisconnected)
+	sess.mu.Lock()
+	sess.DisconnectedAt = &past
+	sess.mu.Unlock()
+
+	attachCtx, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, _, err := rs.AttachClient(attachCtx, sess.ID, token); !errors.Is(err, context.Canceled) {
+		t.Fatalf("AttachClient: got %v, want context cancellation", err)
+	}
+
+	rs.reapExpired(rs.cfg.MaxDisconnected)
+	if _, _, err := rs.Create(ctx, agent, deviceID, nil); err != nil {
+		t.Fatalf("Create after expired session with cancelled attach: %v", err)
 	}
 }
 
