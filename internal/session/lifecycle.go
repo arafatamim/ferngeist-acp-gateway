@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/agentext"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/catalog"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/push"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/runtime"
@@ -33,29 +34,10 @@ func (rs *RuntimeSession) Create(ctx context.Context, agent catalog.Agent, devic
 // belongs to the same device and is closed by the caller once this returns, so
 // it does not count against the device's quota.
 func (rs *RuntimeSession) create(ctx context.Context, agent catalog.Agent, deviceID string, env map[string]string, replaces string) (*Session, string, error) {
-	rs.mu.Lock()
-	if rs.closed {
-		rs.mu.Unlock()
-		return nil, "", ErrSessionNotActive
-	}
-	if rs.cfg.MaxPerDevice > 0 && rs.liveSessionsLocked(deviceID, replaces) >= rs.cfg.MaxPerDevice {
-		rs.mu.Unlock()
-		return nil, "", ErrSessionLimitReached
-	}
-	// The launch below runs unlocked, so the slot is reserved until the
-	// session is registered: concurrent connects from one device must not all
-	// pass the quota check.
-	rs.launching[deviceID]++
-	sessionID := generateID()
-	rs.mu.Unlock()
-
-	// Build the extension snapshot before the process exists: an invalid profile
-	// fails the connect rather than leaving the session without its transforms.
-	extensions, err := extensionRegistry(rs.cfg, agent.ID)
-	if err != nil {
-		rs.releaseLaunchSlot(deviceID)
+	if err := rs.reserveLaunchSlot(deviceID, replaces); err != nil {
 		return nil, "", err
 	}
+	sessionID := generateID()
 
 	// Connecting starts the agent: the session owns the process it launches.
 	proc, err := rs.runtimeSvc.Launch(agent, env)
@@ -67,8 +49,19 @@ func (rs *RuntimeSession) create(ctx context.Context, agent catalog.Agent, devic
 	// abandon stops a process that never got a session. No exit watcher runs
 	// for it yet, so the exit is recorded here.
 	abandon := func() {
-		_ = proc.Stop(2 * time.Second)
+		_ = proc.Stop(2 * time.Second) // Best effort while handling the session creation error.
 		rs.runtimeSvc.RecordExit(runtimeID, nil, true)
+	}
+
+	var profile Harness
+	if rs.cfg.ResolveHarness != nil {
+		profile = rs.cfg.ResolveHarness(agent.ID, proc.Cmd.Dir, proc.Cmd.Environ())
+	}
+	extensions, err := extensionRegistry(agent.ID, profile.Extensions)
+	if err != nil {
+		abandon()
+		rs.releaseLaunchSlot(deviceID)
+		return nil, "", err
 	}
 
 	now := time.Now().UTC()
@@ -89,8 +82,49 @@ func (rs *RuntimeSession) create(ctx context.Context, agent catalog.Agent, devic
 		return nil, "", err
 	}
 
+	sess := rs.startPump(proc, rec, extensions, profile)
+	rs.mu.Lock()
+	rs.releaseLaunchSlotLocked(deviceID)
+	if rs.closed {
+		rs.mu.Unlock()
+		sess.cancelPump()
+		abandon()
+		_ = rs.store.DeleteSession(context.Background(), sessionID) // Shutdown raced with creation.
+		return nil, "", ErrSessionNotActive
+	}
+	rs.sessions[sessionID] = sess
+	rs.mu.Unlock()
+
+	// The session owns the process, so it watches for the exit itself: record
+	// it on the runtime and reclaim the session if the agent died on its own.
+	go rs.watchProcess(sess, proc)
+
+	attachToken, err := rs.tokenSvc.Mint(sessionID, deviceID, 5*time.Minute)
+	if err != nil {
+		attachToken = "" // best-effort: session is created but reconnection requires a token
+	}
+
+	return sess, attachToken, nil
+}
+
+func (rs *RuntimeSession) reserveLaunchSlot(deviceID, replaces string) error {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	if rs.closed {
+		return ErrSessionNotActive
+	}
+	if rs.cfg.MaxPerDevice > 0 && rs.liveSessionsLocked(deviceID, replaces) >= rs.cfg.MaxPerDevice {
+		return ErrSessionLimitReached
+	}
+	// Launch runs unlocked, so reserve the slot until the session is registered:
+	// concurrent connects from one device must not all pass the quota check.
+	rs.launching[deviceID]++
+	return nil
+}
+
+func (rs *RuntimeSession) startPump(proc *runtime.Process, rec storage.SessionRecord, extensions *agentext.Registry, profile Harness) *Session {
 	pumpCtx, pumpCancel := context.WithCancel(context.Background())
-	afterTurn, afterTurnDone := rs.afterTurnWorker(pumpCtx, agent.ID)
+	afterTurn, afterTurnDone := rs.afterTurnWorker(pumpCtx, rec.AgentID, profile.TurnFinished)
 
 	onPushNotification := func(e PushEvent) {
 		rs.mu.Lock()
@@ -109,9 +143,9 @@ func (rs *RuntimeSession) create(ctx context.Context, agent catalog.Agent, devic
 	pump := &StdioPump{
 		ctx:                pumpCtx,
 		proc:               proc,
-		runtimeID:          runtimeID,
-		sessionID:          sessionID,
-		agentID:            agent.ID,
+		runtimeID:          rec.RuntimeID,
+		sessionID:          rec.SessionID,
+		agentID:            rec.AgentID,
 		logger:             rs.logger,
 		appendLog:          rs.runtimeSvc.AppendLog,
 		onPushNotification: onPushNotification,
@@ -124,48 +158,25 @@ func (rs *RuntimeSession) create(ctx context.Context, agent catalog.Agent, devic
 		ProgressInterval: rs.cfg.ProgressInterval,
 		frameLog:         rs.frameLog,
 		loadRecovery:     newLoadRecovery(rs.logger),
-		ext:              bindExtensions(pumpCtx, rs.cfg, extensions, agent.ID, runtimeID, sessionID),
+		ext:              bindExtensions(pumpCtx, rs.cfg, extensions, rec.AgentID, rec.RuntimeID, rec.SessionID),
 	}
 
 	go pump.StdoutDrainLoop(pumpCtx)
 
-	sess := &Session{
-		ID:             sessionID,
-		RuntimeID:      runtimeID,
-		DeviceID:       deviceID,
-		AgentID:        agent.ID,
+	return &Session{
+		ID:             rec.SessionID,
+		RuntimeID:      rec.RuntimeID,
+		DeviceID:       rec.DeviceID,
+		AgentID:        rec.AgentID,
 		Status:         StatusDisconnected,
-		CreatedAt:      now,
-		DisconnectedAt: &now,
+		CreatedAt:      rec.CreatedAt,
+		DisconnectedAt: rec.DisconnectedSince,
 		proc:           proc,
 		pump:           pump,
 		cancelPump:     pumpCancel,
 		afterTurnDone:  afterTurnDone,
 		exited:         make(chan struct{}),
 	}
-
-	rs.mu.Lock()
-	rs.releaseLaunchSlotLocked(deviceID)
-	if rs.closed {
-		rs.mu.Unlock()
-		pumpCancel()
-		abandon()
-		_ = rs.store.DeleteSession(context.Background(), sessionID)
-		return nil, "", ErrSessionNotActive
-	}
-	rs.sessions[sessionID] = sess
-	rs.mu.Unlock()
-
-	// The session owns the process, so it watches for the exit itself: record
-	// it on the runtime and reclaim the session if the agent died on its own.
-	go rs.watchProcess(sess, proc)
-
-	attachToken, err := rs.tokenSvc.Mint(sessionID, deviceID, 5*time.Minute)
-	if err != nil {
-		attachToken = "" // best-effort: session is created but reconnection requires a token
-	}
-
-	return sess, attachToken, nil
 }
 
 // liveSessionsLocked counts the device's sessions that hold a quota slot: live

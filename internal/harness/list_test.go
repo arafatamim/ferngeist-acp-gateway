@@ -86,18 +86,6 @@ func TestMergeSessionListLeavesAReplyWithoutAPageAlone(t *testing.T) {
 	}
 }
 
-func TestRegistryExtensionsReturnsTheProfilesSet(t *testing.T) {
-	set := hermesExtensions(&fakeSessionSource{})
-	registry := New(Profile{ID: "hermes", Extensions: set})
-	got := registry.Extensions("hermes")
-	if len(got.Transformers) != 1 || got.Transformers[0].Name != "hermes-native-chats" {
-		t.Fatalf("hermes extensions = %+v, want the native-chat transformer", got)
-	}
-	if plain := registry.Extensions("plain"); len(plain.Transformers) != 0 {
-		t.Fatalf("plain extensions = %+v, want none", plain)
-	}
-}
-
 func TestHermesListTransformAppendsNativeChats(t *testing.T) {
 	source := &fakeSessionSource{sessions: []Session{{ID: "tui-1", Cwd: "/work", Title: "TUI chat"}}}
 	reply := testPayload(t, `{"jsonrpc":"2.0","id":1,"result":{"sessions":[]}}`)

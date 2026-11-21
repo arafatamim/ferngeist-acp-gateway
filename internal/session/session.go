@@ -76,6 +76,14 @@ type SessionSummary struct {
 	AcpSessionIDs []string `json:"acpSessionIds"`
 }
 
+// Harness holds the callbacks bound to one agent process.
+type Harness struct {
+	// Extensions registers the harness's payload transformers.
+	Extensions agentext.Set
+	// TurnFinished runs after each answered prompt, given its ACP session ID.
+	TurnFinished func(ctx context.Context, acpSessionID string) error
+}
+
 // Config holds session-level tunables from the daemon configuration.
 type Config struct {
 	// MaxDisconnected is how long a disconnected session survives before the reaper closes it.
@@ -96,13 +104,9 @@ type Config struct {
 	// The daemon injects workspace.Service.BranchOf; the session layer keeps
 	// only this narrow lookup, not the whole workspace service.
 	BranchOf func(ctx context.Context, cwd string) string
-	// Extensions resolves the payload transformers registered for an agent's
-	// harness profile. nil, or a set with no transformers, passes frames through
-	// unchanged.
-	Extensions func(agentID string) agentext.Set
-	// TurnFinished resolves the hook an agent's harness profile runs after each
-	// answered prompt, given its ACP session id. nil, or a nil hook, runs nothing.
-	TurnFinished func(agentID string) func(ctx context.Context, acpSessionID string) error
+	// ResolveHarness binds the agent profile to the command's effective
+	// environment. A nil resolver leaves plain ACP behavior.
+	ResolveHarness func(agentID, workingDir string, env []string) Harness
 	// ExtensionBudget is the daemon-wide budget every session's extension engine
 	// shares. nil keeps only the per-engine limits.
 	ExtensionBudget *agentext.Budget

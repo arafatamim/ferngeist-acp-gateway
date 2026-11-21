@@ -24,26 +24,18 @@ var claudeEntrypointKey = []byte(`"entrypoint":"`)
 // claudeSDKEntrypoints are the labels the picker hides.
 var claudeSDKEntrypoints = []string{"sdk-cli", "sdk-ts", "sdk-py"}
 
-// Claude is the Claude Agent adapter. Claude Code's /resume picker hides a chat
+// claudeAt configures the Claude Agent adapter. Claude Code's /resume picker hides a chat
 // whose transcript's first entrypoint is an Agent SDK one, and headless Claude
 // Code always records one (it even turns CLAUDE_CODE_ENTRYPOINT=cli into
 // sdk-cli). After each turn the profile relabels the chat as a CLI one so the
 // native picker lists it.
 // ponytail: drop this if Claude Code lists SDK chats or gains a setting for it.
-func Claude() Profile {
-	transcripts := claudeTranscripts{projects: claudeProjectsDir()}
-	return Profile{ID: "claude-acp", TurnFinished: transcripts.unhide}
-}
-
-func claudeProjectsDir() string {
-	if dir := os.Getenv("CLAUDE_CONFIG_DIR"); dir != "" {
-		return filepath.Join(dir, "projects")
+func claudeAt(dir string) Profile {
+	if dir == "" {
+		return Profile{}
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(home, ".claude", "projects")
+	transcripts := claudeTranscripts{projects: filepath.Join(dir, "projects")}
+	return Profile{TurnFinished: transcripts.unhide}
 }
 
 type claudeTranscripts struct {

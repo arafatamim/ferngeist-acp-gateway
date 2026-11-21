@@ -51,29 +51,17 @@ WHERE s.message_count > 0
   )
   AND NOT (json_valid(s.model_config) AND json_extract(s.model_config, '$._delegate_from') IS NOT NULL)`
 
-// Hermes lists the chats the Hermes CLI, TUI and desktop/web clients created.
+// hermesAt lists the chats the Hermes CLI, TUI and desktop/web clients created.
 // Its ACP adapter answers session/list from an ACP-only surface filter, so those
 // chats are invisible to an ACP client even though Hermes's owner resumes them
 // on session/load. The profile is only needed while that filter stands: if the
 // adapter starts listing the native surfaces itself, drop it.
-func Hermes() Profile {
-	return hermesAt(hermesHome())
-}
-
 func hermesAt(home string) Profile {
-	sessions := hermesSessions{path: filepath.Join(home, "state.db")}
-	return Profile{ID: "hermes", Sessions: sessions, Extensions: hermesExtensions(sessions)}
-}
-
-func hermesHome() string {
-	if home := os.Getenv("HERMES_HOME"); home != "" {
-		return home
+	var sessions hermesSessions
+	if home != "" {
+		sessions.path = filepath.Join(home, "state.db")
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(home, ".hermes")
+	return Profile{Sessions: sessions, Extensions: hermesExtensions(sessions)}
 }
 
 type hermesSessions struct {

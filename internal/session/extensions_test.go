@@ -88,12 +88,12 @@ func TestSessionCloseWaitsForAfterTurnWork(t *testing.T) {
 	defer rs.Shutdown()
 	started := make(chan struct{})
 	release := make(chan struct{})
-	rs.cfg.TurnFinished = func(string) func(context.Context, string) error {
-		return func(context.Context, string) error {
+	rs.cfg.ResolveHarness = func(string, string, []string) Harness {
+		return Harness{TurnFinished: func(context.Context, string) error {
 			close(started)
 			<-release
 			return nil
-		}
+		}}
 	}
 	sess, _, err := rs.Create(ctx, agent, "device", nil)
 	if err != nil {

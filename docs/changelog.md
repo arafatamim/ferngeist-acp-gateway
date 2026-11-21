@@ -43,6 +43,10 @@ against the code.
 
 ## Unreleased
 
+- [semantic] Hermes native chats appended to `session/list` come from the
+  launched agent's store, including after a runtime restart overrides
+  `HERMES_HOME` or the home directory. (2026-11-21)
+
 - [additive] The local admin API supports bearer authentication via
   `FERNGEIST_GATEWAY_ADMIN_TOKEN` and can be disabled with an explicitly empty
   `FERNGEIST_GATEWAY_ADMIN_ADDR`.

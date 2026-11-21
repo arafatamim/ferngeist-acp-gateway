@@ -361,7 +361,6 @@ func newAgentRuntime(cfg config.Config, logger *slog.Logger, store *storage.SQLi
 
 func composeServer(deps api.Deps, store *storage.SQLiteStore) (*api.Server, *session.RuntimeSession) {
 	cfg, logger := deps.Config, deps.Logger
-	profiles := harness.Default()
 	extensionBudget := agentext.NewBudget(agentExtensionBudget)
 	// The push path only needs the branch behind a chat's cwd, so the session
 	// layer gets that one workspace lookup rather than the whole workspace
@@ -370,13 +369,15 @@ func composeServer(deps api.Deps, store *storage.SQLiteStore) (*api.Server, *ses
 	// so the two never contend.
 	worktrees := workspace.New(func() *storage.SQLiteStore { return store }, logger, time.Now, nil)
 	sessionSvc := session.NewRuntimeSession(logger, store, deps.Runtime, session.NewTokenService(logger), session.Config{
-		MaxDisconnected:    cfg.SessionMaxDisconnected,
-		MaxPerDevice:       cfg.MaxSessionsPerDevice,
-		ProgressInterval:   cfg.ProgressInterval,
-		PushSvc:            deps.Push,
-		BranchOf:           worktrees.BranchOf,
-		Extensions:         profiles.Extensions,
-		TurnFinished:       profiles.TurnFinished,
+		MaxDisconnected:  cfg.SessionMaxDisconnected,
+		MaxPerDevice:     cfg.MaxSessionsPerDevice,
+		ProgressInterval: cfg.ProgressInterval,
+		PushSvc:          deps.Push,
+		BranchOf:         worktrees.BranchOf,
+		ResolveHarness: func(agentID, workingDir string, env []string) session.Harness {
+			profile := harness.Resolve(agentID, workingDir, env)
+			return session.Harness{Extensions: profile.Extensions, TurnFinished: profile.TurnFinished}
+		},
 		ExtensionBudget:    extensionBudget,
 		GatewayID:          cfg.GatewayID,
 		FrameLogEnabled:    cfg.FrameLogEnabled,

@@ -29,11 +29,7 @@ func bindExtensions(ctx context.Context, cfg Config, registry *agentext.Registry
 
 // afterTurnWorker keeps filesystem work off the drain loop and bounds pending
 // work per session. Cancellation stops the worker after its current hook.
-func (rs *RuntimeSession) afterTurnWorker(ctx context.Context, agentID string) (func(string), <-chan struct{}) {
-	if rs.cfg.TurnFinished == nil {
-		return func(string) {}, nil
-	}
-	hook := rs.cfg.TurnFinished(agentID)
+func (rs *RuntimeSession) afterTurnWorker(ctx context.Context, agentID string, hook func(context.Context, string) error) (func(string), <-chan struct{}) {
 	if hook == nil {
 		return func(string) {}, nil
 	}
@@ -67,14 +63,9 @@ func (rs *RuntimeSession) afterTurnWorker(ctx context.Context, agentID string) (
 	}, done
 }
 
-// extensionRegistry builds the immutable registration snapshot for agentID. It
-// runs before the agent process starts, so an invalid profile fails the connect
-// instead of leaving the session without its transforms.
-func extensionRegistry(cfg Config, agentID string) (*agentext.Registry, error) {
-	if cfg.Extensions == nil {
-		return nil, nil
-	}
-	set := cfg.Extensions(agentID)
+// extensionRegistry validates the immutable registration snapshot before the
+// session starts its pump, so an invalid profile fails the connect.
+func extensionRegistry(agentID string, set agentext.Set) (*agentext.Registry, error) {
 	if len(set.Transformers) == 0 {
 		return nil, nil
 	}
