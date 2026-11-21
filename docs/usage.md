@@ -58,6 +58,9 @@ ferngeist-gateway agents list
 ferngeist-gateway logs -f --tail 50
 ```
 
+`daemon run` prints the same readable `time LEVEL msg key=value` lines as
+`logs`; the gateway log file itself stays newline-delimited JSON.
+
 Commands that read or change gateway state — `pair`, `devices …`, `agents …` —
 drive the running daemon over its local admin API. Run `daemon run` in another
 terminal, or install the background service with `daemon install`. When nothing

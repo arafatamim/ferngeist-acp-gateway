@@ -2,13 +2,16 @@ package logging
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -32,6 +35,10 @@ type Service struct {
 // New returns both the structured gateway logger and the underlying file
 // service so diagnostics export can tail recent log lines.
 func New(level, dir string, maxSize int64, maxBackups int) (*slog.Logger, *Service, error) {
+	return newLogger(level, dir, maxSize, maxBackups, os.Stdout)
+}
+
+func newLogger(level, dir string, maxSize int64, maxBackups int, stdout io.Writer) (*slog.Logger, *Service, error) {
 	service, err := NewService(dir, defaultLogFileName, maxSize, maxBackups)
 	if err != nil {
 		return nil, nil, err
@@ -42,9 +49,20 @@ func New(level, dir string, maxSize int64, maxBackups int) (*slog.Logger, *Servi
 	// and its std handles are invalid, or the parent that owns the stdout pipe
 	// died). Writing stdout first would drop the file log on any stdout error,
 	// because io.MultiWriter stops at the first failing writer.
-	return slog.New(slog.NewJSONHandler(io.MultiWriter(service, os.Stdout), &slog.HandlerOptions{
+	return slog.New(slog.NewJSONHandler(io.MultiWriter(service, prettyWriter{stdout}), &slog.HandlerOptions{
 		Level: parseLevel(level),
 	})), service, nil
+}
+
+// prettyWriter renders each JSON record slog writes as the same readable
+// `time LEVEL msg key=value` line `ferngeist-gateway logs` prints. The file
+// keeps JSON so the log stays machine-readable.
+// shortcut: one record per Write, which slog's JSON handler always does.
+type prettyWriter struct{ w io.Writer }
+
+func (p prettyWriter) Write(b []byte) (int, error) {
+	WritePrettyLogLine(p.w, strings.TrimSuffix(string(b), "\n"))
+	return len(b), nil
 }
 
 func NewService(dir, fileName string, maxSize int64, maxBackups int) (*Service, error) {
@@ -202,6 +220,55 @@ func emitLines(reader *bufio.Reader, partial string, emit func(string)) (string,
 		emit(strings.TrimSuffix(partial+chunk, "\n"))
 		partial = ""
 	}
+}
+
+// WritePrettyLogLine renders one slog JSON line as `time LEVEL msg key=value...`;
+// lines that are not JSON objects are printed unchanged.
+func WritePrettyLogLine(w io.Writer, line string) {
+	var record map[string]json.RawMessage
+	if json.Unmarshal([]byte(line), &record) != nil {
+		fmt.Fprintln(w, line)
+		return
+	}
+
+	var stamp, level, msg string
+	_ = json.Unmarshal(record["time"], &stamp) // missing or malformed fields render empty
+	_ = json.Unmarshal(record["level"], &level)
+	_ = json.Unmarshal(record["msg"], &msg)
+	if parsed, err := time.Parse(time.RFC3339Nano, stamp); err == nil {
+		stamp = parsed.Local().Format("2006-01-02 15:04:05")
+	}
+	delete(record, "time")
+	delete(record, "level")
+	delete(record, "msg")
+
+	var out strings.Builder
+	fmt.Fprintf(&out, "%s %-5s %s", stamp, level, msg)
+	keys := make([]string, 0, len(record))
+	for key := range record {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		fmt.Fprintf(&out, " %s=%s", key, attrValue(record[key]))
+	}
+	fmt.Fprintln(w, out.String())
+}
+
+// attrValue unquotes plain strings and keeps every other value as compact JSON.
+func attrValue(raw json.RawMessage) string {
+	var text string
+	if json.Unmarshal(raw, &text) == nil && !strings.ContainsAny(text, " \t\n\"") {
+		return text
+	}
+	if text != "" {
+		return fmt.Sprintf("%q", text)
+	}
+	var compact bytes.Buffer
+	if json.Compact(&compact, raw) != nil {
+		return string(raw)
+	}
+	return compact.String()
 }
 
 // tailFiles concatenates the lines of paths in order, skipping missing files,
