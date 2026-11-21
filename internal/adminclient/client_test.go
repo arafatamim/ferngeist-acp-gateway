@@ -101,8 +101,11 @@ func newTestCustomAgentClient(t *testing.T) *Client {
 	})
 
 	runtimeSvc := runtime.NewSupervisor(logger, baseDir, store, nil)
+	t.Setenv(config.AdminTokenEnv, "test-admin-client-token")
+	cfg := config.Load()
+	cfg.ListenAddr = "127.0.0.1:0"
 	server := api.NewServer(api.Deps{
-		Config:       config.Config{ListenAddr: "127.0.0.1:0"},
+		Config:       cfg,
 		Logger:       logger,
 		Catalog:      catalogSvc,
 		Runtime:      runtimeSvc,
@@ -113,7 +116,9 @@ func newTestCustomAgentClient(t *testing.T) *Client {
 	adminServer := httptest.NewServer(server.AdminHandler())
 	t.Cleanup(adminServer.Close)
 
-	return &Client{baseURL: adminServer.URL, httpClient: adminServer.Client()}
+	cfg = config.Load()
+	cfg.AdminListenAddr = strings.TrimPrefix(adminServer.URL, "http://")
+	return New(cfg)
 }
 
 func TestAddAndRemoveCustomAgent(t *testing.T) {

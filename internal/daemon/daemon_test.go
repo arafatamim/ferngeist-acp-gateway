@@ -279,7 +279,7 @@ func TestRun_returns_error_when_server_listen_fails(t *testing.T) {
 	}
 
 	t.Setenv("FERNGEIST_GATEWAY_LISTEN_ADDR", "127.0.0.1:-1")
-	t.Setenv("FERNGEIST_GATEWAY_ADMIN_ADDR", "127.0.0.1:-1")
+	t.Setenv("FERNGEIST_GATEWAY_ADMIN_ADDR", "")
 	t.Setenv("FERNGEIST_GATEWAY_STATE_DB", filepath.Join(t.TempDir(), "state.db"))
 	t.Setenv("FERNGEIST_GATEWAY_LOG_DIR", t.TempDir())
 	t.Setenv("FERNGEIST_GATEWAY_MANAGED_BIN_DIR", t.TempDir())
@@ -288,8 +288,26 @@ func TestRun_returns_error_when_server_listen_fails(t *testing.T) {
 
 	ctx := context.Background()
 	err := Run(ctx, config.BuildInfo{Version: "test"})
-	if err == nil {
-		t.Fatal("expected error from Run when listen fails")
+	if err == nil || !strings.Contains(err.Error(), "listen tcp") {
+		t.Fatal("expected listen failure from the public server")
+	}
+}
+
+func TestRunRejectsInvalidAdminTokenBeforeStarting(t *testing.T) {
+	for name, token := range map[string]string{"empty": "", "short": "too-short", "malformed": "invalid token value"} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv(config.AdminTokenEnv, token)
+			t.Setenv("FERNGEIST_GATEWAY_ADMIN_ADDR", "127.0.0.1:0")
+			t.Setenv("FERNGEIST_GATEWAY_LOG_DIR", t.TempDir())
+			t.Setenv("FERNGEIST_GATEWAY_STATE_DB", t.TempDir())
+			err := Run(t.Context(), config.BuildInfo{Version: "test"})
+			if err == nil || !strings.Contains(err.Error(), config.AdminTokenEnv) {
+				t.Fatal("expected an admin token configuration error")
+			}
+			if token != "" && strings.Contains(err.Error(), token) {
+				t.Fatal("startup error contains the token")
+			}
+		})
 	}
 }
 

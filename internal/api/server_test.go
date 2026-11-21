@@ -2847,8 +2847,38 @@ func TestAuthRefreshExchangesRotatedTokenWithinOverlap(t *testing.T) {
 	}
 }
 
+func TestAdminListenerRequiresConfiguredToken(t *testing.T) {
+	const token = "test-admin-token-123"
+	t.Setenv("FERNGEIST_GATEWAY_ADMIN_TOKEN", token)
+	t.Setenv("FERNGEIST_GATEWAY_ADMIN_ADDR", "127.0.0.1:0")
+	handler := newConfiguredTestServer(config.Load()).adminServer.Handler
+	cases := []struct {
+		name, authorization string
+		want                int
+	}{
+		{"missing", "", http.StatusUnauthorized},
+		{"malformed", "Basic " + token, http.StatusUnauthorized},
+		{"wrong length", "Bearer short", http.StatusUnauthorized},
+		{"wrong token", "Bearer " + strings.Repeat("x", len(token)), http.StatusUnauthorized},
+		{"correct", "Bearer " + token, http.StatusOK},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/admin/v1/status", nil)
+			if tc.authorization != "" {
+				request.Header.Set("Authorization", tc.authorization)
+			}
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, request)
+			if recorder.Code != tc.want || strings.Contains(recorder.Body.String(), token) {
+				t.Fatalf("status = %d, want %d, and response must omit the token", recorder.Code, tc.want)
+			}
+		})
+	}
+}
+
 func TestAdminListenerRejectsBrowserRequests(t *testing.T) {
-	server := newTestServer()
+	server := newConfiguredTestServer(config.Config{AdminListenAddr: "127.0.0.1:0"})
 	handler := server.adminServer.Handler
 	cases := []struct {
 		name, host, origin string

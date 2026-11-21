@@ -12,6 +12,8 @@ package api
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -47,14 +49,14 @@ import (
 // protocol bridging via WebSocket, and diagnostic export. All requests are
 // logged with structured metadata for troubleshooting.
 type Server struct {
-	httpServer  *http.Server   // public API server
-	adminServer *http.Server   // localhost admin server
-	adminMux    *http.ServeMux // admin routes, before the local-request guard
-	logger      *slog.Logger
-	cfg         config.Config
-	build       config.BuildInfo // version/commit info baked at compile time
-	startedAt   time.Time        // used for uptime calculation
-	now         func() time.Time // injectable clock for testability
+	httpServer   *http.Server // public API server
+	adminServer  *http.Server // localhost admin server
+	adminHandler http.Handler // authenticated admin routes, before the local-request guard
+	logger       *slog.Logger
+	cfg          config.Config
+	build        config.BuildInfo // version/commit info baked at compile time
+	startedAt    time.Time        // used for uptime calculation
+	now          func() time.Time // injectable clock for testability
 
 	catalog    *catalog.Service
 	runtime    *runtime.Supervisor
@@ -287,10 +289,6 @@ func NewServer(deps Deps) *Server {
 func (server *Server) configureHTTPServers() {
 	cfg := server.cfg
 	mux, adminMux := server.routes()
-	adminAddr := strings.TrimSpace(cfg.AdminListenAddr)
-	if adminAddr == "" {
-		adminAddr = "127.0.0.1:0"
-	}
 
 	server.httpServer = &http.Server{
 		Addr:              cfg.ListenAddr,
@@ -300,16 +298,21 @@ func (server *Server) configureHTTPServers() {
 		WriteTimeout:      20 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
-	server.adminMux = adminMux
+	server.adminHandler = adminMux
+	if cfg.AdminToken != nil {
+		server.adminHandler = requireAdminToken(server.adminHandler, *cfg.AdminToken)
+	}
+	if cfg.AdminListenAddr == "" {
+		return
+	}
 	server.adminServer = &http.Server{
-		Addr:              adminAddr,
-		Handler:           server.withRequestLogging(requireLocalAdminRequest(adminMux)),
+		Addr:              cfg.AdminListenAddr,
+		Handler:           server.withRequestLogging(requireLocalAdminRequest(server.adminHandler)),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      20 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
-
 }
 
 func (s *Server) routes() (*http.ServeMux, *http.ServeMux) {
@@ -401,7 +404,7 @@ func normalizeSecurityConfig(cfg config.Config) config.Config {
 	return cfg
 }
 
-// ListenAndServe starts both the public and admin HTTP servers.
+// ListenAndServe starts the public HTTP server and the optional admin server.
 func (s *Server) ListenAndServe() error {
 	s.workspaceSvc.Prune(context.Background())
 	errCh := make(chan error, 2)
@@ -409,13 +412,17 @@ func (s *Server) ListenAndServe() error {
 		s.logger.Info("api server listening", slog.String("addr", s.httpServer.Addr))
 		errCh <- s.httpServer.ListenAndServe()
 	}()
-	go func() {
-		s.logger.Info("admin api listening", slog.String("addr", s.adminServer.Addr))
-		errCh <- s.adminServer.ListenAndServe()
-	}()
+	listeners := 1
+	if s.adminServer != nil {
+		listeners++
+		go func() {
+			s.logger.Info("admin api listening", slog.String("addr", s.adminServer.Addr))
+			errCh <- s.adminServer.ListenAndServe()
+		}()
+	}
 
 	var firstErr error
-	for i := 0; i < 2; i++ {
+	for range listeners {
 		err := <-errCh
 		if err == nil || errors.Is(err, http.ErrServerClosed) {
 			continue
@@ -430,7 +437,7 @@ func (s *Server) ListenAndServe() error {
 	return firstErr
 }
 
-// Shutdown stops the turn streams, drains both HTTP servers, then the project
+// Shutdown stops the turn streams, drains the HTTP servers, then the project
 // lister's warm agents. Streams are joined before the drain because
 // http.Server.Shutdown does not close hijacked connections: without the join the
 // handler never writes the 1001 close frame and the client sees 1006.
@@ -440,7 +447,10 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	s.stopStreams.Do(func() { close(s.streamStop) })
 	s.streamMu.Unlock()
 	s.waitTurnStreams(ctx)
-	err := errors.Join(s.httpServer.Shutdown(ctx), s.adminServer.Shutdown(ctx))
+	err := s.httpServer.Shutdown(ctx)
+	if s.adminServer != nil {
+		err = errors.Join(err, s.adminServer.Shutdown(ctx))
+	}
 	// After the drain, so no listing parks a process once its pool is stopped.
 	if s.projects != nil {
 		s.projects.Close()
@@ -468,14 +478,30 @@ func (s *Server) Handler() http.Handler {
 	return s.httpServer.Handler
 }
 
-// AdminHandler returns the admin API mux without the listener's request
-// logging and local-request guard (requireLocalAdminRequest); tests that need
-// the guard go through adminServer.Handler.
+// AdminHandler returns the admin routes with bearer authentication and without
+// the listener's request logging and local-request guard.
 func (s *Server) AdminHandler() http.Handler {
-	return s.adminMux
+	return s.adminHandler
 }
 
-// requireLocalAdminRequest protects the unauthenticated admin API from web
+func requireAdminToken(next http.Handler, token string) http.Handler {
+	expected := sha256.Sum256([]byte(token))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		headers := r.Header.Values("Authorization")
+		scheme, credential, _ := strings.Cut(r.Header.Get("Authorization"), " ")
+		// Compare fixed-size digests so a length mismatch does not short-circuit.
+		provided := sha256.Sum256([]byte(strings.TrimLeft(credential, " ")))
+		matches := subtle.ConstantTimeCompare(expected[:], provided[:])
+		if len(headers) != 1 || !strings.EqualFold(scheme, "Bearer") || matches != 1 {
+			w.Header().Set("WWW-Authenticate", "Bearer")
+			writeError(w, http.StatusUnauthorized, "admin authorization required")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// requireLocalAdminRequest protects the admin API from web
 // pages. A browser can reach 127.0.0.1 from any site, either by DNS rebinding
 // (the request then carries the attacker's hostname in Host) or by a cross-site
 // form/fetch POST (the request then carries an Origin header). The CLI client

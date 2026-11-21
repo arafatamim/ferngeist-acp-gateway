@@ -21,7 +21,8 @@ Foreground runs inherit the shell environment directly.
 | Variable | Purpose | Default |
 |---|---|---|
 | `FERNGEIST_GATEWAY_LISTEN_ADDR` | Public API listen address | `127.0.0.1:5788` |
-| `FERNGEIST_GATEWAY_ADMIN_ADDR` | Admin API listen address | `127.0.0.1:5789` |
+| `FERNGEIST_GATEWAY_ADMIN_ADDR` | Admin API loopback address with numeric port. Set to an empty string to disable the listener. | `127.0.0.1:5789` |
+| `FERNGEIST_GATEWAY_ADMIN_TOKEN` | Optional admin bearer token. Use a randomly generated token of at least 16 bytes. Empty, short, or invalid bearer values are rejected at startup. | Unset |
 | `FERNGEIST_GATEWAY_NAME` | Gateway name advertised to clients (falls back to the hostname) | hostname |
 | `FERNGEIST_GATEWAY_ENABLE_LAN` | Enable LAN discovery and access | `false` |
 | `FERNGEIST_GATEWAY_PUBLIC_BASE_URL` | Public URL used for remote access | unset |

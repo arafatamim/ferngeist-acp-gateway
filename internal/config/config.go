@@ -2,13 +2,20 @@ package config
 
 import (
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	goruntime "runtime"
 	"strconv"
 	"strings"
 	"time"
 )
+
+// AdminTokenEnv names the optional bearer credential for the admin listener.
+const AdminTokenEnv = "FERNGEIST_GATEWAY_ADMIN_TOKEN"
+
+var adminTokenPattern = regexp.MustCompile(`^[A-Za-z0-9._~+/-]+=*$`)
 
 const (
 	defaultListenAddr             = "127.0.0.1:5788"
@@ -49,6 +56,7 @@ type BuildInfo struct {
 type Config struct {
 	ListenAddr            string
 	AdminListenAddr       string
+	AdminToken            *string `json:"-"`
 	LogLevel              string
 	LogDir                string
 	LogMaxSize            int64
@@ -138,7 +146,6 @@ func Load() Config {
 	gatewayName := envOrDefault("FERNGEIST_GATEWAY_NAME", hostnameOrDefault("ferngeist-gateway"))
 	cfg := Config{
 		ListenAddr:             envOrDefault("FERNGEIST_GATEWAY_LISTEN_ADDR", defaultListenAddr),
-		AdminListenAddr:        envOrDefault("FERNGEIST_GATEWAY_ADMIN_ADDR", defaultAdminAddr),
 		LogLevel:               envOrDefault("FERNGEIST_GATEWAY_LOG_LEVEL", defaultLogLevel),
 		LogDir:                 envOrDefault("FERNGEIST_GATEWAY_LOG_DIR", defaultLogDir),
 		LogMaxSize:             envInt64OrDefault("FERNGEIST_GATEWAY_LOG_MAX_BYTES", defaultLogMaxSize),
@@ -171,9 +178,33 @@ func Load() Config {
 		TailscalePrivate:       envBool("FERNGEIST_GATEWAY_TAILSCALE_PRIVATE"),
 		JSRuntime:              normalizeJSRuntime(os.Getenv("FERNGEIST_GATEWAY_JS_RUNTIME")),
 	}
+	adminAddr, ok := os.LookupEnv("FERNGEIST_GATEWAY_ADMIN_ADDR")
+	if !ok {
+		adminAddr = defaultAdminAddr
+	}
+	cfg.AdminListenAddr = strings.TrimSpace(adminAddr)
+	if token, ok := os.LookupEnv(AdminTokenEnv); ok {
+		cfg.AdminToken = &token
+	}
 	cfg.UpdateCheckEnabled = envBoolDefaultTrue("FERNGEIST_GATEWAY_UPDATE_CHECK_ENABLED")
 	cfg.KeepAwake = envBoolDefaultTrue("FERNGEIST_GATEWAY_KEEP_AWAKE")
 	return cfg.applySecurityDefaults()
+}
+
+// ValidateAdmin checks the admin bind address and optional bearer credential.
+func (c Config) ValidateAdmin() error {
+	if c.AdminToken != nil && (len(*c.AdminToken) < 16 || !adminTokenPattern.MatchString(*c.AdminToken)) {
+		return errors.New(AdminTokenEnv + " must be a valid bearer token of at least 16 bytes")
+	}
+	if c.AdminListenAddr == "" {
+		return nil
+	}
+	host, port, err := net.SplitHostPort(c.AdminListenAddr)
+	_, portErr := strconv.ParseUint(port, 10, 16)
+	if err != nil || portErr != nil || (!strings.EqualFold(host, "localhost") && !net.ParseIP(host).IsLoopback()) {
+		return errors.New("FERNGEIST_GATEWAY_ADMIN_ADDR must be a loopback host and numeric port or empty")
+	}
+	return nil
 }
 
 // ApplyPersistedSettings fills only fields that were not set explicitly in the

@@ -202,12 +202,17 @@ func runDaemonStatus() error {
 		return &alreadyReported{code: 1}
 	}
 
+	writeDaemonStatus(writer, daemonStatus)
+	return writer.Flush()
+}
+
+func writeDaemonStatus(writer *tabwriter.Writer, daemonStatus adminclient.DaemonStatus) {
 	fmt.Fprintln(writer, "")
 	fmt.Fprintln(writer, "DAEMON")
 	fmt.Fprintf(writer, "NAME\t%s\n", daemonStatus.Name)
 	fmt.Fprintf(writer, "VERSION\t%s\n", daemonStatus.Version)
 	fmt.Fprintf(writer, "LISTEN ADDR\t%s\n", daemonStatus.ListenAddr)
-	fmt.Fprintf(writer, "ADMIN ADDR\t%s\n", daemonStatus.AdminListenAddr)
+	fmt.Fprintf(writer, "ADMIN ADDR\t%s\n", valueOrFallback(daemonStatus.AdminListenAddr, "disabled"))
 	fmt.Fprintf(writer, "LAN ENABLED\t%t\n", daemonStatus.LANEnabled)
 	fmt.Fprintf(writer, "REMOTE MODE\t%s\n", valueOrFallback(daemonStatus.Remote.Mode, "unknown"))
 	fmt.Fprintf(writer, "REMOTE SCOPE\t%s\n", valueOrFallback(daemonStatus.Remote.Scope, "unknown"))
@@ -223,6 +228,9 @@ func runDaemonStatus() error {
 	if daemonStatus.Remote.Warning != "" {
 		fmt.Fprintf(writer, "REMOTE WARNING\t%s\n", daemonStatus.Remote.Warning)
 	}
+	if daemonStatus.AdminListenAddr == "" {
+		return
+	}
 	if daemonStatus.PairingTarget.Reachable {
 		fmt.Fprintf(writer, "PAIRING TARGET\t%s://%s\n", daemonStatus.PairingTarget.Scheme, daemonStatus.PairingTarget.Host)
 	} else {
@@ -236,8 +244,6 @@ func runDaemonStatus() error {
 			fmt.Fprintf(writer, "PAIRING EXPIRES\t%s\n", daemonStatus.ActivePairing.ExpiresAt.Local().Format(time.RFC3339))
 		}
 	}
-
-	return writer.Flush()
 }
 
 func fetchDaemonStatusWithStartupRetry(status service.Status) (adminclient.DaemonStatus, error) {

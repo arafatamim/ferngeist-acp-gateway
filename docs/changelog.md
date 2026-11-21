@@ -43,6 +43,10 @@ against the code.
 
 ## Unreleased
 
+- [additive] The local admin API supports bearer authentication via
+  `FERNGEIST_GATEWAY_ADMIN_TOKEN` and can be disabled with an explicitly empty
+  `FERNGEIST_GATEWAY_ADMIN_ADDR`.
+
 ## Release tags
 
 The **build** version (the daemon binary's `--version` and the mDNS

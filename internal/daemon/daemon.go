@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"slices"
 	"time"
 
@@ -64,6 +65,13 @@ var remoteProvision = func(ctx context.Context, cfg config.Config, localAddr str
 // one of the HTTP surfaces exits unexpectedly.
 func Run(ctx context.Context, build config.BuildInfo) error {
 	cfg := config.Load()
+	if err := cfg.ValidateAdmin(); err != nil {
+		return err
+	}
+	// Keep the credential out of agents and other subprocesses launched by the daemon.
+	if err := os.Unsetenv(config.AdminTokenEnv); err != nil {
+		return errors.New("clear admin token from subprocess environment")
+	}
 	logger, logSvc, err := logging.New(cfg.LogLevel, cfg.LogDir, cfg.LogMaxSize, cfg.LogMaxBackups)
 	if err != nil {
 		return fmt.Errorf("initialize logger: %w", err)

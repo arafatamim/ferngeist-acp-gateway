@@ -10,6 +10,11 @@ Ferngeist Gateway is designed to keep the public surface small and to make remot
   refuses requests with an `Origin` header or a `Host` that is not an IP
   literal or `localhost` (`403`), so web pages cannot reach it through
   cross-site requests or DNS rebinding.
+- Set `FERNGEIST_GATEWAY_ADMIN_TOKEN` in the daemon and in the environment of
+  any CLI that manages it. When the token is unset, any process that can reach
+  the loopback listener is trusted. Android apps on the same device share
+  loopback. If provisioning is complete, set `FERNGEIST_GATEWAY_ADMIN_ADDR` to
+  an empty value and restart the daemon to close the admin listener.
 
 ## Public API security
 

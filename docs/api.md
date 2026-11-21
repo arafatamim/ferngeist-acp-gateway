@@ -1633,7 +1633,14 @@ Attach tokens are single-use, short-lived (5-minute TTL) nonces used to prove ow
 
 Base path: `/admin/v1`
 
-The admin API is bound to localhost and is meant for local management only.
+The admin API listens on loopback for local management. When
+`FERNGEIST_GATEWAY_ADMIN_TOKEN` is set, send it as `Authorization: Bearer <token>`
+on every admin request. Missing or invalid credentials return `401`. The
+listener also rejects browser origins and unexpected Host headers.
+
+An empty `FERNGEIST_GATEWAY_ADMIN_ADDR` disables the admin listener.
+`daemon status` then uses `GET /v1/status` and reports the admin listener as
+disabled. The CLI reads the admin address and token from its environment.
 
 ### Status
 

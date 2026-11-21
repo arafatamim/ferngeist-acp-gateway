@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -29,8 +30,11 @@ func IsDaemonUnreachable(err error) bool { return errors.Is(err, ErrDaemonUnreac
 
 // Client talks to the daemon's loopback admin API.
 type Client struct {
-	baseURL    string
-	httpClient *http.Client
+	baseURL       string
+	adminDisabled bool
+	adminToken    *string
+	configErr     error
+	httpClient    *http.Client
 }
 
 type PairingStatus struct {
@@ -128,10 +132,26 @@ type errorResponse struct {
 }
 
 func New(cfg config.Config) *Client {
+	addr := strings.ToLower(cfg.AdminListenAddr)
+	if addr == "" {
+		addr = cfg.ListenAddr
+		if host, port, err := net.SplitHostPort(addr); err == nil && (host == "" || net.ParseIP(host).IsUnspecified()) {
+			if host == "::" {
+				addr = net.JoinHostPort("::1", port)
+			} else {
+				addr = net.JoinHostPort("127.0.0.1", port)
+			}
+		}
+	}
 	return &Client{
-		baseURL: strings.TrimRight("http://"+cfg.AdminListenAddr, "/"),
+		baseURL:       "http://" + addr,
+		adminDisabled: cfg.AdminListenAddr == "",
+		adminToken:    cfg.AdminToken,
+		configErr:     cfg.ValidateAdmin(),
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
+			// An admin credential is only for the configured listener.
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse },
 		},
 	}
 }
@@ -141,6 +161,9 @@ func (c *Client) StartPairing(ctx context.Context) (PairingStatus, error) {
 }
 
 func (c *Client) Status(ctx context.Context) (DaemonStatus, error) {
+	if c.adminDisabled {
+		return doJSON[DaemonStatus](c, ctx, http.MethodGet, "/v1/status", nil)
+	}
 	return doJSON[DaemonStatus](c, ctx, http.MethodGet, "/admin/v1/status", nil)
 }
 
@@ -191,6 +214,12 @@ func (c *Client) RemoveCustomAgent(ctx context.Context, id string) error {
 
 func doJSON[T any](c *Client, ctx context.Context, method, path string, body any) (T, error) {
 	var zero T
+	if c.configErr != nil {
+		return zero, c.configErr
+	}
+	if c.adminDisabled && path != "/v1/status" {
+		return zero, errors.New("admin API is disabled")
+	}
 
 	var requestBody []byte
 	if body != nil {
@@ -206,6 +235,9 @@ func doJSON[T any](c *Client, ctx context.Context, method, path string, body any
 		return zero, err
 	}
 	req.Header.Set("Accept", "application/json")
+	if !c.adminDisabled && c.adminToken != nil {
+		req.Header.Set("Authorization", "Bearer "+*c.adminToken)
+	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}

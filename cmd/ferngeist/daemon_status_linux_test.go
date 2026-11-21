@@ -59,3 +59,21 @@ func TestDaemonStatusPreservesStartupFailures(t *testing.T) {
 		t.Fatalf("unreachable exit code = %d, want %d", exitCodeFor(err), exitDaemonUnreachable)
 	}
 }
+
+func TestDaemonStatusUsesPublicStatusWhenAdminIsDisabled(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/status" || r.Header.Get("Authorization") != "" {
+			t.Error("expected public status without an admin credential")
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		_, _ = w.Write([]byte(`{"name":"ready"}`))
+	}))
+	t.Cleanup(server.Close)
+	configureActiveService(t, "")
+	t.Setenv("FERNGEIST_GATEWAY_LISTEN_ADDR", strings.TrimPrefix(server.URL, "http://"))
+	t.Setenv("FERNGEIST_GATEWAY_ADMIN_TOKEN", "test-admin-status-token")
+	if err := runDaemonStatus(); err != nil {
+		t.Fatalf("status with admin disabled: %v", err)
+	}
+}
