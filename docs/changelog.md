@@ -43,6 +43,8 @@ against the code.
 
 ## Unreleased
 
+- [additive] The agent catalog includes Jcode, detected on PATH. (2026-11-22)
+
 - [semantic] The default per-device session limit is seven across all agents.
   `FERNGEIST_GATEWAY_MAX_SESSIONS_PER_DEVICE` overrides the default. (2026-11-22)
 

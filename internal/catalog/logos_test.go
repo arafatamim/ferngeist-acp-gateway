@@ -29,6 +29,7 @@ func TestBundledLogoFallback(t *testing.T) {
 				{ID: "custom-muse-code", DisplayName: "Muse Code", Command: "muse"},
 				{ID: "custom-reasonix", DisplayName: "Reasonix", Command: "reasonix"},
 				{ID: "custom-zcode", DisplayName: "ZCode", Command: "zcode"},
+				{ID: "custom-jcode", DisplayName: "Jcode", Command: "jcode"},
 				{ID: "custom-other", DisplayName: "Other", Command: "other"},
 			}
 		},
@@ -51,7 +52,7 @@ func TestBundledLogoFallback(t *testing.T) {
 		switch agent.ID {
 		case "custom-oh-my-pi", "custom-deepseek-harness", "custom-command-code",
 			"custom-codewhale", "custom-kiro", "custom-letta", "custom-mimo-code",
-			"custom-muse-code", "custom-reasonix", "custom-zcode":
+			"custom-muse-code", "custom-reasonix", "custom-zcode", "custom-jcode", "jcode":
 			const prefix = "data:image/svg+xml;base64,"
 			if !strings.HasPrefix(payload.Icon, prefix) {
 				t.Fatalf("%s: missing bundled icon", agent.ID)

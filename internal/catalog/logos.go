@@ -6,6 +6,9 @@ import (
 	"strings"
 )
 
+//go:embed logos/jcode.svg
+var jcodeLogo string
+
 //go:embed logos/command-code.svg
 var commandCodeLogo string
 
@@ -49,6 +52,7 @@ var openclawLogo string
 var openhandsLogo string
 
 var bundledLogos = map[string]string{
+	"jcode":            logoDataURL(jcodeLogo),
 	"command-code":     logoDataURL(commandCodeLogo),
 	"oh-my-pi":         logoDataURL(ohMyPiLogo),
 	"deepseek-harness": logoDataURL(deepseekHarnessLogo),

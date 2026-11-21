@@ -1,5 +1,8 @@
 SVG viewBoxes are square and fit the artwork without stretching.
 
+jcode.svg: https://jcode.sh/favicon.svg
+Official website favicon. Redistribution permission and trademark rights are unverified.
+
 command-code.svg: https://github.com/CommandCodeAI/command-code/blob/630bbf418f62bcdea627e57e6dca60151452355b/.github/commandcode/symbols/symbol.svg
 Recolored monochrome. No explicit redistribution license found. Command Code's terms reserve trademark use; permission is unverified.
 
