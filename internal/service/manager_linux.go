@@ -42,11 +42,33 @@ const (
 	initOpenRC  = "openrc"
 )
 
+// initToolDirs are where init-system tools live, in preference order. Detection
+// cannot trust the invoking shell's PATH: Alpine ships rc-service, rc-update and
+// supervise-daemon in /sbin, and a minimal PATH (or a sudo secure_path without
+// /sbin) hides them, which made install report a missing systemctl on a host
+// that has OpenRC.
+var initToolDirs = []string{"/sbin", "/usr/sbin", "/usr/local/sbin", "/bin", "/usr/bin", "/usr/local/bin"}
+
+// findInitTool resolves name from PATH and then the standard directories,
+// returning an absolute path so callers exec the tool they detected.
+func findInitTool(name string) (string, bool) {
+	if path, err := exec.LookPath(name); err == nil {
+		return path, true
+	}
+	for _, dir := range initToolDirs {
+		candidate := filepath.Join(dir, name)
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			return candidate, true
+		}
+	}
+	return "", false
+}
+
 func detectLinuxInitSystem() string {
-	if _, err := exec.LookPath("systemctl"); err == nil {
+	if _, ok := findInitTool("systemctl"); ok {
 		return initSystemd
 	}
-	if _, err := exec.LookPath("rc-service"); err == nil {
+	if _, ok := findInitTool("rc-service"); ok {
 		return initOpenRC
 	}
 	return ""

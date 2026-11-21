@@ -63,23 +63,31 @@ depend() {
 	after net
 }
 
-# supervise-daemon inherits this shell's exported environment: set -a exports
+# supervise-daemon inherits this shell's exported environment, so set -a exports
 # every FERNGEIST_GATEWAY_* assignment from the same env file the systemd unit
-# loads via EnvironmentFile. HOME must be exported because OpenRC sets no
-# login environment for command_user (systemd does for User= units) and the
-# agents the gateway spawns resolve their config from it. The override file is
-# optional. The sourced PATH is the user's interactive one, which need not
-# contain /sbin where supervise-daemon lives, so the system paths go back on
-# for openrc-run itself.
+# loads via EnvironmentFile. HOME must be exported because OpenRC sets no login
+# environment for command_user (systemd does for User= units) and the harness
+# resolves agent config from it. The override file is optional.
+#
+# The env file also sets PATH to the installing user's, which must NOT stay in
+# this shell: openrc-run resolves its own helpers through PATH, and with a
+# replaced PATH it loses them mid-start. It then reports "failed to start" and
+# never records the service as started, while supervise-daemon keeps running the
+# daemon -- so status and stop both saw a stopped service and uninstall orphaned
+# a live one. Keep openrc-run's PATH and hand the user's PATH to the child with
+# supervise-daemon's own --env instead.
 start_pre() {
+	_rc_path="$PATH"
 	set -a
 	. "%s"
-	set +a
 	if [ -f "%s" ]; then
 		. "%s"
 	fi
+	set +a
+	_gateway_path="$PATH"
+	PATH="$_rc_path"
 	export HOME="%s"
-	PATH="$PATH:/sbin:/usr/sbin"
+	supervise_daemon_args="--env PATH=$_gateway_path"
 }
 `
 
@@ -343,10 +351,14 @@ func (m *openrcManager) Status() (Status, error) {
 
 	// rc-service status reports with informational exit codes (stopped is 3,
 	// crashed is 32), so only the message text is a failure signal.
-	out, err := exec.Command("rc-service", openrcServiceName, "status").CombinedOutput()
+	cmd, err := openrcCmd("rc-service", openrcServiceName, "status")
+	if err != nil {
+		return Status{}, err
+	}
+	out, runErr := cmd.CombinedOutput()
 	message := strings.TrimSpace(string(out))
-	if err != nil && message == "" {
-		message = err.Error()
+	if runErr != nil && message == "" {
+		message = runErr.Error()
 	}
 	active, sub, ok := openrcStatusFromMessage(message)
 	if !ok {
@@ -373,8 +385,22 @@ func (m *openrcManager) LogDir() (string, error) {
 	return linuxPathsForHome(home).logDir, nil
 }
 
+// openrcCmd resolves an OpenRC tool to an absolute path before exec. Detection
+// already resolves it, and the tool does not have to be on the caller's PATH:
+// Alpine keeps rc-service and rc-update in /sbin.
+func openrcCmd(tool string, args ...string) (*exec.Cmd, error) {
+	path, ok := findInitTool(tool)
+	if !ok {
+		return nil, fmt.Errorf("%w: %s is not available", ErrServiceUnsupportedConfig, tool)
+	}
+	return exec.Command(path, args...), nil
+}
+
 func (m *openrcManager) rcService(args ...string) error {
-	cmd := exec.Command("rc-service", args...)
+	cmd, err := openrcCmd("rc-service", args...)
+	if err != nil {
+		return err
+	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		message := strings.TrimSpace(string(out))
@@ -387,7 +413,10 @@ func (m *openrcManager) rcService(args ...string) error {
 }
 
 func (m *openrcManager) rcUpdate(args ...string) error {
-	cmd := exec.Command("rc-update", args...)
+	cmd, err := openrcCmd("rc-update", args...)
+	if err != nil {
+		return err
+	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		message := strings.TrimSpace(string(out))
@@ -403,7 +432,10 @@ func (m *openrcManager) rcUpdate(args ...string) error {
 // desired end state, so rc-update's "not in the runlevel" refusal is a no-op —
 // the same treatment systemd's "no such unit" gets.
 func (m *openrcManager) rcUpdateDel() error {
-	cmd := exec.Command("rc-update", "del", openrcServiceName, openrcRunlevel)
+	cmd, err := openrcCmd("rc-update", "del", openrcServiceName, openrcRunlevel)
+	if err != nil {
+		return err
+	}
 	out, err := cmd.CombinedOutput()
 	if err == nil {
 		return nil

@@ -106,7 +106,9 @@ func TestOpenRCInstallWritesScriptAndStartsService(t *testing.T) {
 		"respawn_delay=2",
 		`. "` + paths.envPath + `"`,
 		`export HOME="` + account.home + `"`,
-		`PATH="$PATH:/sbin:/usr/sbin"`,
+		`_rc_path="$PATH"`,
+		`PATH="$_rc_path"`,
+		`supervise_daemon_args="--env PATH=$_gateway_path"`,
 	} {
 		if !strings.Contains(string(script), want) {
 			t.Fatalf("init script missing %q:\n%s", want, script)
@@ -302,5 +304,35 @@ func TestOpenRCStartRequiresInstalled(t *testing.T) {
 	err := (&openrcManager{}).Start()
 	if !errors.Is(err, ErrServiceNotInstalled) {
 		t.Fatalf("Start() = %v, want ErrServiceNotInstalled", err)
+	}
+}
+
+// TestInitSystemDetectionIgnoresCallerPath pins the fix for a real Alpine host:
+// rc-service lives in /sbin, and installing with a minimal PATH made detection
+// fall through to the systemd manager, which then reported a missing systemctl
+// on a host that has OpenRC. Detection must find a standard-directory tool the
+// caller's PATH does not contain, and exec the same absolute path it found.
+func TestInitSystemDetectionIgnoresCallerPath(t *testing.T) {
+	dir := t.TempDir()
+	rcService := filepath.Join(dir, "rc-service")
+	if err := os.WriteFile(rcService, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write fake rc-service: %v", err)
+	}
+	// The tool is not reachable by name: only the standard-directory search
+	// can find it.
+	t.Setenv("PATH", "")
+	prev := initToolDirs
+	initToolDirs = []string{dir}
+	t.Cleanup(func() { initToolDirs = prev })
+
+	if got := detectLinuxInitSystem(); got != initOpenRC {
+		t.Fatalf("detectLinuxInitSystem() = %q, want %q when rc-service is off PATH", got, initOpenRC)
+	}
+	cmd, err := openrcCmd("rc-service", "status")
+	if err != nil {
+		t.Fatalf("openrcCmd(rc-service) = %v, want the resolved tool", err)
+	}
+	if cmd.Path != rcService {
+		t.Fatalf("openrcCmd path = %q, want the resolved %q", cmd.Path, rcService)
 	}
 }
