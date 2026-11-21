@@ -2,10 +2,41 @@ package main
 
 import (
 	"os"
+	"os/user"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
+
+// TestServiceBinaryPathUnderSudoTargetsSudoingUser pins the OpenRC update
+// flow: `sudo ferngeist-gateway update` must swap the sudoing user's
+// installed binary, not a phantom under /root. The expected home comes from
+// /etc/passwd (user.Current), an oracle independent of $HOME — which the
+// test points elsewhere so a regressed non-sudo path cannot pass it.
+func TestServiceBinaryPathUnderSudoTargetsSudoingUser(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("sudo-home targeting matters on linux (OpenRC service management)")
+	}
+	u, err := user.Current()
+	if err != nil {
+		t.Skipf("cannot resolve current user: %v", err)
+	}
+	prev := invokingEUID
+	invokingEUID = func() int { return 0 }
+	t.Cleanup(func() { invokingEUID = prev })
+	t.Setenv("SUDO_USER", u.Username)
+	t.Setenv("HOME", "/nonexistent-root-home")
+
+	got, err := serviceBinaryPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(u.HomeDir, ".local", "share", "ferngeist-gateway", "bin", "ferngeist-gateway")
+	if got != want {
+		t.Fatalf("serviceBinaryPath() under sudo = %q, want the sudoing user's %q", got, want)
+	}
+}
 
 // TestRunUpdateRefusesPackageChannel verifies the binary-level gate: a build
 // with updateChannel != "self" (set via ldflags by goreleaser for deb/rpm

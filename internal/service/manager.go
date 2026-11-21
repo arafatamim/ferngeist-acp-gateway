@@ -27,6 +27,10 @@ const (
 
 const linuxUnitName = "ferngeist-gateway.service"
 
+// openrcServiceName is the OpenRC runscript name; untagged like
+// linuxUnitName so the platform-neutral error tests can reference it.
+const openrcServiceName = "ferngeist-gateway"
+
 // remoteModeRequested reports whether the operator asked for remote access
 // (any valid Tailscale mode). An empty string is NOT remote — it is the
 // LAN/localhost default.

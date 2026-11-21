@@ -1,8 +1,13 @@
 # Installation
 
 Ferngeist Gateway is a self-hosted backend service for ACP-compatible agents.
-Pick the channel for your OS; all channels install the daemon as a per-user
-service that starts at login and stays running.
+Pick the channel for your OS; all channels install the daemon as a background
+service that starts without you starting it by hand and stays running (a
+per-user service on systemd and launchd, a per-user scheduled task on Windows, a
+system service running as your user on OpenRC). Whether it survives a *reboot*
+with nobody logged in depends on the platform: always on OpenRC, never on a
+Windows logon task, and on systemd and macOS it needs the user's session to
+outlive logins — systemd's linger, which the installer enables.
 
 > **Channel availability:** the package channels below (Homebrew tap, apt/dnf,
 > pacman) are published by the goreleaser release pipeline on the next tagged
@@ -58,7 +63,9 @@ a per-user scheduled task (no UAC prompt), and adds the CLI
 to your user PATH. The gateway listens on your local network by default (same as
 the macOS/Linux installer); pass `-Localhost` to keep it on localhost only,
 `-Yes` to skip the install prompt, `-KeepDownloads` to keep the
-downloaded zip. Updates are manual: run `ferngeist-gateway update` when a new
+downloaded zip. The task starts when you log on, so a machine that reboots and
+nobody logs into does not start the gateway — arrange an automatic logon, or
+keep the box logged in, if it is meant to run headless. Updates are manual: run `ferngeist-gateway update` when a new
 release is announced.
 
 ### Manual (portable zip)
@@ -184,6 +191,29 @@ sudo pacman -Syu
 sudo pacman -S ferngeist-gateway
 ```
 
+### Alpine / Gentoo / Artix (OpenRC)
+
+On a host without systemd, `daemon install` detects OpenRC and registers a
+system service instead of a user unit. OpenRC 0.60+ also has user services
+(`rc-service --user`, runscripts in `~/.config/rc/init.d`), but they are bound
+to a login session, and OpenRC starts a user session at boot only through a
+system `user.$USER` service — which needs root too. So this install is a system
+service that needs sudo: run it from the account the gateway should run as.
+
+```bash
+sudo ./ferngeist-gateway daemon install
+```
+
+The generated `/etc/init.d/ferngeist-gateway` runscript supervises the daemon
+with `supervise-daemon` (crash restarts, like the systemd unit's
+`Restart=on-failure`) and runs it as the sudoing user, with state in that
+user's `~/.local/share/ferngeist-gateway` — the same layout as the systemd
+install, and no linger step is needed because the service is enabled in the
+`default` runlevel. `daemon uninstall`, `start`, `stop`, and `restart` also
+require sudo on these hosts, and so does `update` once the service is
+installed — it stops the service to replace its binary, and it replaces the
+*sudoing* user's copy, not root's.
+
 ### Manual (tarball)
 
 ```bash
@@ -212,8 +242,9 @@ gh attestation verify ferngeist-gateway_<ver>_linux_amd64.tar.gz --repo arafatam
 
 `ferngeist-gateway daemon uninstall` stops the daemon and removes the
 background-service registration. Run it from the same binary you installed
-(or any copy). On Windows, run it from an elevated terminal; on Linux and
-macOS run it as your own user (no `sudo`):
+(or any copy). On Windows, run it from an elevated terminal; on systemd
+Linux and macOS run it as your own user (no `sudo`); on OpenRC Linux run it
+with `sudo`, like the install:
 
 ```powershell
 ferngeist-gateway daemon uninstall
@@ -232,6 +263,7 @@ All platforms share the same contract:
 | Windows (scheduled task) | task + daemon stopped — binary, wrapper, config, data stay | full install dir (binary, config, data) |
 | macOS (LaunchAgent) | LaunchAgent plist + daemon stopped — binary, config, data stay | full install dir |
 | Linux (systemd user unit) | unit file + daemon stopped — binary, config, data stay | full install dir |
+| Linux (OpenRC runscript) | init script + runlevel entry + daemon stopped — binary, config, data stay | full install dir |
 
 Notes:
 

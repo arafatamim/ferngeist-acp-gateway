@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/user"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -203,11 +204,32 @@ func sameFileAsAny(path string, others []string) bool {
 	return false
 }
 
+// invokingEUID lets tests drive targetHome's sudo branch without real
+// privileges; lingerEnabled is the precedent for a cmd-level test seam.
+var invokingEUID = os.Geteuid
+
+// targetHome resolves the home the service binary lives under: the sudoing
+// user's when run under sudo (the OpenRC system service needs root, and root's
+// own home has no gateway install), else the invoking user's home.
+// shortcut: user.Lookup with CGO off reads /etc/passwd only, so a sudo user
+// from LDAP/SSSD fails here; upgrade to a name-service query if that matters.
+func targetHome() (string, error) {
+	sudoUser := os.Getenv("SUDO_USER")
+	if sudoUser == "" || invokingEUID() != 0 {
+		return os.UserHomeDir()
+	}
+	u, err := user.Lookup(sudoUser)
+	if err != nil {
+		return "", fmt.Errorf("look up sudo user %q: %w", sudoUser, err)
+	}
+	return u.HomeDir, nil
+}
+
 // serviceBinaryPath returns the installed service binary path for this OS,
 // mirroring the path layout in internal/service/{manager_linux,manager_darwin,
 // manager_windows}.go.
 func serviceBinaryPath() (string, error) {
-	home, err := os.UserHomeDir()
+	home, err := targetHome()
 	if err != nil {
 		return "", fmt.Errorf("resolve user home directory: %w", err)
 	}

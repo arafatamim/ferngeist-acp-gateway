@@ -30,7 +30,32 @@ WantedBy=default.target
 
 type linuxManager struct{}
 
+// Linux picks its service manager at runtime, not by build tag: both managers
+// compile into the same Linux binary, and which one is real depends on the
+// booted host. systemd wins when both tools exist (a systemd host with the
+// openrc package installed is still systemd). A host with neither keeps the
+// systemd manager, whose ensureSystemctlAvailable error names the missing tool.
+var linuxInitSystem = detectLinuxInitSystem
+
+const (
+	initSystemd = "systemd"
+	initOpenRC  = "openrc"
+)
+
+func detectLinuxInitSystem() string {
+	if _, err := exec.LookPath("systemctl"); err == nil {
+		return initSystemd
+	}
+	if _, err := exec.LookPath("rc-service"); err == nil {
+		return initOpenRC
+	}
+	return ""
+}
+
 func newOSManager() Manager {
+	if linuxInitSystem() == initOpenRC {
+		return &openrcManager{}
+	}
 	return &linuxManager{}
 }
 
@@ -48,23 +73,8 @@ func (m *linuxManager) Install(options InstallOptions) error {
 		return err
 	}
 
-	if err := os.MkdirAll(paths.rootDir, 0o755); err != nil {
-		return fmt.Errorf("create service root directory: %w", err)
-	}
-	if err := os.MkdirAll(paths.binDir, 0o755); err != nil {
-		return fmt.Errorf("create service bin directory: %w", err)
-	}
-	if err := os.MkdirAll(paths.configDir, 0o755); err != nil {
-		return fmt.Errorf("create service config directory: %w", err)
-	}
-	if err := os.MkdirAll(paths.logDir, 0o755); err != nil {
-		return fmt.Errorf("create service log directory: %w", err)
-	}
-	if err := os.MkdirAll(paths.managedBinDir, 0o755); err != nil {
-		return fmt.Errorf("create managed bin directory: %w", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(paths.dbPath), 0o755); err != nil {
-		return fmt.Errorf("create state db directory: %w", err)
+	if err := mkdirLinuxState(paths); err != nil {
+		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(paths.unitPath), 0o755); err != nil {
 		return fmt.Errorf("create systemd user directory: %w", err)
@@ -103,18 +113,50 @@ func (m *linuxManager) Install(options InstallOptions) error {
 }
 
 func installLinuxFiles(paths linuxPaths, options InstallOptions) error {
-	execPath, err := serviceExecutable(paths.binaryPath)
+	written, err := writeLinuxServiceFiles(paths, options)
 	if err != nil {
 		return err
 	}
+	return writeLinuxUnitFile(written)
+}
+
+// writeLinuxServiceFiles installs everything but the init-system unit: the
+// service binary (left in place when a package manager owns it), the env
+// file both Linux managers load, and the recorded install options.
+func writeLinuxServiceFiles(paths linuxPaths, options InstallOptions) (linuxPaths, error) {
+	execPath, err := serviceExecutable(paths.binaryPath)
+	if err != nil {
+		return paths, err
+	}
 	paths.execPath = execPath
 	if err := writeLinuxEnvFile(paths, options); err != nil {
-		return err
+		return paths, err
 	}
 	if err := saveInstallOptions(paths.configDir, options); err != nil {
-		return err
+		return paths, err
 	}
-	return writeLinuxUnitFile(paths)
+	return paths, nil
+}
+
+// mkdirLinuxState creates the state tree both Linux managers install into.
+func mkdirLinuxState(paths linuxPaths) error {
+	dirs := []struct {
+		path string
+		what string
+	}{
+		{paths.rootDir, "root"},
+		{paths.binDir, "bin"},
+		{paths.configDir, "config"},
+		{paths.logDir, "log"},
+		{paths.managedBinDir, "managed bin"},
+		{filepath.Dir(paths.dbPath), "state db"},
+	}
+	for _, dir := range dirs {
+		if err := os.MkdirAll(dir.path, 0o755); err != nil {
+			return fmt.Errorf("create service %s directory: %w", dir.what, err)
+		}
+	}
+	return nil
 }
 
 // ensureLinger makes the user manager outlive logins so the gateway runs at
@@ -313,9 +355,14 @@ func resolveLinuxPaths() (linuxPaths, error) {
 	if err != nil || strings.TrimSpace(home) == "" {
 		return linuxPaths{}, fmt.Errorf("resolve user home directory: %w", err)
 	}
+	return linuxPathsForHome(home), nil
+}
 
+// linuxPathsForHome lays out the Linux state tree under the given home. The
+// systemd user unit lives under ~/.config; the OpenRC manager derives its
+// script path from /etc instead, but shares everything else from here.
+func linuxPathsForHome(home string) linuxPaths {
 	rootDir := filepath.Join(home, ".local", "share", "ferngeist-gateway")
-	unitPath := filepath.Join(home, ".config", "systemd", "user", linuxUnitName)
 
 	return linuxPaths{
 		rootDir:       rootDir,
@@ -328,8 +375,8 @@ func resolveLinuxPaths() (linuxPaths, error) {
 		execPath:      filepath.Join(rootDir, "bin", "ferngeist-gateway"),
 		envPath:       filepath.Join(rootDir, "config", "daemon.env"),
 		overridePath:  filepath.Join(rootDir, "config", "daemon.override.env"),
-		unitPath:      unitPath,
-	}, nil
+		unitPath:      filepath.Join(home, ".config", "systemd", "user", linuxUnitName),
+	}
 }
 
 func writeLinuxEnvFile(paths linuxPaths, options InstallOptions) error {

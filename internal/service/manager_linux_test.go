@@ -11,8 +11,14 @@ import (
 	"testing"
 )
 
-// TestLinuxManagerType verifies linux builds select the linux manager.
+// TestLinuxManagerType verifies linux builds select the linux manager when
+// the host runs systemd — the detection seam is pinned so the test stays
+// deterministic on any host, OpenRC ones included.
 func TestLinuxManagerType(t *testing.T) {
+	prev := linuxInitSystem
+	linuxInitSystem = func() string { return initSystemd }
+	t.Cleanup(func() { linuxInitSystem = prev })
+
 	m := NewManager()
 	if _, ok := m.(*linuxManager); !ok {
 		t.Fatalf("NewManager() = %T, want *linuxManager", m)

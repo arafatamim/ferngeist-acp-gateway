@@ -23,6 +23,7 @@ Its main job is to expose ACP agents through a unified WebSocket API. It discove
 - `internal/daemon` — wiring and startup reconciliation
 - `internal/remote` — Tailscale adapter (CLI or embedded tsnet), funnel/serve provisioning, domain types (`Result`, `ErrAuthRequired`, `RemoteSetupSnapshot`), and the provisioning lifecycle (`Access`): retry loop, public URL persistence, paired-device notifications, and auth-pending state for the status API
 - `internal/adminclient` — typed HTTP client for the admin API (used by `daemon status` and `daemon install`)
+- `internal/service` — background-service management per platform: install, start/stop/restart, status and uninstall, plus the per-platform paths the daemon's state lives under
 
 ## Harness profiles
 
@@ -265,6 +266,44 @@ Single-use, short-lived (5-minute TTL) nonces used to prove ownership of a sessi
 ## Startup reconciliation
 
 On daemon restart, all sessions in `active` or `disconnected` status are transitioned to `failed` in SQLite, since their backing processes are gone.
+
+## Background service
+
+`internal/service` registers the daemon with the host's service manager. One
+invariant holds on every platform: **the daemon runs in the installing user's
+context** — their account, their home, their session — because everything it
+does depends on that context. Agents resolve from the user's `PATH` and run on
+the `bun`/`node` found there, with the ones it installs itself living in its
+own `managed-bin` directory under their home. It reads and writes those agents'
+credential and config stores (Claude Code's `~/.claude`, Hermes's `~/.hermes`),
+and captures the session's `cwd` as the workspace root.
+
+What varies is how each platform keeps that context alive at boot, so the
+mechanisms differ on purpose:
+
+- **systemd** — a user unit under `~/.config/systemd/user`, kept alive across
+  logins by lingering, which `daemon install` enables best-effort
+  (`loginctl enable-linger`) and reminds the operator about when polkit refuses.
+- **OpenRC** — a system runscript in `/etc/init.d` with `command_user`, because
+  OpenRC has no linger equivalent. This is the one platform where install and
+  the lifecycle commands need sudo. OpenRC 0.60+ user services exist but are
+  session-bound; their boot-persistent form is a system `user.$USER` service,
+  so it needs root anyway.
+- **macOS** — a LaunchAgent in the `gui/$UID` domain, so it starts at login and
+  keeps access to the login Keychain.
+- **Windows** — a Task Scheduler task with a logon trigger, running as the user
+  with `InteractiveToken` and `LeastPrivilege`. A Windows service would need
+  either `LocalSystem`, which cannot read per-user DPAPI secrets or the user's
+  `%LOCALAPPDATA%` toolchain, or a stored account password.
+- **Android/Termux** — no service manager, so the daemon is started by hand.
+
+Two consequences follow. The system-level service managers (`systemctl` without
+`--user`, `launchctl` on `system/` or a LaunchDaemon) are not a stricter version
+of this model — they would move the daemon out of the user's session, which on
+macOS and Windows breaks the credentials its agents need. And because OpenRC
+has no user-manager equivalent, its lifecycle commands take sudo while
+systemd's, macOS's and Windows's do not; that asymmetry is the price of running
+as a user at boot, not an unfinished port.
 
 ## Remote access provisioning
 
