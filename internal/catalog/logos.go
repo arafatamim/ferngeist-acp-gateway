@@ -48,11 +48,6 @@ var openclawLogo string
 //go:embed logos/openhands.svg
 var openhandsLogo string
 
-//go:embed logos/default.svg
-var defaultLogo string
-
-var defaultLogoURL = logoDataURL(defaultLogo)
-
 var bundledLogos = map[string]string{
 	"command-code":     logoDataURL(commandCodeLogo),
 	"oh-my-pi":         logoDataURL(ohMyPiLogo),
@@ -86,8 +81,5 @@ func bundledLogo(id string) string {
 	case "hermes-agent":
 		id = "hermes"
 	}
-	if logo := bundledLogos[id]; logo != "" {
-		return logo
-	}
-	return defaultLogoURL
+	return bundledLogos[id]
 }

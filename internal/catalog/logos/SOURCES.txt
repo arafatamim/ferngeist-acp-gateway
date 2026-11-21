@@ -42,4 +42,3 @@ Recolored monochrome with transparent eyes. Repository license: THIRD_PARTY_NOTI
 openhands.svg: https://asvg.app/assets/svg/openhands/openhands-symbol-monochrome.svg
 Third-party vector; original artwork provenance and redistribution permission unverified.
 
-default.svg: Original generic agent icon.

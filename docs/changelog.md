@@ -43,6 +43,9 @@ against the code.
 
 ## Unreleased
 
+- [semantic] Agent catalog entries with no bundled logo no longer receive a
+  generic fallback `icon`; the field is omitted.
+
 - [semantic] Hermes native chats appended to `session/list` come from the
   launched agent's store, including after a runtime restart overrides
   `HERMES_HOME` or the home directory. (2026-11-21)

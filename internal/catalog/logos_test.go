@@ -51,7 +51,7 @@ func TestBundledLogoFallback(t *testing.T) {
 		switch agent.ID {
 		case "custom-oh-my-pi", "custom-deepseek-harness", "custom-command-code",
 			"custom-codewhale", "custom-kiro", "custom-letta", "custom-mimo-code",
-			"custom-muse-code", "custom-reasonix", "custom-zcode", "custom-other":
+			"custom-muse-code", "custom-reasonix", "custom-zcode":
 			const prefix = "data:image/svg+xml;base64,"
 			if !strings.HasPrefix(payload.Icon, prefix) {
 				t.Fatalf("%s: missing bundled icon", agent.ID)
@@ -73,6 +73,10 @@ func TestBundledLogoFallback(t *testing.T) {
 		case "command-code":
 			if payload.Registry.Icon != "https://example.com/registry.svg" || payload.Icon != "" {
 				t.Fatalf("registry icon lost precedence: %s", data)
+			}
+		case "custom-other":
+			if payload.Icon != "" {
+				t.Fatalf("unknown agent got a fallback icon: %s", data)
 			}
 		}
 	}

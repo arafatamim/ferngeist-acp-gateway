@@ -276,8 +276,8 @@ Base path: `/v1`
       registry, and is omitted when no registry icon exists.
     - `icon` — optional bundled monochrome SVG as a base64 data URL. Clients
       should prefer `registry.icon`, then decode `icon`, then use a neutral
-      glyph. When no registry icon exists, the gateway supplies a known agent's
-      logo or a generic agent icon.
+      glyph. The gateway supplies a known agent's logo; agents with no bundled
+      logo omit `icon`.
     - `quotaProvider` — optional CodexBar provider ID for highlighting a known
       agent's quota entry (e.g. `codex-acp` → `codex`). Omitted for unknown,
       multi-provider, and custom agents. It does not guarantee the provider is
