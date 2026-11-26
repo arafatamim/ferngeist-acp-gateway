@@ -7,10 +7,92 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestGatewayLogKeepsActiveAndRotatedFilesPrivate(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires POSIX permissions")
+	}
+	dir := t.TempDir()
+	legacy := []string{"gateway.log", "gateway.log.1", "gateway.log.5"}
+	for _, name := range append(legacy, "gateway.log.old") {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte("legacy record\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	private := filepath.Join(dir, "gateway.log.4")
+	if err := os.WriteFile(private, nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewService(dir, "gateway.log", 15, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	for _, name := range legacy {
+		assertLogMode(t, dir, name, 0o600)
+	}
+	if _, err := service.Write([]byte("new record\n")); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"gateway.log", "gateway.log.1", "gateway.log.2", "gateway.log.5"} {
+		assertLogMode(t, dir, name, 0o600)
+	}
+	assertLogMode(t, dir, "gateway.log.old", 0o644)
+	assertLogMode(t, dir, "gateway.log.4", 0)
+}
+
+func TestGatewayLogRejectsLinksWithoutChangingTarget(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires POSIX permissions")
+	}
+	for _, tc := range []struct {
+		name string
+		link func(string, string) error
+	}{
+		{"gateway.log", os.Symlink},
+		{"gateway.log.1", os.Symlink},
+		{"gateway.log.2", os.Link},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			target := filepath.Join(dir, "outside.log")
+			if err := os.WriteFile(target, nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(target, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := tc.link(target, filepath.Join(dir, tc.name)); err != nil {
+				t.Fatal(err)
+			}
+			if service, err := NewService(dir, "gateway.log", 0, 0); err == nil {
+				service.Close()
+				t.Error("NewService succeeded with a linked log")
+			}
+			assertLogMode(t, dir, "outside.log", 0o644)
+		})
+	}
+}
+
+func assertLogMode(t *testing.T, dir, name string, want os.FileMode) {
+	t.Helper()
+	info, err := os.Stat(filepath.Join(dir, name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != want {
+		t.Errorf("%s mode = %04o, want %04o", name, got, want)
+	}
+}
 
 func TestPrettyLogLineFormatsSlogJSONAndPassesThroughOtherText(t *testing.T) {
 	cases := []struct {

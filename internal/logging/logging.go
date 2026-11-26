@@ -18,6 +18,7 @@ import (
 )
 
 const defaultLogFileName = "gateway.log"
+const defaultLogFileMode = 0o600
 
 // Service is a tiny rolling log writer used by the gateway for local diagnostics
 // export. It intentionally avoids introducing a heavier logging dependency.
@@ -65,13 +66,14 @@ func (p prettyWriter) Write(b []byte) (int, error) {
 	return len(b), nil
 }
 
+// NewService opens the rolling log with owner-only permissions on Unix.
 func NewService(dir, fileName string, maxSize int64, maxBackups int) (*Service, error) {
-	return NewServiceWithMode(dir, fileName, maxSize, maxBackups, 0o644)
+	return NewServiceWithMode(dir, fileName, maxSize, maxBackups, defaultLogFileMode)
 }
 
 // NewServiceWithMode is like NewService but with a configurable file mode for
-// the active log (and its rotated backups). The gateway log uses the default
-// 0644; the frame log opts into 0600 because it carries raw conversation data.
+// the active log (and its rotated backups). The gateway and frame logs use
+// 0600 because diagnostics can include sensitive data.
 func NewServiceWithMode(dir, fileName string, maxSize int64, maxBackups int, mode os.FileMode) (*Service, error) {
 	if maxSize <= 0 {
 		maxSize = 1024 * 1024
@@ -80,7 +82,7 @@ func NewServiceWithMode(dir, fileName string, maxSize int64, maxBackups int, mod
 		maxBackups = 3
 	}
 	if mode == 0 {
-		mode = 0o644
+		mode = defaultLogFileMode
 	}
 
 	service := &Service{
@@ -91,6 +93,10 @@ func NewServiceWithMode(dir, fileName string, maxSize int64, maxBackups int, mod
 		fileMode:   mode,
 	}
 	if err := service.ensureFileLocked(); err != nil {
+		return nil, err
+	}
+	if err := service.restrictBackups(); err != nil {
+		_ = service.Close() // Startup failed before writing any records.
 		return nil, err
 	}
 	return service, nil
@@ -314,7 +320,7 @@ func (s *Service) ensureFileLocked() error {
 	}
 
 	path := filepath.Join(s.dir, s.fileName)
-	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, s.fileMode)
+	file, err := s.openActiveLog(path)
 	if err != nil {
 		return err
 	}

@@ -14,6 +14,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 
 	_ "modernc.org/sqlite"
 )
@@ -29,6 +30,9 @@ type SQLiteStore struct {
 // Open initializes the SQLite database and applies numbered schema migrations
 // before the gateway starts serving requests.
 func Open(path string) (*SQLiteStore, error) {
+	if err := protectDatabaseFiles(path); err != nil {
+		return nil, fmt.Errorf("protect database files: %w", err)
+	}
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, err
@@ -51,12 +55,15 @@ func Open(path string) (*SQLiteStore, error) {
 	// WAL moves it to a sequential log append. busy_timeout avoids
 	// SQLITE_BUSY flakes under the single-writer + readers contention.
 	if _, err := db.ExecContext(context.Background(), "PRAGMA journal_mode=WAL"); err != nil {
+		_ = db.Close() // Preserve the startup error.
 		return nil, err
 	}
 	if _, err := db.ExecContext(context.Background(), "PRAGMA synchronous=NORMAL"); err != nil {
+		_ = db.Close() // Preserve the startup error.
 		return nil, err
 	}
 	if _, err := db.ExecContext(context.Background(), "PRAGMA busy_timeout=5000"); err != nil {
+		_ = db.Close() // Preserve the startup error.
 		return nil, err
 	}
 

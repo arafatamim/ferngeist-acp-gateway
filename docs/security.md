@@ -81,6 +81,12 @@ Remote diagnostics export is disabled by default unless enabled in configuration
 
 This helps avoid exposing logs and runtime details unless you explicitly want that.
 
+On Unix, the gateway uses owner-only file modes for its state database,
+SQLite sidecars, and gateway logs. Opening existing state and logs also
+removes group and other access, including from numbered log backups.
+Managed files must be regular files with a single link. On Windows, the
+gateway relies on filesystem access controls.
+
 Shared HTTP request logs replace `path` and `acpSessionId` query values with
 `redacted`, as they do for `access_token`, `token`, and `authorization`.
 Matching is case-insensitive and covers duplicate keys and percent-encoded
