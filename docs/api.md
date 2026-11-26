@@ -237,19 +237,16 @@ Base path: `/v1`
       "mode": "tailscale",
       "scope": "public",
       "healthy": true,
-      "provisioningState": "ready",
-      "publicUrl": "https://ferngeist-gateway.tail123.ts.net",
-      "authRequired": false,
-      "authUrl": ""
+      "provisioningState": "ready"
     }
     ```
   - `mode` is one of: `tailscale`, `cloudflare_tunnel`, `manual_reverse_proxy`, `configured` (invalid URL), `lan_direct`, `local_only`, `tsnet`.
   - `scope` is one of: `public`, `private`, `unknown`, `lan`, `local`. Managed Tailscale scope comes from its Funnel or Serve configuration; manual URL exposure is unknown.
   - `provisioningState` is `pending`, `failed`, `ready`, `unverified` (manual URL), or `not_applicable` (LAN/local). For managed access, `healthy` is true only when provisioning succeeded; for manual URLs it is false because readiness is unverified. LAN/local retain their existing health semantics. `ready` does not verify external connectivity or continued provider availability.
-  - `authRequired` is `true` when an interactive Tailscale login is pending;
-    `authUrl` carries the link the operator must open. Both clear after login.
-  - `warning` (omitted when empty) carries setup hints (e.g. "HTTPS must be
-    enabled") or security warnings.
+  - `authRequired` is present and `true` while an interactive Tailscale login
+    is pending. Operators can retrieve the login link from the local admin API.
+  - `warning` (omitted when empty) carries gateway-generated guidance or
+    security warnings. Provider-supplied setup details appear on the local admin API.
 
 - `GET /v1/agents`
   - Returns the supported agent catalog merged with live runtime state.
@@ -322,6 +319,9 @@ Base path: `/v1`
 
 - `GET /v1/diagnostics/export`
   - Returns a full diagnostic bundle with runtime state and logs.
+  - `gateway.remote` includes the gateway's public URL when available and
+    omits the provider setup details shown on local admin status. Raw
+    gateway logs can still contain provisioning information.
   - Disabled unless remote diagnostics export is allowed.
   - Requires `read` scope.
 
@@ -1667,6 +1667,8 @@ disabled. The CLI reads the admin address and token from its environment.
 
 - `GET /admin/v1/status`
   - Returns detailed daemon status, including pairing target info and active pairing state.
+  - `remote.authUrl` carries the pending Tailscale login link.
+    `remote.warning` can also include provider setup details.
   - `pairingTarget.reachable` means a target is available for pairing; it does
     not verify the phone's DNS resolution or network connectivity.
   - `pairingTarget.pending` indicates managed remote setup is retrying; the

@@ -50,6 +50,11 @@ against the code.
   launch file inside the installed bundle. Unsafe cached entries are ignored.
   (2026-11-27)
 
+- [semantic] Public status reports whether Tailscale login is needed. The
+  login link and provider setup details are available through local admin
+  status. The structured remote status in diagnostics export also omits
+  those fields. (2026-11-27)
+
 - [semantic] `GET /v1/quotas` refreshes a snapshot over five minutes old
   before responding instead of serving it, so the first request after an idle
   stretch can take up to one collection (15 seconds). (2026-11-27)
