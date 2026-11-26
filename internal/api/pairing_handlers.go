@@ -209,7 +209,7 @@ func (s *Server) handleAdminStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	status := s.statusSnapshot(true)
+	status := s.statusSnapshot(remoteStatusAdmin)
 	response := adminStatusResponse{
 		statusResponse:  status,
 		AdminListenAddr: s.cfg.AdminListenAddr,

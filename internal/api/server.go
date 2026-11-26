@@ -202,6 +202,14 @@ type remoteStatus struct {
 	AuthURL           string `json:"authUrl,omitempty"`
 }
 
+type remoteStatusAudience uint8
+
+const (
+	remoteStatusPublic remoteStatusAudience = iota
+	remoteStatusAdmin
+	remoteStatusDiagnostics
+)
+
 // adminStatusResponse is the comprehensive status returned by the admin
 // endpoint: the public status plus the admin listener address, pairing target
 // info and active challenge state.
@@ -665,7 +673,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	writeJSON(w, http.StatusOK, s.statusSnapshot(false))
+	writeJSON(w, http.StatusOK, s.statusSnapshot(remoteStatusPublic))
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload any) {
@@ -678,7 +686,7 @@ func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, errorResponse{Error: message})
 }
 
-func (s *Server) statusSnapshot(includePublicURL bool) statusResponse {
+func (s *Server) statusSnapshot(audience remoteStatusAudience) statusResponse {
 	summary := s.runtime.Summary()
 	now := s.now()
 	return statusResponse{
@@ -693,7 +701,7 @@ func (s *Server) statusSnapshot(includePublicURL bool) statusResponse {
 		LANEnabled:        s.cfg.EnableLAN,
 		PairedDeviceCount: s.pairing.ActiveDeviceCount(),
 		Discovery:         s.discovery.Snapshot(),
-		Remote:            s.remoteStatus(includePublicURL),
+		Remote:            s.remoteStatus(audience),
 		Registry:          s.registryStatus(),
 		RuntimeCounts: runtimeCounts{
 			Starting: summary.Starting,
@@ -714,41 +722,13 @@ func (s *Server) gatewayDisplayName() string {
 
 // remoteStatus builds a description of how this gateway is reachable from outside.
 // It combines configured scope with the managed provider lifecycle for security warnings.
-func (s *Server) remoteStatus(includePublicURL bool) remoteStatus {
+func (s *Server) remoteStatus(audience remoteStatusAudience) remoteStatus {
 	publicURL := s.publicBaseURL()
 	status := remoteStatus{Configured: publicURL != "", Healthy: true, ProvisioningState: "not_applicable"}
 	managed := s.cfg.TailscaleMode != "" && s.cfg.TailscaleMode != "off"
 	switch {
 	case managed:
-		status.Mode, status.Scope = "tailscale", "public"
-		if s.cfg.TailscalePrivate {
-			status.Scope = "private"
-		}
-		status.Healthy = false
-		status.ProvisioningState = "failed"
-		// Live setup state surfaces interactive login and provisioning blockers.
-		if s.remoteSetup != nil {
-			status.ProvisioningState = "pending"
-			if snap := s.remoteSetup(); snap != nil {
-				status.ProvisioningState = snap.State
-				if snap.State == "" {
-					status.ProvisioningState = "failed"
-				}
-				status.Healthy = snap.State == "ready"
-				if status.Healthy && snap.URL != "" {
-					publicURL = snap.URL
-					status.Configured = true
-				}
-				status.AuthRequired, status.AuthURL = snap.AuthRequired, snap.AuthURL
-				if snap.AuthRequired {
-					status.Mode = "tsnet"
-				}
-				status.Warning = strings.TrimSpace(snap.Hint)
-				if snap.LastErr != "" {
-					status.Warning = strings.Trim(strings.Join([]string{status.Warning, "setup issue: " + snap.LastErr}, "; "), "; ")
-				}
-			}
-		}
+		status, publicURL = s.managedRemoteStatus(publicURL, audience)
 	case publicURL != "":
 		status.Mode, status.Warning = classifyRemoteURL(publicURL)
 		status.Scope, status.Healthy, status.ProvisioningState = "unknown", false, "unverified"
@@ -757,13 +737,50 @@ func (s *Server) remoteStatus(includePublicURL bool) remoteStatus {
 	default:
 		status.Mode, status.Scope = "local_only", "local"
 	}
-	if includePublicURL {
+	if audience == remoteStatusAdmin || audience == remoteStatusDiagnostics {
 		status.PublicURL = publicURL
 	}
 	if warning := s.remoteSecurityWarning(status.Scope); warning != "" {
 		status.Warning = strings.Trim(strings.Join([]string{status.Warning, warning}, "; "), "; ")
 	}
 	return status
+}
+
+// managedRemoteStatus uses live setup state to report interactive login and provisioning blockers.
+func (s *Server) managedRemoteStatus(publicURL string, audience remoteStatusAudience) (remoteStatus, string) {
+	status := remoteStatus{Configured: publicURL != "", Mode: "tailscale", Scope: "public", ProvisioningState: "failed"}
+	if s.cfg.TailscalePrivate {
+		status.Scope = "private"
+	}
+	if s.remoteSetup == nil {
+		return status, publicURL
+	}
+	snap := s.remoteSetup()
+	if snap == nil {
+		status.ProvisioningState = "pending"
+		return status, publicURL
+	}
+	if snap.State != "" {
+		status.ProvisioningState = snap.State
+	}
+	status.Healthy = snap.State == "ready"
+	if status.Healthy && snap.URL != "" {
+		publicURL = snap.URL
+		status.Configured = true
+	}
+	status.AuthRequired = snap.AuthRequired
+	if snap.AuthRequired {
+		status.Mode = "tsnet"
+	}
+	// Provider messages can contain one-time login links or credentials.
+	if audience == remoteStatusAdmin {
+		status.AuthURL = snap.AuthURL
+		status.Warning = strings.TrimSpace(snap.Hint)
+		if snap.LastErr != "" {
+			status.Warning = strings.Trim(strings.Join([]string{status.Warning, "setup issue: " + snap.LastErr}, "; "), "; ")
+		}
+	}
+	return status, publicURL
 }
 
 // remoteSecurityWarning returns security warnings for the current remote mode.

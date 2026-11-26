@@ -79,8 +79,8 @@ func printRemoteSetupAfterInstall(ctx context.Context) {
 	}
 	switch {
 	case status.Remote.AuthRequired:
-		fmt.Println("\nTailscale login required — open this link once to finish setup:")
-		fmt.Printf("  %s\n", status.Remote.AuthURL)
+		fmt.Println("\nTailscale login required.")
+		fmt.Println(tailscaleLoginInstructions(status.Remote.AuthURL))
 		fmt.Println("\nAfter logging in, the daemon finishes provisioning on its own")
 		fmt.Println("(it retries in the background) — no restart needed.")
 		fmt.Println("Confirm the public URL anytime with: ferngeist-gateway daemon status")
@@ -90,6 +90,13 @@ func printRemoteSetupAfterInstall(ctx context.Context) {
 		fmt.Println("\nRemote access is provisioning in the background.")
 		fmt.Println("Check progress with: ferngeist-gateway daemon status")
 	}
+}
+
+func tailscaleLoginInstructions(authURL string) string {
+	if authURL == "" {
+		return "Use the local admin API or check `ferngeist-gateway logs` for the Tailscale login link."
+	}
+	return "Open this link once to finish Tailscale login: " + authURL
 }
 
 // waitForRemoteSetup polls daemon status until remote access is ready or
@@ -223,7 +230,7 @@ func writeDaemonStatus(writer *tabwriter.Writer, daemonStatus adminclient.Daemon
 		fmt.Fprintf(writer, "PUBLIC URL\t%s\n", daemonStatus.Remote.PublicURL)
 	}
 	if daemonStatus.Remote.AuthRequired {
-		fmt.Fprintf(writer, "AUTH REQUIRED\topen this link once to finish Tailscale login: %s\n", daemonStatus.Remote.AuthURL)
+		fmt.Fprintf(writer, "AUTH REQUIRED\t%s\n", tailscaleLoginInstructions(daemonStatus.Remote.AuthURL))
 	}
 	if daemonStatus.Remote.Warning != "" {
 		fmt.Fprintf(writer, "REMOTE WARNING\t%s\n", daemonStatus.Remote.Warning)

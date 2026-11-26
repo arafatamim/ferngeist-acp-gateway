@@ -115,7 +115,7 @@ func (s *Server) handleDiagnosticsExport(w http.ResponseWriter, r *http.Request)
 			LogDir:          s.cfg.LogDir,
 			StateDBPath:     s.cfg.StateDBPath,
 			Discovery:       s.discovery.Snapshot(),
-			Remote:          s.remoteStatus(true),
+			Remote:          s.remoteStatus(remoteStatusDiagnostics),
 			Registry:        s.registryStatus(),
 		},
 		Runtime:     s.runtime.Summary(),

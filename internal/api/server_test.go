@@ -138,42 +138,68 @@ func TestStatusUsesConfiguredGatewayName(t *testing.T) {
 	}
 }
 
-func TestStatusSurfacesPendingTailscaleAuth(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	server := newTestServerFromDeps(Deps{
-		Config:    config.Config{ListenAddr: "127.0.0.1:0", TailscaleMode: "tsnet"},
-		Logger:    logger,
-		Catalog:   catalog.New(".", nil),
-		Runtime:   runtime.NewSupervisor(logger, ".", nil, nil),
-		Pairing:   pairing.NewService(logger, nil),
-		Discovery: discovery.New(logger),
-	})
+func TestRemoteStatusKeepsProvisioningDetailsOnAdmin(t *testing.T) {
+	const publicURL = "https://gateway.example.invalid"
+	const authURL = "https://login.example.invalid/synthetic-link"
+	const hint = "synthetic provisioning hint"
+	const lastErr = "synthetic provisioning error"
+
+	server := newConfiguredTestServer(config.Config{TailscaleMode: "tsnet", AllowDiagnosticsExport: true})
+	server.SetPublicURL(publicURL)
+	token := pairDevice(t, server)
 	server.SetRemoteSetup(func() *remote.RemoteSetupSnapshot {
 		return &remote.RemoteSetupSnapshot{
+			State:        "pending",
 			AuthRequired: true,
-			AuthURL:      "https://login.tailscale.com/a/test1234",
+			AuthURL:      authURL,
+			Hint:         hint,
+			LastErr:      lastErr,
 		}
 	})
 
-	request := httptest.NewRequest(http.MethodGet, "/v1/status", nil)
-	recorder := httptest.NewRecorder()
-	server.Handler().ServeHTTP(recorder, request)
-
-	var response statusResponse
-	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
-		t.Fatalf("Unmarshal() error = %v", err)
-	}
-	if !response.Remote.AuthRequired {
-		t.Fatal("Remote.AuthRequired = false, want true")
-	}
-	if response.Remote.AuthURL != "https://login.tailscale.com/a/test1234" {
-		t.Fatalf("Remote.AuthURL = %q, want the pending login link", response.Remote.AuthURL)
-	}
-	if response.Remote.Healthy {
-		t.Fatal("Remote.Healthy = true, want false while auth is pending")
-	}
-	if response.Remote.Mode != "tsnet" {
-		t.Fatalf("Remote.Mode = %q, want %q", response.Remote.Mode, "tsnet")
+	for _, tc := range []struct {
+		path          string
+		handler       http.Handler
+		wantDetails   bool
+		wantPublicURL string
+	}{
+		{"/v1/status", server.Handler(), false, ""},
+		{"/admin/v1/status", server.AdminHandler(), true, publicURL},
+		{"/v1/diagnostics/export", server.Handler(), false, publicURL},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, tc.path, nil)
+			if tc.path == "/v1/diagnostics/export" {
+				request.Header.Set("Authorization", "Bearer "+token)
+			}
+			recorder := httptest.NewRecorder()
+			tc.handler.ServeHTTP(recorder, request)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("status code = %d, want %d", recorder.Code, http.StatusOK)
+			}
+			var response struct {
+				Remote  remoteStatus               `json:"remote"`
+				Gateway diagnosticsGatewaySnapshot `json:"gateway"`
+			}
+			if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+				t.Fatal(err)
+			}
+			got := response.Remote
+			if tc.path == "/v1/diagnostics/export" {
+				got = response.Gateway.Remote
+			}
+			if !got.AuthRequired || got.Healthy || got.Mode != "tsnet" || got.ProvisioningState != "pending" {
+				t.Errorf("remote status = %+v, want pending tsnet login", got)
+			}
+			if got.PublicURL != tc.wantPublicURL {
+				t.Errorf("remote public URL = %q, want %q", got.PublicURL, tc.wantPublicURL)
+			}
+			for _, detail := range []string{`"authUrl"`, authURL, hint, lastErr} {
+				if strings.Contains(recorder.Body.String(), detail) != tc.wantDetails {
+					t.Errorf("presence of %q in response differs from expected %t", detail, tc.wantDetails)
+				}
+			}
+		})
 	}
 }
 

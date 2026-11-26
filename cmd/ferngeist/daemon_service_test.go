@@ -1,15 +1,31 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"strings"
 	"testing"
+	"text/tabwriter"
 	"time"
 
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/adminclient"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/service"
 )
+
+func TestDaemonStatusShowsWhereToFindThePendingTailscaleLink(t *testing.T) {
+	var output bytes.Buffer
+	writer := tabwriter.NewWriter(&output, 0, 0, 2, ' ', 0)
+	writeDaemonStatus(writer, adminclient.DaemonStatus{
+		Remote: adminclient.RemoteStatus{AuthRequired: true},
+	})
+	if err := writer.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "ferngeist-gateway logs") {
+		t.Fatalf("status should direct the operator to the local logs: %s", output.String())
+	}
+}
 
 func TestWaitForRemoteSetup_returns_login_link_when_auth_pending(t *testing.T) {
 	fetch := func(context.Context) (adminclient.DaemonStatus, error) {
