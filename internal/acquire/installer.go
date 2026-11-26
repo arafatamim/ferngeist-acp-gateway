@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -89,40 +90,76 @@ func (i *Installer) installBinary(ctx context.Context, agent catalog.Agent, targ
 }
 
 func (i *Installer) cachedBinary(ctx context.Context, agent catalog.Agent, targetPath, archiveName string) (string, bool) {
+	parent := filepath.Dir(targetPath)
+	bundle := bundleDir(parent, agent.Registry.Version, archiveName)
 	archive := isArchive(archiveName)
 	// Keep the previous version usable by listings and as a fallback when an update fails.
-	installed := ""
-	if i.store != nil {
-		if record, err := i.store.GetAcquiredBinary(ctx, agent.ID); err == nil && isFile(record.Path) {
-			bundle := bundleDir(filepath.Dir(targetPath), agent.Registry.Version, archiveName) + string(os.PathSeparator)
-			if record.Version == agent.Registry.Version && (!archive || strings.HasPrefix(record.Path, bundle)) {
-				return record.Path, true
-			}
-			installed = record.Path
-		}
+	record, recordedBundle := i.recordedBinary(ctx, agent.ID, parent)
+	if record.Path != "" && record.Version == agent.Registry.Version && (!archive || recordedBundle == bundle) {
+		return record.Path, true
 	}
 	entry := filepath.FromSlash(normalizeArchiveEntry(agent.Registry.CurrentBinaryPath))
 	if archive && filepath.IsLocal(entry) {
-		cached := filepath.Join(bundleDir(filepath.Dir(targetPath), agent.Registry.Version, archiveName), entry)
-		if isFile(cached) {
+		cached := filepath.Join(bundle, entry)
+		if isBundleFile(bundle, cached) {
 			return cached, true
 		}
 	}
 	if !archive {
-		if cached := rawBinaryPath(targetPath, agent.Registry.Version, archiveName); isFile(cached) {
+		if cached := rawBinaryPath(targetPath, agent.Registry.Version, archiveName); isBundleFile(bundle, cached) {
 			return cached, true
 		}
-		if installed == "" && isFile(targetPath) {
+		if record.Path == "" && isLegacyBinary(parent, targetPath) {
 			// No record to compare versions against (no store, or a pre-record install).
 			return targetPath, true
 		}
 	}
-	return installed, false
+	return record.Path, false
 }
 
-func isFile(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && !info.IsDir()
+func (i *Installer) recordedBinary(ctx context.Context, agentID, parent string) (storage.AcquiredBinaryRecord, string) {
+	if i.store == nil {
+		return storage.AcquiredBinaryRecord{}, ""
+	}
+	record, err := i.store.GetAcquiredBinary(ctx, agentID)
+	if err != nil {
+		return storage.AcquiredBinaryRecord{}, ""
+	}
+	bundle := bundleDir(parent, record.Version, artifactName(record.ArchiveURL))
+	if isBundleFile(bundle, record.Path) {
+		return record, bundle
+	}
+	if isLegacyBinary(parent, record.Path) {
+		return record, ""
+	}
+	return storage.AcquiredBinaryRecord{}, ""
+}
+
+func isLegacyBinary(parent, path string) bool {
+	// Older releases installed a single regular file directly in the agent directory.
+	if filepath.Dir(path) != parent || filepath.Clean(path) != path {
+		return false
+	}
+	info, err := os.Lstat(path)
+	return err == nil && info.Mode().IsRegular()
+}
+
+func isBundleFile(bundle, path string) bool {
+	entry, err := filepath.Rel(bundle, path)
+	if err != nil || !filepath.IsLocal(entry) || filepath.Clean(path) != path {
+		return false
+	}
+	info, err := os.Lstat(bundle)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	root, err := os.OpenRoot(bundle)
+	if err != nil {
+		return false
+	}
+	defer root.Close()
+	info, err = root.Stat(entry)
+	return err == nil && info.Mode().IsRegular()
 }
 
 func useBinary(agent catalog.Agent, path string) catalog.Agent {
@@ -229,11 +266,7 @@ func installDownloadedArtifact(ctx context.Context, sourcePath, archiveName, tar
 		return "", err
 	}
 	defer os.RemoveAll(stage)
-	entries, err := extractArchive(ctx, sourcePath, lower, stage)
-	if err != nil {
-		return "", err
-	}
-	launch, err := findArchiveBinary(stage, archiveEntry, entries)
+	launch, err := extractArchiveBinary(ctx, sourcePath, lower, stage, archiveEntry)
 	if err != nil {
 		return "", err
 	}
@@ -242,18 +275,17 @@ func installDownloadedArtifact(ctx context.Context, sourcePath, archiveName, tar
 	}
 	// Versioned directories let a completed install appear in one rename while the old version remains usable.
 	final := bundleDir(parent, version, archiveName)
-	if err := os.Rename(stage, final); err != nil {
-		if !isFile(filepath.Join(final, filepath.FromSlash(launch))) {
-			return "", err
-		}
+	binary := filepath.Join(final, launch)
+	if err := os.Rename(stage, final); err != nil && !isBundleFile(final, binary) {
+		return "", err
 	}
-	return filepath.Join(final, filepath.FromSlash(launch)), nil
+	return binary, nil
 }
 
-func extractArchive(ctx context.Context, sourcePath, lower, stage string) ([]string, error) {
+func extractArchiveBinary(ctx context.Context, sourcePath, lower, stage, archiveEntry string) (string, error) {
 	root, err := os.OpenRoot(stage)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	var entries []string
 	if strings.HasSuffix(lower, ".zip") {
@@ -261,17 +293,19 @@ func extractArchive(ctx context.Context, sourcePath, lower, stage string) ([]str
 	} else {
 		entries, err = extractTarGz(ctx, sourcePath, root)
 	}
+	if err != nil {
+		_ = root.Close() // Preserve the extraction error.
+		return "", err
+	}
+	launch, err := findArchiveBinary(root, archiveEntry, entries)
 	closeErr := root.Close()
 	if err != nil {
-		return nil, err
+		return "", err
 	}
-	if closeErr != nil {
-		return nil, closeErr
-	}
-	return entries, nil
+	return launch, closeErr
 }
 
-func findArchiveBinary(stage, archiveEntry string, entries []string) (string, error) {
+func findArchiveBinary(root *os.Root, archiveEntry string, entries []string) (string, error) {
 	needle := normalizeArchiveEntry(archiveEntry)
 	launch := ""
 	ambiguous := false
@@ -294,14 +328,26 @@ func findArchiveBinary(stage, archiveEntry string, entries []string) (string, er
 	if launch == "" {
 		return "", fmt.Errorf("archive entry %q not found", archiveEntry)
 	}
-	info, err := os.Stat(filepath.Join(stage, filepath.FromSlash(launch)))
-	if err != nil || !info.Mode().IsRegular() {
+	launch = filepath.Clean(filepath.FromSlash(launch))
+	info, err := root.Stat(launch)
+	if err != nil {
+		return "", fmt.Errorf("inspect archive entry %q: %w", archiveEntry, err)
+	}
+	if !info.Mode().IsRegular() {
 		return "", fmt.Errorf("archive entry %q is not a regular file", archiveEntry)
 	}
-	if err := os.Chmod(filepath.Join(stage, filepath.FromSlash(launch)), info.Mode().Perm()|0o111); err != nil {
+	// Only this extraction writes to the private staging directory.
+	if err := root.Chmod(launch, info.Mode().Perm()|0o111); err != nil {
 		return "", err
 	}
 	return launch, nil
+}
+
+func artifactName(rawURL string) string {
+	if parsed, err := url.Parse(rawURL); err == nil {
+		return parsed.Path
+	}
+	return rawURL
 }
 
 func isArchive(name string) bool {

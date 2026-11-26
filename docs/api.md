@@ -939,12 +939,15 @@ clean. Worktrees outlive the chats that use them: they are removed only on an ex
   - Error responses:
     - `400` — `repo` is not an absolute path, `branch` is not a valid branch
       name, or `base` is not a valid ref name
-    - `409` — `branch` already exists, or its `.worktrees/` folder already exists
-      or is being made by another create
+    - `409` — `branch` already exists, its worktree folder is occupied
+      or being created, `.worktrees/` is a symlink or another non-directory
+      entry, or the checkout directory changed during creation
     - `422` — `repo` is not a git repository, `base` does not resolve to a
       commit, fetching the remote ref or PR failed, or fetching and
-      `git worktree add` together failed or ran past their 2 minute limit. A failed add leaves no folder,
-      registration or branch behind.
+      `git worktree add` together failed or ran past their 2 minute limit.
+      Rollback removes resources it can verify belong to the failed create.
+      An interruption before Git finishes registering the checkout can leave
+      metadata behind for inspection.
 
 - `GET /v1/worktrees/refs?repo=<absolute path>`
   - Requires `control` scope, like `POST /v1/worktrees`.

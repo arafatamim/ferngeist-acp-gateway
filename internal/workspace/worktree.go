@@ -23,6 +23,8 @@ import (
 // its write deadline to cover it.
 var CreateTimeout = 2 * time.Minute
 
+const worktreeParent = ".worktrees"
+
 // Error carries the HTTP status the transport must answer with, so the
 // worktree operations can live outside the HTTP package without losing their
 // status semantics.
@@ -53,7 +55,7 @@ type Service struct {
 	// main checkout and must not interleave.
 	finishMu sync.Mutex
 	// creating holds the folders a Create is making, so a second create for the
-	// same folder cannot pass the existence checks and then discard the first.
+	// same folder cannot begin until the first create's bookkeeping finishes.
 	creatingMu sync.Mutex
 	creating   map[string]bool
 	// repos are the repositories ?repo= listings named, which discover keeps
@@ -192,45 +194,150 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (storage.Worktr
 	if _, err := RunGit(ctx, top, "check-ref-format", "--branch", branch); err != nil {
 		return storage.WorktreeRecord{}, errStatus(400, "invalid branch name")
 	}
-	root := filepath.Join(top, ".worktrees")
-	path := filepath.Join(root, worktreeDirName(branch))
-	if !SubpathOf(path, root) || path == root {
+	name := worktreeDirName(branch)
+	if !filepath.IsLocal(name) || name == "." {
 		return storage.WorktreeRecord{}, errStatus(400, "invalid branch name")
 	}
-	// Claimed before the checks below, which a concurrent create would pass too.
+	rec := storage.WorktreeRecord{
+		ID: id, Repo: top, Path: filepath.Join(top, worktreeParent, name), Branch: branch,
+		BaseCommit: baseCommit, BaseRef: baseRef,
+	}
+	return s.createWorktree(ctx, rec, name)
+}
+
+func (s *Service) createWorktree(ctx context.Context, rec storage.WorktreeRecord, name string) (storage.WorktreeRecord, error) {
+	// Claimed before the filesystem checks and held through rollback.
 	// One folder per branch name, so this also covers two creates of one branch.
-	release, ok := s.claimFolder(path)
+	release, ok := s.claimFolder(rec.Path)
 	if !ok {
-		return storage.WorktreeRecord{}, errStatus(409, "worktree folder is being created: "+path)
+		return storage.WorktreeRecord{}, errStatus(409, "worktree folder is being created: "+rec.Path)
 	}
 	defer release()
-	if branchExists(ctx, top, branch) {
-		return storage.WorktreeRecord{}, errStatus(409, "branch already exists: "+branch)
+	if branchExists(ctx, rec.Repo, rec.Branch) {
+		return storage.WorktreeRecord{}, errStatus(409, "branch already exists: "+rec.Branch)
 	}
-	if _, err := os.Stat(path); err == nil {
-		return storage.WorktreeRecord{}, errStatus(409, "worktree folder already exists: "+path)
+	folder, err := reserveWorktreeFolder(rec.Repo, name)
+	if err != nil {
+		return storage.WorktreeRecord{}, err
 	}
-	if err := excludeWorktreesDir(ctx, top); err != nil {
-		s.logger.Warn("exclude .worktrees", "repo", top, "error", err)
+	defer folder.close()
+
+	keep, branchOwned := false, false
+	defer func() {
+		if !keep {
+			s.discardWorktree(context.WithoutCancel(ctx), rec, folder, branchOwned)
+		}
+	}()
+	if err := excludeWorktreesDir(ctx, rec.Repo); err != nil {
+		s.logger.Warn("exclude .worktrees", "repo", rec.Repo, "error", err)
+	}
+	if !folder.stillOwned() {
+		return storage.WorktreeRecord{}, errStatus(409, "worktree folder changed during creation")
+	}
+	// The empty expected value makes branch creation atomic with its existence
+	// check. Preserve the reflog marker branchStart uses for unmanaged worktrees.
+	message := "branch: Created from " + rec.BaseCommit
+	if _, err := RunGit(ctx, rec.Repo, "update-ref", "--no-deref", "-m", message, "refs/heads/"+rec.Branch, rec.BaseCommit, ""); err != nil {
+		if branchExists(ctx, rec.Repo, rec.Branch) {
+			return storage.WorktreeRecord{}, errStatus(409, "branch already exists: "+rec.Branch)
+		}
+		return storage.WorktreeRecord{}, errStatus(422, err.Error())
+	}
+	branchOwned = true
+	if !folder.stillOwned() {
+		return storage.WorktreeRecord{}, errStatus(409, "worktree folder changed during creation")
 	}
 	// ponytail: synchronous, bounded by CreateTimeout; a checkout that outlasts
 	// it needs an async create (202 + poll).
-	if _, err := RunGitTimeout(ctx, CreateTimeout, top, "worktree", "add", "-b", branch, path, baseCommit); err != nil {
-		// The folder and branch did not exist before this call, so whatever a
-		// failed or killed add left behind is ours to remove.
-		discardWorktree(top, path, branch)
+	if _, err := RunGitTimeout(ctx, CreateTimeout, rec.Repo, "worktree", "add", "--", rec.Path, rec.Branch); err != nil {
 		return storage.WorktreeRecord{}, errStatus(422, err.Error())
 	}
-	rec := storage.WorktreeRecord{ID: id, Repo: top, Path: path, Branch: branch, BaseCommit: baseCommit, BaseRef: baseRef, CreatedAt: s.now()}
+	if !folder.stillOwned() {
+		return storage.WorktreeRecord{}, errStatus(409, "worktree folder changed during creation")
+	}
+	rec.CreatedAt = s.now()
 	if err := s.store().SaveWorktree(ctx, rec); err != nil {
-		discardWorktree(top, path, branch)
 		if errors.Is(err, storage.ErrWorktreePathTaken) {
-			return storage.WorktreeRecord{}, errStatus(409, "worktree is already managed: "+path)
+			return storage.WorktreeRecord{}, errStatus(409, "worktree is already managed: "+rec.Path)
 		}
-		s.logger.Error("save worktree", "path", path, "error", err)
+		s.logger.Error("save worktree", "path", rec.Path, "error", err)
 		return storage.WorktreeRecord{}, errStatus(500, "failed to save worktree")
 	}
+	keep = true
 	return rec, nil
+}
+
+type worktreeFolder struct {
+	repo, parent, checkout *os.Root
+	name                   string
+}
+
+func reserveWorktreeFolder(top, name string) (_ worktreeFolder, err error) {
+	repo, err := os.OpenRoot(top)
+	if err != nil {
+		return worktreeFolder{}, errStatus(422, "open repository: "+err.Error())
+	}
+	folder := worktreeFolder{repo: repo, name: name}
+	defer func() {
+		if err != nil {
+			folder.close()
+		}
+	}()
+	visible, err := os.Lstat(top)
+	if err != nil || !rootMatches(repo, visible) {
+		return worktreeFolder{}, errStatus(409, "repository changed during creation")
+	}
+	if err := repo.Mkdir(worktreeParent, 0o755); err != nil && !errors.Is(err, os.ErrExist) {
+		return worktreeFolder{}, errStatus(422, "create worktree parent: "+err.Error())
+	}
+	info, err := repo.Lstat(worktreeParent)
+	if err != nil || !info.IsDir() {
+		return worktreeFolder{}, errStatus(409, "worktree parent must be a real directory")
+	}
+	folder.parent, err = repo.OpenRoot(worktreeParent)
+	if err != nil || !folder.parentVisible() {
+		return worktreeFolder{}, errStatus(409, "worktree parent changed during creation")
+	}
+	if err := folder.parent.Mkdir(name, 0o755); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return worktreeFolder{}, errStatus(409, "worktree folder already exists: "+filepath.Join(top, worktreeParent, name))
+		}
+		return worktreeFolder{}, errStatus(422, "create worktree folder: "+err.Error())
+	}
+	folder.checkout, err = folder.parent.OpenRoot(name)
+	if err != nil || !folder.stillOwned() {
+		return worktreeFolder{}, errStatus(409, "worktree folder changed during creation")
+	}
+	return folder, nil
+}
+
+func (f worktreeFolder) close() {
+	// Closing a directory handle cannot change the checkout or its registration.
+	if f.checkout != nil {
+		_ = f.checkout.Close()
+	}
+	if f.parent != nil {
+		_ = f.parent.Close()
+	}
+	_ = f.repo.Close()
+}
+
+func (f worktreeFolder) parentVisible() bool {
+	repo, repoErr := os.Lstat(f.repo.Name())
+	parent, parentErr := f.repo.Lstat(worktreeParent)
+	return repoErr == nil && parentErr == nil && rootMatches(f.repo, repo) && rootMatches(f.parent, parent)
+}
+
+// The Git subprocess uses paths, so recheck that it will see the same
+// directories as the rooted operations at each handoff.
+func (f worktreeFolder) stillOwned() bool {
+	checkout, err := f.parent.Lstat(f.name)
+	return err == nil && f.parentVisible() && rootMatches(f.checkout, checkout)
+}
+
+func rootMatches(root *os.Root, visible os.FileInfo) bool {
+	opened, err := root.Stat(".")
+	return err == nil && visible.IsDir() && os.SameFile(opened, visible)
 }
 
 // listConcurrency bounds how many worktrees List inspects at once, so a long
@@ -248,12 +355,33 @@ func newWorktreeID() (string, error) {
 
 // discardWorktree removes a worktree this process just created, folder, git
 // registration and branch, after the create failed part-way.
-func discardWorktree(top, path, branch string) {
-	ctx := context.Background()
-	_, _ = RunGit(ctx, top, "worktree", "remove", "--force", path)
-	_ = removeAllRetrying(path)
-	_, _ = RunGit(ctx, top, "worktree", "prune")
-	_, _ = RunGit(ctx, top, "branch", "-D", branch)
+func (s *Service) discardWorktree(ctx context.Context, rec storage.WorktreeRecord, folder worktreeFolder, branchOwned bool) {
+	if branchOwned && folder.stillOwned() {
+		// Without a checkout's .git file, an existing registration at this
+		// path might predate this create.
+		link, err := folder.checkout.Lstat(".git")
+		if err == nil && link.Mode().IsRegular() && folder.stillOwned() {
+			if _, err := RunGit(ctx, rec.Repo, "worktree", "remove", "--force", "--", rec.Path); err != nil {
+				s.logger.Warn("roll back worktree registration", "path", rec.Path, "error", err)
+			}
+		}
+	}
+	if folder.stillOwned() {
+		if err := folder.parent.RemoveAll(folder.name); err != nil {
+			s.logger.Warn("roll back worktree folder", "path", rec.Path, "error", err)
+		}
+	}
+	if !branchOwned || !folder.parentVisible() {
+		return
+	}
+	ref := "refs/heads/" + rec.Branch
+	list, err := RunGit(ctx, rec.Repo, "worktree", "list", "--porcelain", "-z")
+	if err != nil || strings.Contains(list, "\x00branch "+ref+"\x00") || !folder.parentVisible() {
+		return
+	}
+	if _, err := RunGit(ctx, rec.Repo, "update-ref", "--no-deref", "-d", ref, rec.BaseCommit); err != nil {
+		s.logger.Warn("roll back worktree branch", "branch", rec.Branch, "error", err)
+	}
 }
 
 // List returns every linked git worktree of the repositories the gateway

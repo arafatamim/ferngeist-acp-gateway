@@ -108,17 +108,20 @@ func namedBinary(name string) string {
 	return name
 }
 
-func TestRegistryInstallExtractsArchives(t *testing.T) {
-	payload := []byte("#!/bin/sh\necho agent\n")
+func registryArchiveFixtures(t *testing.T, payload []byte, launchEntry string) ([]byte, []byte) {
+	t.Helper()
 	var tarGz bytes.Buffer
 	gz := gzip.NewWriter(&tarGz)
 	tw := tar.NewWriter(gz)
-	_ = tw.WriteHeader(&tar.Header{Name: "dist/agent", Mode: 0o755, Size: int64(len(payload))})
+	_ = tw.WriteHeader(&tar.Header{Name: "dist/agent", Mode: 0o644, Size: int64(len(payload))})
 	_, _ = tw.Write(payload)
 	_ = tw.WriteHeader(&tar.Header{Name: "dist/lib/data", Mode: 0o644, Size: 4})
 	_, _ = tw.Write([]byte("data"))
 	if os.PathSeparator != '\\' {
 		_ = tw.WriteHeader(&tar.Header{Name: "dist/link", Typeflag: tar.TypeSymlink, Linkname: "lib/data"})
+		if err := tw.WriteHeader(&tar.Header{Name: launchEntry, Typeflag: tar.TypeSymlink, Linkname: "agent"}); err != nil {
+			t.Fatal(err)
+		}
 	}
 	_ = tw.Close()
 	_ = gz.Close()
@@ -133,15 +136,33 @@ func TestRegistryInstallExtractsArchives(t *testing.T) {
 		linkHeader.SetMode(os.ModeSymlink | 0o777)
 		entry, _ = zw.CreateHeader(linkHeader)
 		_, _ = entry.Write([]byte("lib/data"))
+		launchHeader := &zip.FileHeader{Name: launchEntry}
+		launchHeader.SetMode(os.ModeSymlink | 0o777)
+		link, err := zw.CreateHeader(launchHeader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := link.Write([]byte("agent")); err != nil {
+			t.Fatal(err)
+		}
 	}
 	_ = zw.Close()
+	return tarGz.Bytes(), zipBuf.Bytes()
+}
 
+func TestRegistryInstallExtractsArchives(t *testing.T) {
+	payload := []byte("#!/bin/sh\necho agent\n")
+	launchEntry := "dist/agent"
+	if os.PathSeparator != '\\' {
+		launchEntry = "dist/launch"
+	}
+	tarGz, zipBuf := registryArchiveFixtures(t, payload, launchEntry)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/agent.tar.gz":
-			_, _ = w.Write(tarGz.Bytes())
+			_, _ = w.Write(tarGz)
 		case "/agent.zip":
-			_, _ = w.Write(zipBuf.Bytes())
+			_, _ = w.Write(zipBuf)
 		default:
 			http.NotFound(w, r)
 		}
@@ -150,12 +171,16 @@ func TestRegistryInstallExtractsArchives(t *testing.T) {
 
 	for _, name := range []string{"agent.tar.gz", "agent.zip?sig=abc"} {
 		t.Run(name, func(t *testing.T) {
+			entry := launchEntry
+			if name == "agent.tar.gz" {
+				entry = filepath.Base(entry)
+			}
 			installer := New(slog.New(slog.NewTextHandler(io.Discard, nil)), t.TempDir(), nil)
 			agent, err := awaitBinary(t, installer, catalog.Agent{
 				ID:     "archived",
 				Launch: catalog.LaunchConfig{Mode: "external"},
 				Registry: catalog.RegistryInfo{
-					CurrentBinaryPath:       "dist/agent",
+					CurrentBinaryPath:       entry,
 					CurrentBinaryArchiveURL: server.URL + "/" + name,
 				},
 			})
@@ -163,20 +188,25 @@ func TestRegistryInstallExtractsArchives(t *testing.T) {
 				t.Fatalf("installation error = %v", err)
 			}
 			got, err := os.ReadFile(agent.Launch.Command)
-			if err != nil {
-				t.Fatalf("read installed binary: %v", err)
+			if err != nil || !bytes.Equal(got, payload) {
+				t.Fatalf("installed archive data = %q, error = %v", got, err)
 			}
-			if data, err := os.ReadFile(filepath.Join(filepath.Dir(agent.Launch.Command), "lib", "data")); err != nil || string(data) != "data" {
+			dir := filepath.Dir(agent.Launch.Command)
+			if data, err := os.ReadFile(filepath.Join(dir, "lib", "data")); err != nil || string(data) != "data" {
 				t.Fatalf("sibling data = %q, error = %v", data, err)
 			}
-			if os.PathSeparator != '\\' {
-				link, err := os.Readlink(filepath.Join(filepath.Dir(agent.Launch.Command), "link"))
-				if err != nil || link != "lib/data" {
-					t.Fatalf("symlink = %q, error = %v", link, err)
-				}
+			if os.PathSeparator == '\\' {
+				return
 			}
-			if !bytes.Equal(got, payload) {
-				t.Fatalf("installed %d bytes of archive data, want extracted entry", len(got))
+			info, err := os.Stat(agent.Launch.Command)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.Mode().Perm()&0o111 == 0 {
+				t.Fatalf("installed executable permissions = %v", info.Mode().Perm())
+			}
+			if link, err := os.Readlink(filepath.Join(dir, "link")); err != nil || link != "lib/data" {
+				t.Fatalf("symlink = %q, error = %v", link, err)
 			}
 		})
 	}
@@ -230,6 +260,36 @@ func TestRegistryInstallUpdatesOnVersionChange(t *testing.T) {
 	status = http.StatusInternalServerError
 	if got := ensure("3.0.0"); got != "v2" {
 		t.Fatalf("failed update = %q, want installed v2 kept", got)
+	}
+}
+
+func TestRegistryLookupIgnoresBinaryRecordOutsideAgentDirectory(t *testing.T) {
+	store, err := storage.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	installer := New(slog.New(slog.NewTextHandler(io.Discard, nil)), t.TempDir(), store)
+	t.Cleanup(installer.Close)
+	fixture := filepath.Join(t.TempDir(), "fixture")
+	if err := os.WriteFile(fixture, []byte("fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	archiveURL := "https://example.invalid/agent.zip"
+	if err := store.SaveAcquiredBinary(t.Context(), storage.AcquiredBinaryRecord{
+		AgentID: "archived", Version: "1", Path: fixture, ArchiveURL: archiveURL,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	agent := catalog.Agent{
+		ID:     "archived",
+		Launch: catalog.LaunchConfig{Mode: "external"},
+		Registry: catalog.RegistryInfo{
+			Version: "2", CurrentBinaryPath: "agent", CurrentBinaryArchiveURL: archiveURL,
+		},
+	}
+	if _, err := installer.ResolveBinary(t.Context(), agent, false); !errors.Is(err, ErrBinaryInstallRequired) {
+		t.Fatalf("ResolveBinary() error = %v, want %v", err, ErrBinaryInstallRequired)
 	}
 }
 

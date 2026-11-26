@@ -3,7 +3,6 @@ package acquire
 import (
 	"context"
 	"errors"
-	"net/url"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -47,10 +46,8 @@ func (i *Installer) ResolveBinary(ctx context.Context, agent catalog.Agent, inst
 	}
 
 	target := filepath.Join(i.managedDir, agent.ID, filepath.Base(strings.ReplaceAll(registry.CurrentBinaryPath, "\\", "/")))
-	archiveName := registry.CurrentBinaryArchiveURL
-	if parsed, err := url.Parse(archiveName); err == nil {
-		archiveName = parsed.Path
-	}
+	archiveName := artifactName(registry.CurrentBinaryArchiveURL)
+	bundle := bundleDir(filepath.Dir(target), registry.Version, archiveName)
 
 	installed, current := i.cachedBinary(ctx, agent, target, archiveName)
 	i.mu.Lock()
@@ -61,7 +58,7 @@ func (i *Installer) ResolveBinary(ctx context.Context, agent catalog.Agent, inst
 	switch {
 	case install && running && sameVersion:
 		return agent, &AgentInstalling{BytesReceived: job.received.Load(), BytesTotal: job.total.Load()}
-	case sameVersion && job.path != "" && isFile(job.path):
+	case sameVersion && job.path != "" && isBundleFile(bundle, job.path):
 		// An archive may have matched by basename and its stored path may not be available.
 		return useBinary(agent, job.path), nil
 	case current || (!install && installed != ""):

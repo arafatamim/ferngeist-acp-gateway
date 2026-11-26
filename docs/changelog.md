@@ -43,6 +43,13 @@ against the code.
 
 ## Unreleased
 
+- [semantic] Worktree creation returns `409` for a symlink or other
+  non-directory at `.worktrees/`. Rollback checks ownership before removing
+  a failed checkout or its branch. (2026-11-27)
+- [semantic] Registry archive installs and cached launches require a regular
+  launch file inside the installed bundle. Unsafe cached entries are ignored.
+  (2026-11-27)
+
 - [semantic] `GET /v1/quotas` refreshes a snapshot over five minutes old
   before responding instead of serving it, so the first request after an idle
   stretch can take up to one collection (15 seconds). (2026-11-27)

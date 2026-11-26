@@ -858,6 +858,28 @@ func TestCreatePrunesAVanishedWorktreeOfTheSameBranch(t *testing.T) {
 	}
 }
 
+func TestCreateRefusesASymlinkedWorktreeParent(t *testing.T) {
+	repo, _ := initMainRepo(t)
+	svc, _ := newWorktreeTestService(t)
+	target := filepath.Join(repo, "other")
+	if err := os.Mkdir(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(repo, ".worktrees")); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+		t.Fatal(err)
+	}
+
+	_, err := svc.Create(context.Background(), CreateRequest{Repo: repo, Branch: "review"})
+	wantWorkspaceStatus(t, err, 409)
+	entries, err := os.ReadDir(target)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("symlink target changed: %v, %v", entries, err)
+	}
+}
+
 // TestCreateCleansUpAfterAKilledWorktreeAdd stalls the checkout in a
 // post-checkout hook past a short CreateTimeout: Create must fail with 422 and
 // leave no folder, registration, branch or record behind.
