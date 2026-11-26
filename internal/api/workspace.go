@@ -64,9 +64,12 @@ func (s *Server) resolveWorkspaceCwd(w http.ResponseWriter, r *http.Request, run
 	return "", false
 }
 
-// projectWorkspace identifies the selector explicitly while sharing the read handlers.
+// projectWorkspace gates client-selected checkouts before resolving them.
 func (s *Server) projectWorkspace(handler http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := s.requireHostAccess(w, r); !ok {
+			return
+		}
 		r.SetPathValue("workspaceKind", "project")
 		handler(w, r)
 	}
@@ -128,9 +131,6 @@ func (s *Server) handleWorkspaceFileList(w http.ResponseWriter, r *http.Request)
 // handleWorkspaceGitRefs lists the refs a client can compare against.
 // GET /v1/projects/git/refs
 func (s *Server) handleWorkspaceGitRefs(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireGatewayScope(w, r, pairing.ScopeRead); !ok {
-		return
-	}
 	cwd, ok := s.resolveWorkspaceCwd(w, r, r.PathValue("runtimeId"))
 	if !ok {
 		return
@@ -146,9 +146,6 @@ func (s *Server) handleWorkspaceGitRefs(w http.ResponseWriter, r *http.Request) 
 // handleWorkspaceGitStatus returns branch, ahead/behind, and changed files.
 // GET /v1/projects/git/status
 func (s *Server) handleWorkspaceGitStatus(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireGatewayScope(w, r, pairing.ScopeRead); !ok {
-		return
-	}
 	runtimeID := r.PathValue("runtimeId")
 	cwd, ok := s.resolveWorkspaceCwd(w, r, runtimeID)
 	if !ok {
@@ -253,12 +250,9 @@ func parseBranchHeader(resp *gitStatusResponse, out string) {
 // handleWorkspaceGitDiff returns ACP ToolCallContentDiff entries: a single
 // object with ?path=, otherwise a JSON array with one entry per changed file
 // (the same set /git/status reports). oldText is the committed version
-// (git show HEAD:<path>), newText the working-tree copy. This replaces the
+// (the blob at HEAD:<path>), newText the working-tree copy. This replaces the
 // old raw unified-patch shape {path?,diff}. GET /v1/projects/git/diff
 func (s *Server) handleWorkspaceGitDiff(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireGatewayScope(w, r, pairing.ScopeRead); !ok {
-		return
-	}
 	runtimeID := r.PathValue("runtimeId")
 	cwd, ok := s.resolveWorkspaceCwd(w, r, runtimeID)
 	if !ok {
@@ -291,7 +285,7 @@ func (s *Server) handleWorkspaceGitDiff(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		// Submodules and directories are not diffable file content; reject them
-		// with a clear 400 instead of letting git show/read fail into a 422.
+		// with a clear 400 instead of letting a blob or working-tree read fail into a 422.
 		// Whole-tree diffs skip them via IsDir; this is the single-file guard.
 		if fi, err := os.Stat(abs); err == nil && fi.IsDir() {
 			writeError(w, http.StatusBadRequest, "path is a directory or submodule, not a file: "+rel)
@@ -320,15 +314,15 @@ func (s *Server) handleWorkspaceGitDiff(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
-	// One git show per file: run them in parallel (bounded, order kept) so a
+	// Read one Git blob per file in parallel (bounded, order kept) so a
 	// large change set is not a serial chain of process spawns.
 	slots := make([]*acp.ToolCallContentDiff, len(changed))
 	var group errgroup.Group
 	group.SetLimit(8)
 	for i, f := range changed {
 		// Submodules and collapsed untracked dirs are directories, not files;
-		// they cannot be diffed as file content (git show HEAD:<path> fails
-		// for a gitlink, ReadFileLimited fails on a dir). /git/status reports
+		// they cannot be diffed as file content (a gitlink is a commit,
+		// and ReadFileLimited fails on a directory). /git/status reports
 		// them with isDir:true; the diff lists only real files.
 		if f.IsDir {
 			continue
@@ -392,9 +386,6 @@ func (s *Server) writeCommitFileDiff(w http.ResponseWriter, r *http.Request, cwd
 // handleWorkspaceGitLog returns one page of commit history, newest first.
 // GET /v1/projects/git/log?head=<sha>&skip=<n>&limit=<n>&compare=<ref>&beyond=<n>
 func (s *Server) handleWorkspaceGitLog(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireGatewayScope(w, r, pairing.ScopeRead); !ok {
-		return
-	}
 	cwd, ok := s.resolveWorkspaceCwd(w, r, r.PathValue("runtimeId"))
 	if !ok {
 		return
@@ -438,9 +429,6 @@ func (s *Server) handleWorkspaceGitLog(w http.ResponseWriter, r *http.Request) {
 // handleWorkspaceGitCommit returns the files a commit changed under cwd,
 // compared with its first parent. GET /v1/projects/git/commits/{sha}
 func (s *Server) handleWorkspaceGitCommit(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireGatewayScope(w, r, pairing.ScopeRead); !ok {
-		return
-	}
 	cwd, ok := s.resolveWorkspaceCwd(w, r, r.PathValue("runtimeId"))
 	if !ok {
 		return

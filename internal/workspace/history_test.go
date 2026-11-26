@@ -193,6 +193,17 @@ func TestLog(t *testing.T) {
 	}
 }
 
+func TestCommitFileDiffDoesNotReturnTreeListings(t *testing.T) {
+	dir, git := historyRepo(t)
+	write(t, filepath.Join(dir, "sub", "a.txt"), "content\n")
+	git("add", ".")
+	git("commit", "-qm", "root")
+	sha := git("rev-parse", "HEAD")
+	if diff, err := CommitDiffEntry(context.Background(), dir, sha, "sub", ""); err == nil {
+		t.Fatalf("commit file diff accepted a tree: %+v", diff)
+	}
+}
+
 func TestCommitChangesAndDiff(t *testing.T) {
 	ctx := context.Background()
 	dir, git := historyRepo(t)

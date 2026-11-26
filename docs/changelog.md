@@ -43,6 +43,10 @@ against the code.
 
 ## Unreleased
 
+- [semantic] Project Git routes require both `read` and `control`, which
+  normal pairing already grants. Git diffs use raw content, and commit file
+  diffs accept file blobs only. (2026-11-26)
+
 - [additive] Cold registry binary launches return `503 agent_installing` with
   `Retry-After` and download progress while the gateway installs the binary.
   Clients can retry the launch after the indicated interval. (2026-11-26)

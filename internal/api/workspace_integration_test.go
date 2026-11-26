@@ -842,6 +842,30 @@ func TestWorkspaceFileListRequiresReadScope(t *testing.T) {
 	}
 }
 
+func TestProjectGitRejectsCredentialWithoutControlScope(t *testing.T) {
+	baseDir := t.TempDir()
+	store, err := storage.Open(filepath.Join(baseDir, "pairings.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	const token = "read-only-project-token"
+	if err := store.SavePairing(context.Background(), storage.PairingRecord{
+		DeviceID: "read-only", DeviceName: "reader", Token: token,
+		ExpiresAt: time.Now().Add(time.Hour), Scopes: []string{pairing.ScopeRead},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	server := newTestServerWithStore(baseDir, store)
+	req := httptest.NewRequest(http.MethodGet, "/v1/projects/git/status", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 before checkout lookup (body=%s)", rec.Code, rec.Body.String())
+	}
+}
+
 // Project browsing must work with no ACP session service or running agent.
 func TestProjectWorkspaceReadsCheckoutWithoutSession(t *testing.T) {
 	root := t.TempDir()

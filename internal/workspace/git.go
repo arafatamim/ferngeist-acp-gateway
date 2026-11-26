@@ -319,10 +319,7 @@ func RunGit(ctx context.Context, dir string, args ...string) (string, error) {
 // legitimately outlast GitCommandTimeout (a big checkout).
 func RunGitTimeout(ctx context.Context, timeout time.Duration, dir string, args ...string) (string, error) {
 	out, _, err := runBounded(ctx, timeout, nil, true, func(ctx context.Context) *exec.Cmd {
-		// core.quotePath=false keeps paths with spaces/non-ASCII unquoted and
-		// unescaped in porcelain/numstat output, so they parse and open correctly.
-		full := append([]string{"-c", "core.quotePath=false", "-C", dir}, args...)
-		return exec.CommandContext(ctx, "git", full...)
+		return gitCommand(ctx, dir, args)
 	})
 	if err != nil {
 		msg := strings.TrimSpace(out)
@@ -332,6 +329,28 @@ func RunGitTimeout(ctx context.Context, timeout time.Duration, dir string, args 
 		return "", fmt.Errorf("git %s: %s", strings.Join(args, " "), msg)
 	}
 	return out, nil
+}
+
+func gitCommand(ctx context.Context, dir string, args []string) *exec.Cmd {
+	// core.quotePath=false keeps paths with spaces/non-ASCII unquoted and
+	// unescaped in porcelain/numstat output, so they parse and open correctly.
+	full := []string{"-c", "core.quotePath=false"}
+	if len(args) > 0 {
+		switch args[0] {
+		case "status", "diff", "diff-tree":
+			// These reads do not need optional index updates or Git's FSMonitor helper.
+			full = append(full, "--no-optional-locks", "-c", "core.fsmonitor=false")
+		}
+		full = append(full, args[0])
+		if args[0] == "diff" || args[0] == "diff-tree" {
+			// Gateway diffs and line counts describe raw content.
+			full = append(full, "--no-ext-diff", "--no-textconv")
+		}
+		full = append(full, args[1:]...)
+	}
+	cmd := exec.CommandContext(ctx, "git", full...)
+	cmd.Dir = dir
+	return cmd
 }
 
 // runBounded is the one exec implementation behind RunGitTimeout (git) and
@@ -348,7 +367,7 @@ func runBounded(ctx context.Context, timeout time.Duration, extraEnv []string, c
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	cmd := mkCmd(ctx)
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	cmd.Env = append(cmd.Environ(), "GIT_TERMINAL_PROMPT=0")
 	if len(extraEnv) > 0 {
 		cmd.Env = append(cmd.Env, extraEnv...)
 	}
@@ -371,7 +390,7 @@ func runBounded(ctx context.Context, timeout time.Duration, extraEnv []string, c
 
 // RunGitLimited runs a git command and returns at most max+1 bytes of stdout
 // (plus stderr, which is small). Use it for subcommands whose output can be
-// arbitrarily large (e.g. `git show HEAD:<path>`): like ReadFileLimited it
+// arbitrarily large (e.g. `git cat-file blob HEAD:<path>`): like ReadFileLimited it
 // streams the output through a limit instead of buffering the whole thing, so
 // a huge blob cannot exhaust memory. stdout is always read to EOF, even past
 // the cap, so the child can finish (or hit the GitCommandTimeout) and never
@@ -379,10 +398,7 @@ func runBounded(ctx context.Context, timeout time.Duration, extraEnv []string, c
 func RunGitLimited(ctx context.Context, dir string, max int, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, GitCommandTimeout)
 	defer cancel()
-	// core.quotePath=false keeps paths with spaces/non-ASCII unquoted and
-	// unescaped in porcelain/numstat output, so they parse and open correctly.
-	full := append([]string{"-c", "core.quotePath=false", "-C", dir}, args...)
-	cmd := exec.CommandContext(ctx, "git", full...)
+	cmd := gitCommand(ctx, dir, args)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return "", fmt.Errorf("git %s: %s", strings.Join(args, " "), err)
@@ -473,7 +489,7 @@ func nameStatusChanges(out string, seen map[string]bool) []ChangedFile {
 }
 
 // DiffEntry builds one ACP ToolCallContentDiff for a changed file. oldText is
-// the version at ref (HEAD, or a managed worktree's base) from git show (nil
+// the version at ref (HEAD, or a managed worktree's base) from the Git blob (nil
 // when that fails, e.g. new/untracked files or no HEAD). newText is the
 // working-tree content, or "" for a deleted file (working copy gone but present
 // in HEAD). The 1 MiB cap is applied to both texts; truncation is documented in
@@ -481,7 +497,7 @@ func nameStatusChanges(out string, seen map[string]bool) []ChangedFile {
 func DiffEntry(ctx context.Context, cwd, ref, rel, abs string) (acp.ToolCallContentDiff, error) {
 	// <ref>:<path> is repo-root relative; <ref>:./<path> resolves against cwd,
 	// which is what rel is relative to.
-	oldText, err := RunGitLimited(ctx, cwd, MaxFileReadBytes, "show", ref+":./"+rel)
+	oldText, err := readGitBlob(ctx, cwd, ref, rel)
 	var oldPtr *string
 	if err == nil {
 		oldPtr = TruncateStringPtr(oldText, MaxFileReadBytes)
@@ -510,6 +526,10 @@ func DiffEntry(ctx context.Context, cwd, ref, rel, abs string) (acp.ToolCallCont
 		NewText: string(newData),
 		Type:    "diff",
 	}, nil
+}
+
+func readGitBlob(ctx context.Context, cwd, ref, rel string) (string, error) {
+	return RunGitLimited(ctx, cwd, MaxFileReadBytes, "cat-file", "--end-of-options", "blob", ref+":./"+rel)
 }
 
 // TruncateStringPtr returns a pointer to s truncated to max bytes, or nil when

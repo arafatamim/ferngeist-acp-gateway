@@ -366,17 +366,17 @@ func ParseDiffTree(out string) []ChangedFile {
 // oldRel is the pre-rename path ("" when not renamed). oldText is nil for an
 // added file or a root commit; newText is "" for a deleted file.
 func CommitDiffEntry(ctx context.Context, cwd, sha, rel, oldRel string) (acp.ToolCallContentDiff, error) {
-	if t, err := RunGit(ctx, cwd, "cat-file", "-t", sha+":./"+rel); err == nil && strings.TrimSpace(t) == "commit" {
+	if t, err := RunGit(ctx, cwd, "cat-file", "-t", "--end-of-options", sha+":./"+rel); err == nil && strings.TrimSpace(t) == "commit" {
 		return acp.ToolCallContentDiff{}, errStatus(http.StatusBadRequest, "path is a submodule, not a file: "+rel)
 	}
 	if oldRel == "" {
 		oldRel = rel
 	}
 	var oldPtr *string
-	if oldText, err := RunGitLimited(ctx, cwd, MaxFileReadBytes, "show", sha+"^1:./"+oldRel); err == nil {
+	if oldText, err := readGitBlob(ctx, cwd, sha+"^1", oldRel); err == nil {
 		oldPtr = TruncateStringPtr(oldText, MaxFileReadBytes)
 	}
-	newText, err := RunGitLimited(ctx, cwd, MaxFileReadBytes, "show", sha+":./"+rel)
+	newText, err := readGitBlob(ctx, cwd, sha, rel)
 	if err != nil {
 		if oldPtr == nil {
 			return acp.ToolCallContentDiff{}, errStatus(http.StatusUnprocessableEntity, "path not in commit: "+rel)

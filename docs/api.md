@@ -527,8 +527,8 @@ take `cwd` instead; they reject `acpSessionId`.
 
 #### Session-free project browsing
 
-A paired client with `read` scope can browse a checkout without an agent,
-runtime, or ACP session:
+A paired client with `read` and `control` scopes can browse a checkout without
+an agent, runtime, or ACP session:
 
 - `GET /v1/projects/git/status?cwd=<absolute-checkout-root>`
 - `GET /v1/projects/git/diff?cwd=<absolute-checkout-root>`
@@ -550,9 +550,9 @@ subdirectory, a file, a bare repository, or any `acpSessionId` parameter returns
 `400`. A missing checkout returns `404`; a non-repository or Git failure returns
 `422`.
 
-**Trust boundary:** any paired client with `read` scope can select any checkout
-the gateway OS user can read. Checkout validation is not an authorization
-allowlist. There is no project-scoped `/files/list` route.
+**Trust boundary:** a paired client with `read` and `control` scopes can select
+any checkout the gateway OS user can read. Use checkouts whose Git metadata you
+trust. There is no project-scoped `/files/list` route.
 
 #### Runtime file listing
 
@@ -605,18 +605,18 @@ documented under [Git response shapes](#git-response-shapes).
 #### Git response shapes
 
 The `GET /v1/projects/git/{refs,status,diff,log,commits/{sha}}` routes share the
-shapes, limits and query parameters below. They require `read` scope and the
-exactly-one-absolute-`cwd` selector documented in [Session-free project
+shapes, limits and query parameters below. They require `read` and `control`
+scopes and the exactly-one-absolute-`cwd` selector documented in [Session-free project
 browsing](#session-free-project-browsing); `acpSessionId` is rejected. In
 addition to the per-route errors listed, a malformed selector or route parameter
-is `400`, a missing checkout is `404`, and missing `git` or a non-repository is
-`422`.
+is `400`, a missing scope is `403`, a missing checkout is `404`, and missing `git`
+or a non-repository is `422`.
 
 - `GET /v1/projects/git/refs?cwd=<absolute-checkout-root>`
   - Lists the refs a client can compare against: every local branch, every
     remote-tracking ref (`origin/*`, with `origin/HEAD`-style aliases dropped),
     and every tag.
-  - Requires `read` scope.
+  - Requires `read` and `control` scopes.
   - Response:
     ```json
     {
@@ -652,7 +652,7 @@ is `400`, a missing checkout is `404`, and missing `git` or a non-repository is
     counts) for the selected checkout.
   - `changed` is always an array: `[]` when no files differ, including in
     compare mode.
-  - Requires `read` scope.
+  - Requires `read` and `control` scopes.
   - Response:
     ```json
     {
@@ -726,7 +726,7 @@ is `400`, a missing checkout is `404`, and missing `git` or a non-repository is
 - `GET /v1/projects/git/diff?cwd=<absolute-checkout-root>&path=<rel>`
   - Returns the diff for a single file (`?path=`), or for the whole working tree
     when `path` is omitted.
-  - Requires `read` scope.
+  - Requires `read` and `control` scopes.
   - The response always uses the ACP v1 schema's
     [`ToolCallContentDiff`](https://agentclientprotocol.com/protocol/v1/schema)
     shape (`path`/`oldText`/`newText`/`type:"diff"`), so the Ferngeist client
@@ -737,7 +737,7 @@ is `400`, a missing checkout is `404`, and missing `git` or a non-repository is
   - The whole-tree body is gzipped when the request's `Accept-Encoding`
     includes `gzip` (`Content-Encoding: gzip`, `Vary: Accept-Encoding`); it
     carries every changed file's full old and new text.
-  - `oldText` is the committed version of the file (`git show HEAD:<path>`);
+  - `oldText` is the committed version of the file (the blob at `HEAD:<path>`);
     it is omitted (absent from the JSON, not `null`) for new/untracked files
     or when there is no HEAD commit. `newText` is the working-tree file content
     (empty for deleted files). `type` is always `"diff"`.
@@ -767,7 +767,7 @@ is `400`, a missing checkout is `404`, and missing `git` or a non-repository is
     within the working tree); committed history beyond `HEAD` is not included.
   - Both `oldText` and `newText` are truncated to 1 MiB.
   - **Compare mode:** optional `compare=<ref>` builds `oldText` from that ref's
-    version of the file (`git show <ref>:./<path>`) instead of `HEAD`'s, so the
+    version of the file (the blob at `<ref>:./<path>`) instead of `HEAD`'s, so the
     pair is the two-dot, tip-to-tip diff of the working tree against another
     branch — see [branch comparison](#workspace-browsing). `newText` is still
     the working-tree content (empty for a file the working tree no longer has),
@@ -785,19 +785,19 @@ is `400`, a missing checkout is `404`, and missing `git` or a non-repository is
     - `422` — `git` is missing from PATH, or the directory is not a git repository
   - **Commit mode:** `?commit=<sha>&path=<rel>[&oldPath=<rel>]` diffs one file
     of a commit against its first parent instead of the working tree. `oldText`
-    is `git show <sha>^1:<oldPath or path>` (absent for added files and root
-    commits); `newText` is `git show <sha>:<path>` (empty for deleted files).
+    is the blob at `<sha>^1:<oldPath or path>` (absent for added files and root
+    commits); `newText` is the blob at `<sha>:<path>` (empty for deleted files).
     Pass `oldPath` from `/git/commits/{sha}` for renames, or the old side is
     missing. The files do not need to exist on disk; both paths are still
     traversal-checked. Same 1 MiB truncation. Errors: `400` for `commit`
     without `path`, an invalid or unknown sha, an escaping path, or a
-    submodule path; `422` when the path is in neither side of the commit.
+    submodule path; `422` when neither side contains a file blob.
 
 - `GET /v1/projects/git/log?cwd=<absolute-checkout-root>&head=<sha>&skip=<n>&limit=<n>`
   - Returns one page of commit history reachable from `head`, newest first in
     topological order. The whole repository is walked, not just the project
     directory, so the parent links form a complete graph.
-  - Requires `read` scope.
+  - Requires `read` and `control` scopes.
   - `head` is optional; without it the gateway uses `HEAD` and returns its full
     sha as `head`. Send that sha back with every later page so commits made in
     between do not shift the offset. `skip` defaults to `0`; `limit` defaults to
@@ -888,7 +888,7 @@ is `400`, a missing checkout is `404`, and missing `git` or a non-repository is
   - Returns the files a commit changed under the project directory, compared
     with its first parent (so a merge lists what it brought in; a root commit
     lists everything).
-  - Requires `read` scope.
+  - Requires `read` and `control` scopes.
   - Response: `{ "sha": "<full sha>", "changed": [ChangedFile] }`, using the
     `/git/status` file shape. Renames and copies add `oldPath`; submodules have
     `isDir: true`. `staged` is always `false` here: the listed files are the

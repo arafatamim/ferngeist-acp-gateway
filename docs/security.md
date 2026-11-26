@@ -177,15 +177,20 @@ state inside the project the agent is working on. File contents come only from
 
 The session-free `/v1/projects/git/{status,diff,log,refs}`,
 and `/v1/projects/git/commits/{sha}` routes accept an
-absolute checkout-root `cwd` without an ACP session. **Any paired client with
-`read` scope can select any checkout the gateway OS user can read.** The root
+absolute checkout-root `cwd` without an ACP session. **A paired client with
+`read` and `control` can select any checkout the gateway OS user can read.** The root
 check rejects subdirectories and bare repositories and canonicalizes symlinks;
 it is not an authorization allowlist. Relative diff paths remain confined to
 that canonical checkout. Project routes reject `acpSessionId`, and runtime
 routes reject `cwd`, so selectors cannot silently override one another.
 
-- **Auth:** all of them require the `read` scope (same gate as runtime logs).
-- **Read-only:** no endpoint writes — no file writes, no `git add`/`commit`.
+- **Auth:** runtime file listing requires `read`. Project Git browsing also
+  requires `control` because Git may execute helpers from checkout configuration.
+- **Git operations:** status and diff disable FSMonitor and optional index
+  writes. Diff also disables external diff and text conversion. Historical
+  file reads return raw blobs. Checkout Git metadata must come from a trusted
+  source because Git can still consult repository configuration, including
+  working-tree filters.
 - **Path confinement:** runtime file, listing, and diff access is confined to the ACP
   **project directory** captured from the client's `session/new`
   (`params.cwd`, re-captured from `session/load` on resume). Absolute paths,

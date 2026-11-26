@@ -195,14 +195,14 @@ checking root identity and confining diff paths. Subdirectories and conflicting
 selectors are rejected. The runtime file-list route keeps `acpSessionId`
 selection and rejects `cwd`; project routes take `cwd` and reject
 `acpSessionId`. No process is started or required.
-A paired client with `read` scope may select any checkout readable by the
-gateway OS user; checkout validation supplies no authorization allowlist.
+A paired client with `read` and `control` scopes may select any checkout
+readable by the gateway OS user. Git may consult that checkout's configuration.
 
 File contents are served only by `GET /v1/files?path=<absolute>`
 (`internal/api/files.go`, raw bytes, `read`+`control`); see docs/api.md.
 
-The workspace handlers live in `internal/api/workspace.go` and are gated behind
-the same `ScopeRead` auth used by `handleRuntimeLogs`. The git
+The workspace handlers live in `internal/api/workspace.go`. Runtime file
+listing requires `read`. Project Git browsing also requires `control`. The Git
 payloads reuse the ACP **v1** schema types vendored in
 `github.com/coder/acp-go-sdk` (package `acp`) so the Ferngeist client can decode
 them with SDK types it already has:
@@ -221,7 +221,7 @@ them with SDK types it already has:
 - `GET /v1/projects/git/diff?cwd=<checkout-root>&path=<rel>` — always returns
   `acp.ToolCallContentDiff` (`path`/`oldText`/`newText`/`type:"diff"`): a single
   object with `?path=`, otherwise a JSON array with one entry per changed file.
-  `oldText` comes from `git show HEAD:<path>`, `newText` from the working copy.
+  `oldText` comes from the Git blob at `HEAD:<path>`, `newText` from the working copy.
   This replaced the old raw unified-patch shape (`{path?,diff}`) — a breaking
   change coordinated with the client. The whole-tree array covers the same file
   set as `/git/status` (staged, unstaged, and untracked files), each compared

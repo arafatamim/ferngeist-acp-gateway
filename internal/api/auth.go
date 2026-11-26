@@ -138,6 +138,20 @@ func (s *Server) requireGatewayScope(w http.ResponseWriter, r *http.Request, sco
 	return credential, true
 }
 
+func (s *Server) requireHostAccess(w http.ResponseWriter, r *http.Request) (pairing.Credential, bool) {
+	credential, ok := s.requireGatewayScope(w, r, pairing.ScopeRead)
+	if !ok {
+		return credential, false
+	}
+	// Control permits agents to access host files and run commands. Git
+	// can also consult executable configuration in a selected checkout.
+	if err := credential.RequireScope(pairing.ScopeControl); err != nil {
+		s.writeAuthError(w, http.StatusForbidden, err)
+		return credential, false
+	}
+	return credential, true
+}
+
 // requireScope wraps a handler with the credential + scope gate, so the same
 // handler can be registered on both the public mux (wrapped, device-authed) and
 // the localhost admin mux (bare, trusted).

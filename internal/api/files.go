@@ -18,7 +18,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/arafatamim/ferngeist-acp-gateway/internal/pairing"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/workspace"
 )
 
@@ -32,7 +31,7 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	credential, ok := s.requireFileScopes(w, r)
+	credential, ok := s.requireHostAccess(w, r)
 	if !ok {
 		return
 	}
@@ -66,20 +65,6 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 	s.serveFile(w, r, f, info, filepath.Base(path))
 }
 
-func (s *Server) requireFileScopes(w http.ResponseWriter, r *http.Request) (pairing.Credential, bool) {
-	credential, ok := s.requireGatewayScope(w, r, pairing.ScopeRead)
-	if !ok {
-		return credential, false
-	}
-	// control already lets a device have the agent read any host file, so it
-	// is the real bar for reading arbitrary absolute paths here.
-	if err := credential.RequireScope(pairing.ScopeControl); err != nil {
-		s.writeAuthError(w, http.StatusForbidden, err)
-		return credential, false
-	}
-	return credential, true
-}
-
 const maxStatPaths = 64
 
 // fileStat is an ACP ResourceLink content block, plus a gateway-only error
@@ -100,7 +85,7 @@ type fileStat struct {
 func (s *Server) handleFileStat(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	if _, ok := s.requireFileScopes(w, r); !ok {
+	if _, ok := s.requireHostAccess(w, r); !ok {
 		return
 	}
 	var req struct {
