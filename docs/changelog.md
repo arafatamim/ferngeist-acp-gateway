@@ -43,6 +43,9 @@ against the code.
 
 ## Unreleased
 
+- [semantic] Revoking a paired device closes its ACP WebSockets and invalidates
+  its unused attach tokens. (2026-11-27)
+
 - [semantic] Git status keeps untracked paths that cannot be read as regular
   files inside the checkout with zero counts. Working-tree diffs skip those
   paths in whole-tree mode and reject them in single-file mode. (2026-11-26)

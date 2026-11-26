@@ -237,6 +237,14 @@ func TestCreateReturnsSessionWithID(t *testing.T) {
 	}
 }
 
+func attachTestClient(ctx context.Context, rs *RuntimeSession, sessionID, token string) (string, int64, error) {
+	deviceID, err := rs.ConsumeAttachToken(sessionID, token)
+	if err != nil {
+		return "", 0, err
+	}
+	return rs.AttachDevice(ctx, sessionID, deviceID)
+}
+
 func TestAttachClientWithValidTokenReturnsRuntimeID(t *testing.T) {
 	rs, store, agent, _, ctx := setupTest(t, Config{})
 	defer rs.Shutdown()
@@ -247,7 +255,7 @@ func TestAttachClientWithValidTokenReturnsRuntimeID(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	rID, _, err := rs.AttachClient(ctx, sess.ID, attachToken)
+	rID, _, err := attachTestClient(ctx, rs, sess.ID, attachToken)
 	if err != nil {
 		t.Fatalf("AttachClient: %v", err)
 	}
@@ -255,7 +263,7 @@ func TestAttachClientWithValidTokenReturnsRuntimeID(t *testing.T) {
 		t.Errorf("expected runtimeID %q, got %q", sess.RuntimeID, rID)
 	}
 
-	_, _, err = rs.AttachClient(ctx, sess.ID, attachToken)
+	_, _, err = attachTestClient(ctx, rs, sess.ID, attachToken)
 	if err == nil {
 		t.Error("expected error on reused attach token")
 	}
@@ -295,7 +303,7 @@ func TestCancelledAttachLeavesSessionEligibleForReaping(t *testing.T) {
 
 	attachCtx, cancel := context.WithCancel(ctx)
 	cancel()
-	if _, _, err := rs.AttachClient(attachCtx, sess.ID, token); !errors.Is(err, context.Canceled) {
+	if _, _, err := attachTestClient(attachCtx, rs, sess.ID, token); !errors.Is(err, context.Canceled) {
 		t.Fatalf("AttachClient: got %v, want context cancellation", err)
 	}
 
@@ -524,7 +532,7 @@ func TestResumeRacesAttach(t *testing.T) {
 		}
 	}()
 	for i := 0; i < 50; i++ {
-		_, gen, err := rs.AttachClient(ctx, sess.ID, token)
+		_, gen, err := attachTestClient(ctx, rs, sess.ID, token)
 		if err != nil {
 			t.Fatalf("AttachClient: %v", err)
 		}
@@ -554,7 +562,7 @@ func TestAttachClientInvalidToken(t *testing.T) {
 	defer rs.Shutdown()
 	defer store.Close()
 
-	_, _, err := rs.AttachClient(ctx, "session-x", "badtoken")
+	_, _, err := attachTestClient(ctx, rs, "session-x", "badtoken")
 	if err != ErrAttachTokenInvalid {
 		t.Errorf("expected ErrAttachTokenInvalid, got %v", err)
 	}
@@ -572,13 +580,13 @@ func TestAttachClientSecondAttachTakesOver(t *testing.T) {
 
 	// A new valid attach must take over from the previous connection rather than
 	// being rejected — a resilient session's old socket is usually already dead.
-	_, gen1, err := rs.AttachClient(ctx, sess.ID, token1)
+	_, gen1, err := attachTestClient(ctx, rs, sess.ID, token1)
 	if err != nil {
 		t.Fatalf("first AttachClient: %v", err)
 	}
 
 	token2, _ := tokenSvc.Mint(sess.ID, "dev-cc", 5*time.Minute)
-	_, gen2, err := rs.AttachClient(ctx, sess.ID, token2)
+	_, gen2, err := attachTestClient(ctx, rs, sess.ID, token2)
 	if err != nil {
 		t.Fatalf("second AttachClient should take over, got: %v", err)
 	}
@@ -609,7 +617,7 @@ func TestAttachClientSessionNotFound(t *testing.T) {
 	defer store.Close()
 
 	token, _ := tokenSvc.Mint("nonexistent-session", "dev-x", 5*time.Minute)
-	_, _, err := rs.AttachClient(ctx, "nonexistent-session", token)
+	_, _, err := attachTestClient(ctx, rs, "nonexistent-session", token)
 	if err != ErrSessionNotFound {
 		t.Errorf("expected ErrSessionNotFound, got %v", err)
 	}
@@ -625,7 +633,7 @@ func TestDetachClientSetsStatusDisconnected(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	_, gen, err := rs.AttachClient(ctx, sess.ID, token)
+	_, gen, err := attachTestClient(ctx, rs, sess.ID, token)
 	if err != nil {
 		t.Fatalf("AttachClient: %v", err)
 	}
@@ -653,7 +661,7 @@ func TestAttachClientAfterDetachResumesSession(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	_, gen, err := rs.AttachClient(ctx, sess.ID, token)
+	_, gen, err := attachTestClient(ctx, rs, sess.ID, token)
 	if err != nil {
 		t.Fatalf("AttachClient: %v", err)
 	}
@@ -670,7 +678,7 @@ func TestAttachClientAfterDetachResumesSession(t *testing.T) {
 		t.Fatal("expected non-empty resume token")
 	}
 
-	_, _, err = rs.AttachClient(ctx, sess.ID, newToken)
+	_, _, err = attachTestClient(ctx, rs, sess.ID, newToken)
 	if err != nil {
 		t.Fatalf("AttachClient after resume: %v", err)
 	}
@@ -1260,7 +1268,7 @@ func TestAttachClientStoreFallbackNotFound(t *testing.T) {
 	defer store.Close()
 
 	token, _ := tokenSvc.Mint("ac-fallback-notfound", "dev-x", 5*time.Minute)
-	_, _, err := rs.AttachClient(ctx, "ac-fallback-notfound", token)
+	_, _, err := attachTestClient(ctx, rs, "ac-fallback-notfound", token)
 	if err != ErrSessionNotFound {
 		t.Errorf("expected ErrSessionNotFound, got %v", err)
 	}
@@ -1739,7 +1747,7 @@ func TestAttachClientTokenSessionIDMismatch(t *testing.T) {
 	defer store.Close()
 
 	token, _ := tokenSvc.Mint("session-a", "dev-x", 5*time.Minute)
-	_, _, err := rs.AttachClient(ctx, "session-b", token)
+	_, _, err := attachTestClient(ctx, rs, "session-b", token)
 	if err != ErrAttachTokenInvalid {
 		t.Errorf("expected ErrAttachTokenInvalid, got %v", err)
 	}
@@ -1756,7 +1764,7 @@ func TestAttachClientInMemoryDeviceMismatch(t *testing.T) {
 	}
 
 	token, _ := tokenSvc.Mint(sess.ID, "dev-wrong", 5*time.Minute)
-	_, _, err = rs.AttachClient(ctx, sess.ID, token)
+	_, _, err = attachTestClient(ctx, rs, sess.ID, token)
 	if err != ErrDeviceMismatch {
 		t.Errorf("expected ErrDeviceMismatch, got %v", err)
 	}
@@ -1777,7 +1785,7 @@ func TestAttachClientInMemoryStatusFailed(t *testing.T) {
 	sess.mu.Unlock()
 
 	token, _ := tokenSvc.Mint(sess.ID, "dev-ac-fail", 5*time.Minute)
-	_, _, err = rs.AttachClient(ctx, sess.ID, token)
+	_, _, err = attachTestClient(ctx, rs, sess.ID, token)
 	if err != ErrSessionNotActive {
 		t.Errorf("expected ErrSessionNotActive, got %v", err)
 	}
@@ -1856,7 +1864,7 @@ func TestReapExpiredSkipsActive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if _, _, err := rs.AttachClient(ctx, sess.ID, tok); err != nil {
+	if _, _, err := attachTestClient(ctx, rs, sess.ID, tok); err != nil {
 		t.Fatalf("AttachClient: %v", err)
 	}
 
@@ -2037,7 +2045,7 @@ func TestAttachClientOnDisconnectedSession(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	_, gen, err := rs.AttachClient(ctx, sess.ID, token)
+	_, gen, err := attachTestClient(ctx, rs, sess.ID, token)
 	if err != nil {
 		t.Fatalf("first AttachClient: %v", err)
 	}
@@ -2047,7 +2055,7 @@ func TestAttachClientOnDisconnectedSession(t *testing.T) {
 	}
 
 	newToken, _ := tokenSvc.Mint(sess.ID, "dev-att-disc", 5*time.Minute)
-	_, _, err = rs.AttachClient(ctx, sess.ID, newToken)
+	_, _, err = attachTestClient(ctx, rs, sess.ID, newToken)
 	if err != nil {
 		t.Fatalf("AttachClient on disconnected session: %v", err)
 	}
@@ -2503,7 +2511,7 @@ func TestTeardownCancelsPendingTurnsOnlyForThatSession(t *testing.T) {
 				t.Fatalf("Create dev-b: %v", err)
 			}
 			// Attached, so the reaper spares it.
-			if _, _, err := rs.AttachClient(ctx, theirs.ID, token); err != nil {
+			if _, _, err := attachTestClient(ctx, rs, theirs.ID, token); err != nil {
 				t.Fatalf("AttachClient: %v", err)
 			}
 			done := registerPrompt(mine, "done")

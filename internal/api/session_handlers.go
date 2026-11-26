@@ -176,29 +176,48 @@ func (s *Server) handleACPWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.handleSessionWebSocket(w, r, runtimeID, sessionID, attachToken)
+	deviceID, err := s.sessionSvc.ConsumeAttachToken(sessionID, attachToken)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusUnauthorized)
+		return
+	}
+	deviceCtx, err := s.pairing.DeviceContext(deviceID)
+	if err != nil {
+		http.Error(w, session.ErrAttachTokenInvalid.Error(), http.StatusUnauthorized)
+		return
+	}
+	s.handleSessionWebSocket(deviceCtx, w, r, runtimeID, sessionID, deviceID)
 }
 
 // handleSessionWebSocket handles reconnection to an existing resilient session.
-// Flow: validate attach token (taking over any stale connection) → upgrade to
+// Flow: claim the session (taking over any stale connection) → upgrade to
 // WebSocket → bind pump client → proxy. A new valid attach always supersedes the
 // previous connection rather than being rejected, so a client whose socket died
 // (e.g. the app was killed) can always reconnect. The client is responsible for
 // calling session/load on the agent for context restoration after reconnection.
-func (s *Server) handleSessionWebSocket(w http.ResponseWriter, r *http.Request, runtimeID, sessionID, attachToken string) {
-	runtimeIDResult, gen, err := s.sessionSvc.AttachClient(r.Context(), sessionID, attachToken)
+func (s *Server) handleSessionWebSocket(deviceCtx context.Context, w http.ResponseWriter, r *http.Request, runtimeID, sessionID, deviceID string) {
+	attachCtx, cancel := context.WithCancel(deviceCtx)
+	stopRequestCancel := context.AfterFunc(r.Context(), cancel)
+
+	runtimeIDResult, gen, err := s.sessionSvc.AttachDevice(attachCtx, sessionID, deviceID)
+	stopRequestCancel()
+	cancel()
 	if err != nil {
 		s.logger.Warn("attach client failed", "error", err)
-		if errors.Is(err, session.ErrAttachTokenInvalid) {
-			http.Error(w, err.Error(), http.StatusUnauthorized)
+		if deviceCtx.Err() != nil {
+			http.Error(w, session.ErrAttachTokenInvalid.Error(), http.StatusUnauthorized)
 			return
 		}
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
 
+	defer func() { _ = s.sessionSvc.DetachClient(sessionID, gen) }()
+	if deviceCtx.Err() != nil {
+		http.Error(w, session.ErrAttachTokenInvalid.Error(), http.StatusUnauthorized)
+		return
+	}
 	if runtimeIDResult != runtimeID {
-		_ = s.sessionSvc.DetachClient(sessionID, gen)
 		http.Error(w, "runtime ID does not match session", http.StatusBadRequest)
 		return
 	}
@@ -206,19 +225,24 @@ func (s *Server) handleSessionWebSocket(w http.ResponseWriter, r *http.Request, 
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
 	if err != nil {
 		s.logger.Warn("websocket accept failed", "error", err)
-		_ = s.sessionSvc.DetachClient(sessionID, gen)
 		return
 	}
 	defer func() { _ = conn.CloseNow() }()
-	defer func() { _ = s.sessionSvc.DetachClient(sessionID, gen) }()
+	// Close independently of stdio, which can be blocked on an agent write.
+	stopClose := context.AfterFunc(deviceCtx, func() { _ = conn.CloseNow() })
+	defer stopClose()
 	conn.SetReadLimit(acpWebSocketReadLimit)
 
 	// Bind this connection to the session pump. If a newer attach raced ahead and
 	// already superseded us, bail out and let the deferred (no-op) detach clean up.
-	if !s.sessionSvc.BindConn(sessionID, conn, gen) {
+	if deviceCtx.Err() != nil || !s.sessionSvc.BindConn(sessionID, conn, gen) {
 		return
 	}
 
+	s.runACPWebSocket(deviceCtx, conn, runtimeID, sessionID, gen)
+}
+
+func (s *Server) runACPWebSocket(ctx context.Context, conn *websocket.Conn, runtimeID, sessionID string, gen int64) {
 	pump, err := s.sessionSvc.GetPump(sessionID)
 	if err != nil {
 		s.logger.Warn("pump not found", "error", err)
@@ -228,22 +252,20 @@ func (s *Server) handleSessionWebSocket(w http.ResponseWriter, r *http.Request, 
 	// Detect a dead peer that never sent a close frame (half-open socket): ping
 	// periodically and close the conn on failure so the read loop unblocks and
 	// the session is released instead of lingering as falsely "connected".
-	pingCtx, stopPing := context.WithCancel(context.Background())
+	pingCtx, stopPing := context.WithCancel(ctx)
 	defer stopPing()
 	go keepAliveWebSocket(pingCtx, conn, s.logger, pump.LastClientWriteAt)
 
-	done := make(chan error, 1)
 	writeToAgent := func(payload []byte) error { return pump.WriteToAgent(gen, payload) }
-	go proxyWebSocketToStdio(conn, writeToAgent, func() {}, runtimeID, s.runtime.AppendLog,
+	err = proxyWebSocketToStdio(ctx, conn, writeToAgent, runtimeID, s.runtime.AppendLog,
 		func(payload []byte) {
 			s.sessionSvc.LogInbound(sessionID, string(payload))
-		}, done)
+		})
 
 	// Log why the socket ended. Before this, every non-normal closure was
 	// silent: a read-limit hit (StatusMessageTooBig), a write failure, or a
 	// half-open peer looked identical to an agent death in the logs.
-	err = <-done
-	if err != nil && !errors.Is(err, io.EOF) {
+	if err != nil && ctx.Err() == nil && !errors.Is(err, io.EOF) {
 		if closeStatus := websocket.CloseStatus(err); closeStatus == websocket.StatusMessageTooBig {
 			s.logger.Warn("acp websocket closed: inbound message exceeds read limit",
 				"session_id", sessionID, "runtime_id", runtimeID,

@@ -123,6 +123,8 @@ type Service struct {
 	armedUntil  time.Time
 	challenges  map[string]challengeRecord
 	credentials map[string]Credential
+	// ACP attachments share the pairing's lifetime across token rotations.
+	deviceLifetimes map[string]deviceLifetime
 	// byTokenHash indexes TokenHash -> deviceID so Validate is O(1):
 	// one SHA-256 per request instead of one per device.
 	byTokenHash map[string]string
@@ -132,6 +134,11 @@ type Service struct {
 	// consults them, and only after proof-of-possession.
 	retired map[string]retiredToken
 	store   *storage.SQLiteStore
+}
+
+type deviceLifetime struct {
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 // retiredToken is a credential hash that a refresh rotated away, and the
@@ -180,6 +187,8 @@ func NewServiceWithOptions(logger *slog.Logger, store *storage.SQLiteStore, opti
 		byTokenHash: make(map[string]string),
 		retired:     make(map[string]retiredToken),
 		store:       store,
+
+		deviceLifetimes: make(map[string]deviceLifetime),
 	}
 	service.loadPersistedCredentials()
 	return service
@@ -595,6 +604,23 @@ func (s *Service) ListDevices() []Credential {
 	return devices
 }
 
+// DeviceContext is cancelled when the pairing for deviceID is removed.
+// Credential refresh keeps the pairing and its context alive.
+func (s *Service) DeviceContext(deviceID string) (context.Context, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, ok := s.credentials[deviceID]; !ok {
+		return nil, ErrDeviceNotFound
+	}
+	if lifetime, ok := s.deviceLifetimes[deviceID]; ok {
+		return lifetime.ctx, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	s.deviceLifetimes[deviceID] = deviceLifetime{ctx: ctx, cancel: cancel}
+	return ctx, nil
+}
+
 func (s *Service) RevokeDevice(deviceID string) (Credential, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -675,6 +701,10 @@ func (s *Service) deleteCredentialLocked(deviceID string) {
 		}
 	}
 	delete(s.credentials, deviceID)
+	if lifetime, ok := s.deviceLifetimes[deviceID]; ok {
+		lifetime.cancel()
+		delete(s.deviceLifetimes, deviceID)
+	}
 	// A revoked device must not keep exchanging whatever it rotated away.
 	for hash, entry := range s.retired {
 		if entry.deviceID == deviceID {

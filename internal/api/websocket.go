@@ -63,28 +63,26 @@ func keepAliveWebSocket(ctx context.Context, conn *websocket.Conn, logger *slog.
 // raw client payload into the runtime log buffer as `acp.stdin` traffic.
 // The loop exits on normal WebSocket closure or any read/write error.
 //
-// Parameters writeFunc and closeFunc replace the old io.WriteCloser to support
-// both legacy (stdin.Write + stdin.Close) and resilient (pump.WriteToAgent +
-// no-op close) paths without duplicating the read loop.
+// The caller owns the agent's stdin so a client disconnect leaves it open.
 //
 // The optional logInbound callback is called for each inbound frame and is used
 // by the resilient session path to asynchronously record client->agent diagnostics.
-func proxyWebSocketToStdio(src *websocket.Conn, writeFunc func([]byte) error, closeFunc func(), runtimeID string, appendLog func(string, string, string), logInbound func([]byte), done chan<- error) {
-	defer closeFunc()
+func proxyWebSocketToStdio(ctx context.Context, src *websocket.Conn, writeFunc func([]byte) error, runtimeID string, appendLog func(string, string, string), logInbound func([]byte)) error {
 	for {
 		// ACP sessions can stay quiet between turns. Do not treat a short idle
 		// period as a dead websocket just because no client frame arrived yet.
-		messageType, payload, err := src.Read(context.Background())
+		messageType, payload, err := src.Read(ctx)
 		if err != nil {
 			if closeStatus := websocket.CloseStatus(err); closeStatus == websocket.StatusNormalClosure || closeStatus == websocket.StatusGoingAway {
-				done <- io.EOF
-				return
+				return io.EOF
 			}
-			done <- err
-			return
+			return err
 		}
 		if messageType != websocket.MessageText && messageType != websocket.MessageBinary {
 			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 		if appendLog != nil {
 			appendLog(runtimeID, "acp.stdin", string(payload))
@@ -93,8 +91,7 @@ func proxyWebSocketToStdio(src *websocket.Conn, writeFunc func([]byte) error, cl
 			logInbound(payload)
 		}
 		if err := writeFunc(payload); err != nil {
-			done <- err
-			return
+			return err
 		}
 	}
 }

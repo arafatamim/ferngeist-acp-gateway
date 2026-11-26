@@ -17,6 +17,7 @@ import (
 
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/api"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/catalog"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/pairing"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/push"
 	gatewayruntime "github.com/arafatamim/ferngeist-acp-gateway/internal/runtime"
 	"github.com/coder/websocket"
@@ -93,7 +94,18 @@ func restartHarnessAgent(t *testing.T, bin, id string, env map[string]string) (c
 	store, logger, dir := openTestStore(t), testLogger(t), t.TempDir()
 	rt := gatewayruntime.NewSupervisor(logger, dir, store, nil)
 	t.Cleanup(rt.Close)
-	server, sessions := composeServer(api.Deps{Logger: logger, Catalog: catalog.New(dir, nil), Runtime: rt, Push: push.NewDispatcher(store, nil, logger)}, store)
+	pairings := pairing.NewService(logger, store)
+	challenge, err := pairings.StartPairingWithLocalApproval()
+	if err != nil {
+		t.Fatalf("start pairing: %v", err)
+	}
+	device, err := pairings.CompletePairing(challenge.ID, challenge.Code, "Harness test")
+	if err != nil {
+		t.Fatalf("complete pairing: %v", err)
+	}
+	server, sessions := composeServer(api.Deps{
+		Logger: logger, Catalog: catalog.New(dir, nil), Runtime: rt, Push: push.NewDispatcher(store, nil, logger), Pairing: pairings,
+	}, store)
 	t.Cleanup(sessions.Shutdown)
 	t.Cleanup(func() {
 		if err := server.Shutdown(context.Background()); err != nil {
@@ -104,11 +116,11 @@ func restartHarnessAgent(t *testing.T, bin, id string, env map[string]string) (c
 	t.Cleanup(httpServer.Close)
 
 	agent := catalog.Agent{ID: id, Detected: true, Security: catalog.SecurityConfig{AllowsRemoteStart: true}, Launch: catalog.LaunchConfig{Mode: "process", Command: bin}}
-	old, _, err := sessions.Create(ctx, agent, "device", nil)
+	old, _, err := sessions.Create(ctx, agent, device.DeviceID, nil)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	fresh, token, err := sessions.Restart(ctx, old.RuntimeID, "device", agent, env)
+	fresh, token, err := sessions.Restart(ctx, old.RuntimeID, device.DeviceID, agent, env)
 	if err != nil {
 		t.Fatalf("restart: %v", err)
 	}

@@ -25,7 +25,8 @@ The public API requires authentication for most useful actions.
 - Pairing issues a device credential.
 - Credentials can expire.
 - Credentials can be refreshed.
-- Revoking a device invalidates its credential.
+- Revoking a device invalidates its credential and outstanding ACP attach
+  tokens, and closes its ACP WebSockets.
 
 ### Scopes
 

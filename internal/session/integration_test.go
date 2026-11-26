@@ -74,12 +74,12 @@ func TestIntegration_SessionLifecycle(t *testing.T) {
 		t.Errorf("expected store status disconnected, got %s", rec.Status)
 	}
 
-	_, gen, err := rs.AttachClient(ctx, sess.ID, attachToken)
+	_, gen, err := attachTestClient(ctx, rs, sess.ID, attachToken)
 	if err != nil {
 		t.Fatalf("AttachClient: %v", err)
 	}
 
-	_, _, err = rs.AttachClient(ctx, sess.ID, attachToken)
+	_, _, err = attachTestClient(ctx, rs, sess.ID, attachToken)
 	if err == nil {
 		t.Error("expected error on reused attach token")
 	}
@@ -104,7 +104,7 @@ func TestIntegration_SessionLifecycle(t *testing.T) {
 		t.Error("expected non-empty resume attach token")
 	}
 
-	_, _, err = rs.AttachClient(ctx, sess.ID, newToken)
+	_, _, err = attachTestClient(ctx, rs, sess.ID, newToken)
 	if err != nil {
 		t.Fatalf("AttachClient after resume: %v", err)
 	}

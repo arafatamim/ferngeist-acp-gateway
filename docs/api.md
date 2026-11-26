@@ -1643,6 +1643,7 @@ Attach tokens are single-use, short-lived (5-minute TTL) nonces used to prove ow
 - Minted on gateway session creation (`POST /v1/agents/{id}/connect`)
 - Minted on gateway session resume (`POST /v1/sessions/{id}/resume`)
 - Consumed on first WebSocket connect (`GET /v1/acp/{runtimeId}?sessionId=&attachToken=`)
+- Invalidated when the issuing device is revoked
 - 64 hex characters (32 random bytes)
 - Stored in memory only (not persisted to SQLite)
 
@@ -1688,7 +1689,9 @@ disabled. The CLI reads the admin address and token from its environment.
   - Lists paired devices.
 
 - `DELETE /admin/v1/devices/{deviceId}`
-  - Revokes a paired device.
+  - Revokes a paired device, closes its ACP WebSockets, and invalidates its
+    unused attach tokens. Its agent processes follow the normal disconnected
+    session lifecycle.
 
 ### Custom agent management
 

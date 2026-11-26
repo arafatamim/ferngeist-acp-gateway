@@ -2593,6 +2593,57 @@ func TestSessionWebSocketReconnect(t *testing.T) {
 	_ = conn.CloseNow()
 }
 
+func TestDeviceRevocationEndsACPAccess(t *testing.T) {
+	h := newSessionTestHarness(t)
+	active := connectAgent(t, h.server, h.token, "mock-acp")
+	pending := connectAgent(t, h.server, h.token, "mock-acp")
+	other := connectAgent(t, h.server, pairDevice(t, h.server), "mock-acp")
+	ts := httptest.NewServer(h.server.Handler())
+	defer ts.Close()
+
+	wsURL := func(resp runtimeConnectResponse) string {
+		return "ws" + strings.TrimPrefix(ts.URL, "http") + resp.WebSocketPath +
+			"?sessionId=" + resp.SessionID + "&attachToken=" + resp.AttachToken
+	}
+	conn := dialTestWebSocket(t, wsURL(active))
+	t.Cleanup(func() { _ = conn.CloseNow() })
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := conn.Write(ctx, websocket.MessageText, []byte(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}`)); err != nil {
+		t.Fatalf("initialize write: %v", err)
+	}
+	if _, _, err := conn.Read(ctx); err != nil {
+		t.Fatalf("initialize response: %v", err)
+	}
+
+	revoke := httptest.NewRecorder()
+	h.server.AdminHandler().ServeHTTP(revoke, httptest.NewRequest(http.MethodDelete, "/admin/v1/devices/"+h.deviceID, nil))
+	if revoke.Code != http.StatusOK {
+		t.Fatalf("revoke status = %d, body = %s", revoke.Code, revoke.Body.String())
+	}
+
+	t.Run("active socket closes", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if _, _, err := conn.Read(ctx); err == nil || ctx.Err() != nil {
+			t.Fatalf("revoked socket read = %v, want server disconnect", err)
+		}
+		if _, err := h.server.sessionSvc.GetPump(active.SessionID); err != nil {
+			t.Fatalf("revocation removed the agent session: %v", err)
+		}
+	})
+	t.Run("pending token is rejected", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, wsURL(pending), nil)
+		rec := httptest.NewRecorder()
+		h.server.Handler().ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("attach status = %d, want 401", rec.Code)
+		}
+	})
+	otherConn := dialTestWebSocket(t, wsURL(other))
+	_ = otherConn.CloseNow()
+}
+
 func TestAgentConnectReturnsSessionIDAndAttachToken(t *testing.T) {
 	baseDir := newHarnessBaseDir(t)
 	buildMockAgent(t, baseDir)

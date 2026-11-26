@@ -412,7 +412,17 @@ func (rs *RuntimeSession) Resume(ctx context.Context, sessionID, deviceID string
 	return token, nil
 }
 
-// AttachClient validates the attach token and claims the session for a new
+// ConsumeAttachToken consumes a single-use token for this session and returns
+// the issuing device's ID. The transport verifies that the device is still paired.
+func (rs *RuntimeSession) ConsumeAttachToken(sessionID, attachToken string) (string, error) {
+	validatedSessionID, deviceID, err := rs.tokenSvc.Validate(attachToken)
+	if err != nil || validatedSessionID != sessionID {
+		return "", ErrAttachTokenInvalid
+	}
+	return deviceID, nil
+}
+
+// AttachDevice claims the session on behalf of an authorized device for a new
 // client, taking over from any previously-bound connection. It returns the
 // session's RuntimeID (so the handler can verify the path parameter) and a
 // connection generation that the caller must pass to BindConn and DetachClient
@@ -423,15 +433,7 @@ func (rs *RuntimeSession) Resume(ctx context.Context, sessionID, deviceID string
 // gateway has not yet observed as closed (half-open TCP, no FIN). Refusing the
 // reconnect would strand the session until the dead peer is detected, so a valid
 // attach always wins and evicts the stale connection.
-func (rs *RuntimeSession) AttachClient(ctx context.Context, sessionID, attachToken string) (string, int64, error) {
-	validatedSessionID, claimDeviceID, err := rs.tokenSvc.Validate(attachToken)
-	if err != nil {
-		return "", 0, ErrAttachTokenInvalid
-	}
-	if validatedSessionID != sessionID {
-		return "", 0, ErrAttachTokenInvalid
-	}
-
+func (rs *RuntimeSession) AttachDevice(ctx context.Context, sessionID, deviceID string) (string, int64, error) {
 	rs.mu.Lock()
 	sess, ok := rs.sessions[sessionID]
 	rs.mu.Unlock()
@@ -442,7 +444,7 @@ func (rs *RuntimeSession) AttachClient(ctx context.Context, sessionID, attachTok
 
 	sess.mu.Lock()
 	defer sess.mu.Unlock()
-	if sess.DeviceID != claimDeviceID {
+	if sess.DeviceID != deviceID {
 		return "", 0, ErrDeviceMismatch
 	}
 	if sess.Status == StatusFailed || sess.Status == StatusClosing {
