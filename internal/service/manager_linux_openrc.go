@@ -37,19 +37,26 @@ var openrcEtcDir = "/etc"
 
 // openrcScriptTemplate is the runscript Install regenerates on every install.
 // Runtime settings never live here — they stay in the env file the systemd
-// manager also loads, sourced in start_pre so supervise-daemon inherits them.
+// manager also loads. OpenRC passes these trusted paths to a child shell
+// after dropping privileges to the service account.
 const openrcScriptTemplate = `#!/sbin/openrc-run
 
 # Managed by ferngeist-gateway daemon install; regenerated on every install.
 
 description="Ferngeist Gateway daemon"
 
-command="%s"
-command_args="daemon run"
-command_user="%s"
-directory="%s"
-output_log="%s"
-error_log="%s"
+gateway_user="%s"
+gateway_uid="%d"
+gateway_dir="%s"
+gateway_log="%s"
+gateway_env="%s"
+gateway_override="%s"
+gateway_home="%s"
+gateway_bin="%s"
+
+command="/bin/sh"
+command_user='"$gateway_user"'
+command_args="%s"
 
 supervisor=supervise-daemon
 # Mirrors the systemd unit's Restart=on-failure RestartSec=2, bounded the way
@@ -62,36 +69,23 @@ depend() {
 	need localmount
 	after net
 }
-
-# supervise-daemon inherits this shell's exported environment, so set -a exports
-# every FERNGEIST_GATEWAY_* assignment from the same env file the systemd unit
-# loads via EnvironmentFile. HOME must be exported because OpenRC sets no login
-# environment for command_user (systemd does for User= units) and the harness
-# resolves agent config from it. The override file is optional.
-#
-# The env file also sets PATH to the installing user's, which must NOT stay in
-# this shell: openrc-run resolves its own helpers through PATH, and with a
-# replaced PATH it loses them mid-start. It then reports "failed to start" and
-# never records the service as started, while supervise-daemon keeps running the
-# daemon -- so status and stop both saw a stopped service and uninstall orphaned
-# a live one. Keep openrc-run's PATH and hand the user's PATH to the child with
-# supervise-daemon's own --env instead.
-start_pre() {
-	_rc_path="$PATH"
-	set -a
-	. "%s"
-	if [ -f "%s" ]; then
-		. "%s"
-	fi
-	set +a
-	_gateway_path="$PATH"
-	PATH="$_rc_path"
-	export HOME="%s"
-	supervise_daemon_args="--env PATH=$_gateway_path"
-}
 `
 
+// OpenRC evaluates command_args once more when assembling the supervise-daemon
+// invocation. Resolve paths only inside that evaluation, as quoted arguments.
+// The child loads the optional override after the main file and keeps its PATH
+// out of OpenRC's own shell. Set HOME for the agent harness without a login.
+const openrcCommandArgs = `-c 'uid=$(command -p id -u) || exit; [ "$uid" = "$1" ] && [ "$uid" != 0 ] || exit 1; shift; ` +
+	`cd "$1" || exit; previous_umask=$(umask); umask 077; exec >>"$2" 2>&1; umask "$previous_umask"; ` +
+	`set -a; . "$3" || exit; if [ -f "$4" ]; then . "$4" || exit; fi; set +a; export HOME="$5"; exec "$6" daemon run' ` +
+	`ferngeist "$gateway_uid" "$gateway_dir" "$gateway_log" "$gateway_env" "$gateway_override" "$gateway_home" "$gateway_bin"`
+
 type openrcManager struct{}
+
+type openrcInstallState struct {
+	stopped     bool
+	binaryReady bool
+}
 
 // effectiveUID and openrcUserLookup are real work with test overrides (the
 // same pattern as installCopySource): tests cannot drop privileges or conjure
@@ -139,7 +133,17 @@ func openrcTargetAccount() (openrcAccount, error) {
 			"%w: SUDO_USER is unset; run `sudo ferngeist-gateway daemon install` from the account the gateway should run as",
 			ErrServiceUnsupportedConfig)
 	}
-	return openrcUserLookup(sudoUser)
+	account, err := openrcUserLookup(sudoUser)
+	if err != nil {
+		return openrcAccount{}, err
+	}
+	if account.uid == 0 {
+		return openrcAccount{}, fmt.Errorf("%w: the OpenRC service account must be non-root", ErrServiceUnsupportedConfig)
+	}
+	if numericUID, err := strconv.Atoi(account.name); err == nil && numericUID != account.uid {
+		return openrcAccount{}, fmt.Errorf("%w: OpenRC interprets numeric account names as UIDs", ErrServiceUnsupportedConfig)
+	}
+	return account, nil
 }
 
 // requireOpenRCRoot guards the rc-service mutations: OpenRC runscripts run
@@ -202,62 +206,112 @@ func (m *openrcManager) Install(options InstallOptions) error {
 	if err := os.MkdirAll(filepath.Dir(openrcScriptPath()), 0o755); err != nil {
 		return fmt.Errorf("create init script directory: %w", err)
 	}
-
-	// A reinstall with a different binary must stop the running daemon
-	// first: the old process holds the target open for execution and Linux
-	// refuses to overwrite it (ETXTBSY). --ifexists makes the fresh-install
-	// case a no-op; the rc-service start below brings the daemon back.
-	if err := m.rcService("--ifexists", openrcServiceName, "stop"); err != nil {
+	state, err := m.stopForInstall(paths, account)
+	if err != nil {
 		return err
 	}
 
-	if err := installOpenRCFiles(paths, options, account); err != nil {
-		return m.restoreStoppedService(err)
+	if state.binaryReady {
+		err = writeLinuxServiceSettings(paths, options)
+	} else {
+		paths, err = writeLinuxServiceFiles(paths, options)
+	}
+	if err != nil {
+		return m.restoreStoppedService(state.stopped, err)
 	}
 
 	// sudo created the whole state tree as root; the daemon runs as the
 	// account and writes its db, logs and managed binaries there.
 	if err := chownTree(paths.rootDir, account.uid, account.gid); err != nil {
-		return m.restoreStoppedService(fmt.Errorf("chown service data to %s: %w", account.name, err))
+		return m.restoreStoppedService(state.stopped, fmt.Errorf("chown service data to %s: %w", account.name, err))
+	}
+	if !state.stopped {
+		if err := writeOpenRCScript(paths, account); err != nil {
+			return err
+		}
 	}
 
 	if err := m.rcUpdate("add", openrcServiceName, openrcRunlevel); err != nil {
-		return m.restoreStoppedService(err)
+		return m.restoreStoppedService(state.stopped, err)
 	}
 	return m.rcService(openrcServiceName, "start")
+}
+
+func (m *openrcManager) stopForInstall(paths linuxPaths, account openrcAccount) (openrcInstallState, error) {
+	var state openrcInstallState
+	_, err := os.Lstat(openrcScriptPath())
+	if errors.Is(err, os.ErrNotExist) {
+		return state, nil
+	}
+	if err != nil {
+		return state, fmt.Errorf("read init script: %w", err)
+	}
+	source, err := installCopySource()
+	if err != nil {
+		return state, fmt.Errorf("resolve current binary: %w", err)
+	}
+	if stable, ok := stableExecutable(source); ok {
+		paths.execPath = stable
+	} else {
+		state.binaryReady, err = prepareMissingOpenRCBinary(source, paths.binaryPath)
+		if err != nil {
+			return state, err
+		}
+	}
+
+	// Replace the old runscript before rc-service can load it, then stop
+	// the daemon before replacing the running binary (ETXTBSY).
+	if err := writeOpenRCScript(paths, account); err != nil {
+		return state, err
+	}
+	if err := m.rcService("--ifexists", openrcServiceName, "stop"); err != nil {
+		return state, err
+	}
+	state.stopped = true
+	return state, nil
+}
+
+// A package-manager install may have no private binary. Prepare the incoming
+// copy before replacing the existing script so a failed copy cannot strand it.
+func prepareMissingOpenRCBinary(source, target string) (bool, error) {
+	_, err := os.Lstat(target)
+	if err == nil {
+		return false, nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return false, fmt.Errorf("read service binary: %w", err)
+	}
+	if err := replaceFileAtomically(source, target, 0o755); err != nil {
+		return false, fmt.Errorf("write service binary: %w", err)
+	}
+	return true, nil
 }
 
 // restoreStoppedService brings the daemon back after a post-stop install
 // failure: the initial stop left a previously-running daemon down, and a
 // best-effort start beats leaving it silently stopped. Safe at every call
 // site — whatever script is on disk is the freshest complete install state.
-func (m *openrcManager) restoreStoppedService(err error) error {
-	_ = m.rcService("--ifexists", openrcServiceName, "start")
-	return err
-}
-
-func installOpenRCFiles(paths linuxPaths, options InstallOptions, account openrcAccount) error {
-	written, err := writeLinuxServiceFiles(paths, options)
-	if err != nil {
-		return err
+func (m *openrcManager) restoreStoppedService(reinstall bool, err error) error {
+	if reinstall {
+		_ = m.rcService("--ifexists", openrcServiceName, "start")
 	}
-	return writeOpenRCScript(written, account)
+	return err
 }
 
 func writeOpenRCScript(paths linuxPaths, account openrcAccount) error {
 	logPath := filepath.Join(paths.logDir, "supervisor.log")
 	script := fmt.Sprintf(openrcScriptTemplate,
-		escapeShellQuoted(paths.execPath),
 		escapeShellQuoted(account.name),
+		account.uid,
 		escapeShellQuoted(paths.rootDir),
-		escapeShellQuoted(logPath),
 		escapeShellQuoted(logPath),
 		escapeShellQuoted(paths.envPath),
 		escapeShellQuoted(paths.overridePath),
-		escapeShellQuoted(paths.overridePath),
 		escapeShellQuoted(account.home),
+		escapeShellQuoted(paths.execPath),
+		escapeShellQuoted(openrcCommandArgs),
 	)
-	if err := os.WriteFile(openrcScriptPath(), []byte(script), 0o755); err != nil {
+	if err := writeFileAtomically(strings.NewReader(script), openrcScriptPath(), 0o755); err != nil {
 		return fmt.Errorf("write OpenRC init script: %w", err)
 	}
 	return nil

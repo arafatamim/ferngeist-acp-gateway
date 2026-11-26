@@ -15,7 +15,7 @@ func TestLinuxServiceEnvironmentUsesInstallPath(t *testing.T) {
 		path string
 		want string
 	}{
-		{"special characters", `/custom tools/bin:/quote"/bin:/back\slash/bin:/$HOME/bin:/100%/bin`, `PATH="/custom tools/bin:/quote\"/bin:/back\\slash/bin:/$HOME/bin:/100%/bin"`},
+		{"special characters", `/custom tools/bin:/quote"/bin:/back\slash/bin:/$HOME/bin:/100%/bin`, `PATH="/custom tools/bin:/quote\"/bin:/back\\slash/bin:/\$HOME/bin:/100%/bin"`},
 		{"empty keeps manager default", "", ""},
 	}
 	for _, test := range tests {

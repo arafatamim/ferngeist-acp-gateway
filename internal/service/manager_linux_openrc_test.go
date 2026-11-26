@@ -5,8 +5,10 @@ package service
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -60,6 +62,9 @@ func seedOpenRCRoot(t *testing.T, home string) openrcAccount {
 	prevUID, prevLookup, prevEtc := effectiveUID, openrcUserLookup, openrcEtcDir
 	effectiveUID = func() int { return 0 }
 	uid, gid := os.Getuid(), os.Getgid()
+	if uid == 0 {
+		uid = 65534
+	}
 	openrcUserLookup = func(name string) (openrcAccount, error) {
 		return openrcAccount{name: name, home: home, uid: uid, gid: gid}, nil
 	}
@@ -77,7 +82,7 @@ func seedOpenRCRoot(t *testing.T, home string) openrcAccount {
 
 // TestOpenRCInstallWritesScriptAndStartsService pins the runscript's wire
 // format — the file OpenRC actually executes — plus the lifecycle ordering:
-// stop before the binary swap, rc-update add, start last.
+// a first install publishes the runscript and rc-update adds it before start.
 func TestOpenRCInstallWritesScriptAndStartsService(t *testing.T) {
 	home := t.TempDir()
 	account := seedOpenRCRoot(t, home)
@@ -99,16 +104,9 @@ func TestOpenRCInstallWritesScriptAndStartsService(t *testing.T) {
 	paths := linuxPathsForHome(home)
 	for _, want := range []string{
 		"#!/sbin/openrc-run",
-		`command="` + paths.execPath + `"`,
-		`command_user="` + account.name + `"`,
-		`directory="` + paths.rootDir + `"`,
+		`gateway_user="` + account.name + `"`,
 		"supervisor=supervise-daemon",
 		"respawn_delay=2",
-		`. "` + paths.envPath + `"`,
-		`export HOME="` + account.home + `"`,
-		`_rc_path="$PATH"`,
-		`PATH="$_rc_path"`,
-		`supervise_daemon_args="--env PATH=$_gateway_path"`,
 	} {
 		if !strings.Contains(string(script), want) {
 			t.Fatalf("init script missing %q:\n%s", want, script)
@@ -125,7 +123,6 @@ func TestOpenRCInstallWritesScriptAndStartsService(t *testing.T) {
 
 	calls := rcCalls(t, serviceLog)
 	want := []string{
-		"--ifexists " + openrcServiceName + " stop",
 		openrcServiceName + " start",
 	}
 	if len(calls) != len(want) {
@@ -133,13 +130,158 @@ func TestOpenRCInstallWritesScriptAndStartsService(t *testing.T) {
 	}
 	for i := range want {
 		if calls[i] != want[i] {
-			t.Fatalf("rc-service call %d = %q, want %q (stop must precede the binary swap, start must be last)", i, calls[i], want[i])
+			t.Fatalf("rc-service call %d = %q, want %q", i, calls[i], want[i])
 		}
 	}
 
 	updates := rcCalls(t, updateLog)
 	if len(updates) != 1 || updates[0] != "add "+openrcServiceName+" "+openrcRunlevel {
 		t.Fatalf("rc-update calls = %v, want one add to the default runlevel", updates)
+	}
+}
+
+func TestOpenRCReinstallReplacesOldScriptAndLoadsSettingsOnlyInChild(t *testing.T) {
+	if os.Geteuid() == 0 {
+		runOpenRCRegressionAsServiceUser(t)
+		return
+	}
+	account := seedOpenRCRoot(t, filepath.Join(t.TempDir(), "with  space"))
+	paths := linuxPathsForHome(account.home)
+	if err := mkdirLinuxState(paths); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(openrcScriptPath()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeOpenRCFixture(t, openrcScriptPath(), "#!/sbin/openrc-run\nlegacy_runscript=loaded\n")
+	writeOpenRCFixture(t, paths.overridePath, "FERNGEIST_GATEWAY_TEST_SETTING=from-override\nPATH='/custom path'\n")
+	t.Setenv("OPENRC_TEST_SCRIPT", openrcScriptPath())
+	result := filepath.Join(t.TempDir(), "result")
+	t.Setenv("OPENRC_TEST_RESULT", result)
+	binary := filepath.Join(t.TempDir(), "ferngeist-gateway")
+	previous := installCopySource
+	installCopySource = func() (string, error) { return binary, nil }
+	t.Cleanup(func() { installCopySource = previous })
+	writeOpenRCFixture(t, binary, `#!/bin/sh
+printf 'child:%s:%s:%s:%s:%s:%s\n' "$FERNGEIST_GATEWAY_TEST_SETTING" "$FERNGEIST_GATEWAY_LISTEN_ADDR" \
+	"$FERNGEIST_GATEWAY_STATE_DB" "$HOME" "$PWD" "$PATH" >> "$OPENRC_TEST_RESULT"
+`)
+	newFakeOpenRC(t, nil, nil)
+	fakeRCService, _, _ := strings.Cut(os.Getenv("PATH"), ":")
+	// Emulate the OpenRC shell's load and start phases. The real supervisor is
+	// responsible for dropping privileges before invoking command.
+	writeOpenRCFixture(t, filepath.Join(fakeRCService, "rc-service"), `#!/bin/sh
+. "$OPENRC_TEST_SCRIPT"
+case "$*" in
+	*" stop") printf 'stop:%s\n' "${legacy_runscript-unset}" >> "$OPENRC_TEST_RESULT" ;;
+	*" start")
+		if command -v start_pre >/dev/null; then start_pre || exit; fi
+		printf 'start:%s\n' "${FERNGEIST_GATEWAY_TEST_SETTING-unset}" >> "$OPENRC_TEST_RESULT"
+		# Match OpenRC's two expansions, including word splitting before eval.
+		launch() {
+			printf 'account:%s\n' "$1" >> "$OPENRC_TEST_RESULT"
+			shift
+			"$@"
+		}
+		eval launch $command_user $command $command_args || exit
+		gateway_uid=0
+		if eval $command $command_args; then
+			printf 'mismatched identity accepted\n' >> "$OPENRC_TEST_RESULT"
+		fi
+		;;
+esac
+`)
+	if err := (&openrcManager{}).Install(InstallOptions{Host: "127.0.0.1", Port: 5788}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "stop:unset\nstart:unset\naccount:gateway-user\nchild:from-override:127.0.0.1:5788:" +
+		paths.dbPath + ":" + account.home + ":" + paths.rootDir + ":/custom path\n"
+	if string(got) != want {
+		t.Fatalf("lifecycle output = %q, want %q", got, want)
+	}
+	log, err := os.Stat(filepath.Join(paths.logDir, "supervisor.log"))
+	if err != nil || log.Mode().Perm() != 0o600 {
+		t.Fatalf("new supervisor log = %v, %v, want permissions 0600", log, err)
+	}
+}
+
+func runOpenRCRegressionAsServiceUser(t *testing.T) {
+	t.Helper()
+	source, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	// The re-executed test must be able to traverse Go's top-level test dir.
+	for _, path := range []string{filepath.Dir(dir), dir} {
+		if err := os.Chmod(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	target := filepath.Join(dir, "service.test")
+	if err := replaceFileAtomically(source, target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(target, "-test.run=^"+t.Name()+"$")
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Credential: &syscall.Credential{Uid: 65534, Gid: 65534},
+	}
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("run unprivileged OpenRC regression: %v\n%s", err, out)
+	}
+}
+
+func TestOpenRCFailedFirstInstallDoesNotPublishService(t *testing.T) {
+	seedOpenRCRoot(t, t.TempDir())
+	newFakeOpenRC(t, nil, nil)
+	binary := filepath.Join(t.TempDir(), "missing-binary")
+	previous := installCopySource
+	installCopySource = func() (string, error) { return binary, nil }
+	t.Cleanup(func() { installCopySource = previous })
+
+	manager := &openrcManager{}
+	if err := manager.Install(InstallOptions{}); err == nil {
+		t.Fatal("Install succeeded with no source binary")
+	}
+	status, err := manager.Status()
+	if err != nil || status.Installed {
+		t.Fatalf("Status after failed first install = %+v, %v, want uninstalled", status, err)
+	}
+}
+
+func TestOpenRCFailedCopyLeavesExistingServiceRegistered(t *testing.T) {
+	seedOpenRCRoot(t, t.TempDir())
+	serviceLog, _ := newFakeOpenRC(t, nil, nil)
+	if err := os.MkdirAll(filepath.Dir(openrcScriptPath()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const installedScript = "#!/sbin/openrc-run\ncommand=/usr/bin/ferngeist-gateway\n"
+	writeOpenRCFixture(t, openrcScriptPath(), installedScript)
+	binary := filepath.Join(t.TempDir(), "missing-binary")
+	previous := installCopySource
+	installCopySource = func() (string, error) { return binary, nil }
+	t.Cleanup(func() { installCopySource = previous })
+
+	if err := (&openrcManager{}).Install(InstallOptions{}); err == nil {
+		t.Fatal("Install succeeded with no source binary")
+	}
+	content, err := os.ReadFile(openrcScriptPath())
+	if err != nil || string(content) != installedScript {
+		t.Fatalf("registered script changed during failed copy: %v", err)
+	}
+	if calls := rcCalls(t, serviceLog); len(calls) != 0 {
+		t.Fatalf("failed copy interrupted the existing service: %v", calls)
+	}
+}
+
+func writeOpenRCFixture(t *testing.T, path, contents string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(contents), 0o755); err != nil {
+		t.Fatal(err)
 	}
 }
 

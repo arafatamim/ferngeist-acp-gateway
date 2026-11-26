@@ -214,6 +214,11 @@ require sudo on these hosts, and so does `update` once the service is
 installed — it stops the service to replace its binary, and it replaces the
 *sudoing* user's copy, not root's.
 
+When upgrading an OpenRC installation from `v2.2.0`, download and extract the
+fixed release, then run `sudo ./ferngeist-gateway daemon install --keep-settings`
+from the gateway user's account. This replaces the installed runscript. The
+`v2.2.0` updater replaces only the binary and would restart the old runscript.
+
 ### Manual (tarball)
 
 ```bash

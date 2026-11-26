@@ -151,13 +151,14 @@ func writeLinuxServiceFiles(paths linuxPaths, options InstallOptions) (linuxPath
 		return paths, err
 	}
 	paths.execPath = execPath
+	return paths, writeLinuxServiceSettings(paths, options)
+}
+
+func writeLinuxServiceSettings(paths linuxPaths, options InstallOptions) error {
 	if err := writeLinuxEnvFile(paths, options); err != nil {
-		return paths, err
+		return err
 	}
-	if err := saveInstallOptions(paths.configDir, options); err != nil {
-		return paths, err
-	}
-	return paths, nil
+	return saveInstallOptions(paths.configDir, options)
 }
 
 // mkdirLinuxState creates the state tree both Linux managers install into.
@@ -416,15 +417,14 @@ func writeLinuxEnvFile(paths linuxPaths, options InstallOptions) error {
 	lines := []string{
 		"FERNGEIST_GATEWAY_LISTEN_ADDR=" + listenAddr,
 		"FERNGEIST_GATEWAY_ENABLE_LAN=" + enableLAN,
-		"FERNGEIST_GATEWAY_STATE_DB=" + paths.dbPath,
-		"FERNGEIST_GATEWAY_LOG_DIR=" + paths.logDir,
-		"FERNGEIST_GATEWAY_MANAGED_BIN_DIR=" + paths.managedBinDir,
+		`FERNGEIST_GATEWAY_STATE_DB="` + escapeShellQuoted(paths.dbPath) + `"`,
+		`FERNGEIST_GATEWAY_LOG_DIR="` + escapeShellQuoted(paths.logDir) + `"`,
+		`FERNGEIST_GATEWAY_MANAGED_BIN_DIR="` + escapeShellQuoted(paths.managedBinDir) + `"`,
 	}
 	if path != "" {
-		// EnvironmentFile double quotes preserve whitespace; only backslashes
-		// and quotes need escaping because systemd does not expand variables.
-		path = strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(path)
-		lines = append(lines, `PATH="`+path+`"`)
+		// Double-quoted values preserve whitespace and are literal in both
+		// systemd's EnvironmentFile parser and OpenRC's child shell.
+		lines = append(lines, `PATH="`+escapeShellQuoted(path)+`"`)
 	}
 	// A persisted remote URL must not survive into a LAN-only service: it
 	// would otherwise keep advertising the old tailnet URL.

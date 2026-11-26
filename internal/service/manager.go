@@ -207,6 +207,10 @@ func replaceFileAtomically(src, dst string, perm os.FileMode) error {
 		return err
 	}
 	defer in.Close()
+	return writeFileAtomically(in, dst, perm)
+}
+
+func writeFileAtomically(in io.Reader, dst string, perm os.FileMode) error {
 	tmp, err := os.CreateTemp(filepath.Dir(dst), ".install-*")
 	if err != nil {
 		return err
