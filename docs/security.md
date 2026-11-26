@@ -191,11 +191,11 @@ routes reject `cwd`, so selectors cannot silently override one another.
   file reads return raw blobs. Checkout Git metadata must come from a trusted
   source because Git can still consult repository configuration, including
   working-tree filters.
-- **Path confinement:** runtime file, listing, and diff access is confined to the ACP
-  **project directory** captured from the client's `session/new`
-  (`params.cwd`, re-captured from `session/load` on resume). Absolute paths,
-  `..` traversal, and symlink escapes are rejected with `400`; the root and the
-  resolved target are both symlink-checked.
+- **Path confinement:** runtime listings use the ACP project directory.
+  Working-tree diff reads and untracked-file counts open regular files
+  relative to a checkout directory handle, so a later symlink replacement
+  cannot redirect the read outside that checkout. The opened file's identity
+  and type are checked before reading. The host mount layout is trusted.
 - **No git repo / no git binary:** `422` — the directory simply is not a git
   repository or `git` is not on PATH; nothing is exposed either way.
 - **Untrusted directories:** a malicious or buggy agent project directory could

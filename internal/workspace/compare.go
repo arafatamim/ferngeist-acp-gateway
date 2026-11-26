@@ -3,7 +3,6 @@ package workspace
 import (
 	"context"
 	"net/http"
-	"path/filepath"
 	"strings"
 )
 
@@ -104,7 +103,7 @@ func CompareChanges(ctx context.Context, cwd, ref string) ([]ChangedFile, error)
 		case "?":
 			// Untracked entries are not covered by git diff; count from disk.
 			if !f.IsDir {
-				f.Added, f.Binary = CountFileLines(filepath.Join(cwd, filepath.FromSlash(f.Path)))
+				f.Added, f.Binary = CountFileLines(cwd, f.Path)
 			}
 		case "R":
 			// Rename entries report their numstat path as the braced

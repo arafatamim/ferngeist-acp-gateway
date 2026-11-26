@@ -673,7 +673,8 @@ or a non-repository is `422`.
     comparison `/git/diff` reports), so partially staged files count their
     staged and unstaged edits together. For untracked files (`?`) — which
     `git diff` does not cover — `added` is the file's raw line count and
-    `removed` is `0`.
+    `removed` is `0`. Untracked paths that cannot be opened as regular files
+    inside the checkout stay listed with zero counts and `binary: false`.
   - `binary` is `true` when git reports no counts for a binary file (`added` /
     `removed` are then `0`), and for untracked files that contain a NUL byte.
   - `staged` is `true` when the index (not just the working tree) holds a change
@@ -733,7 +734,8 @@ or a non-repository is `422`.
     can decode it with its existing `acp.ToolCallContentDiff` SDK type. With
     `?path=` the body is a **single object**; without it, the body is a **JSON
     array** with one object per changed file (the same file set `/git/status`
-    reports).
+    reports). The array skips working-tree paths that cannot be read as
+    regular files inside the checkout, except deleted files with an old blob.
   - The whole-tree body is gzipped when the request's `Accept-Encoding`
     includes `gzip` (`Content-Encoding: gzip`, `Vary: Accept-Encoding`); it
     carries every changed file's full old and new text.
@@ -778,10 +780,11 @@ or a non-repository is `422`.
     ignored only in **commit mode**, which takes precedence.
   - Error responses:
     - `400` — `path` escapes the project directory (absolute, traversal, or
-      symlink escape)
+      symlink escape) or selects a directory or other nonregular file
     - `400` — `compare` is malformed (option-like, whitespace, control
       characters, `..`, `@{`, or `~^:?*[\`) or names no commit
     - `404` — the selected checkout is missing
+    - `409` — the working file changed identity or type during open
     - `422` — `git` is missing from PATH, or the directory is not a git repository
   - **Commit mode:** `?commit=<sha>&path=<rel>[&oldPath=<rel>]` diffs one file
     of a commit against its first parent instead of the working tree. `oldText`

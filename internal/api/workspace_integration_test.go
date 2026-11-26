@@ -962,7 +962,8 @@ func TestProjectWorkspaceRejectsInvalidSelectorsAndEscapingFiles(t *testing.T) {
 func TestProjectWorkspaceCanonicalizesRootAndConfinesSymlinks(t *testing.T) {
 	root := t.TempDir()
 	runGitCLI(t, root, "init", "-q")
-	if err := os.WriteFile(filepath.Join(root, "note.txt"), []byte("inside"), 0o600); err != nil {
+	inside := filepath.Join(root, "note.txt")
+	if err := os.WriteFile(inside, []byte("inside"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	alias := filepath.Join(t.TempDir(), "alias")
@@ -970,14 +971,41 @@ func TestProjectWorkspaceCanonicalizesRootAndConfinesSymlinks(t *testing.T) {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
 	outside := filepath.Join(t.TempDir(), "secret.txt")
-	if err := os.WriteFile(outside, []byte("outside"), 0o600); err != nil {
+	if err := os.WriteFile(outside, []byte("outside\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(outside, filepath.Join(root, "escape")); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Symlink(inside, filepath.Join(root, "in-checkout")); err != nil {
+		t.Fatal(err)
+	}
 	server := newTestServer()
 	token := pairDevice(t, server)
+	status := projectWorkspaceRequest(server, token, "/v1/projects/git/status?cwd="+url.QueryEscape(alias))
+	if status.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", status.Code, status.Body.String())
+	}
+	var response gitStatusResponse
+	if err := json.Unmarshal(status.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, file := range response.Changed {
+		if file.Path == "escape" {
+			found = true
+			if file.Added != 0 || file.Binary {
+				t.Errorf("out-of-checkout link should have no content metadata: %+v", file)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("untracked symlink should still appear in status")
+	}
+	rec := projectWorkspaceRequest(server, token, "/v1/projects/git/diff?cwd="+url.QueryEscape(alias)+"&path=in-checkout")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"newText":"inside"`) {
+		t.Errorf("in-checkout link: status=%d body=%s", rec.Code, rec.Body.String())
+	}
 	for _, route := range []string{"git/diff"} {
 		rec := projectWorkspaceRequest(server, token, "/v1/projects/"+route+"?cwd="+url.QueryEscape(alias)+"&path=escape")
 		if rec.Code != 400 {

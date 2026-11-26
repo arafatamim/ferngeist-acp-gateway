@@ -81,39 +81,45 @@ func CheckoutRoot(ctx context.Context, cwd string) (string, error) {
 	return root, nil
 }
 
-// ResolveWithinRoot resolves a relative path against root and returns an
-// absolute path guaranteed to stay inside root. It rejects absolute paths,
-// ".." traversal, and symlink escapes (both root and the joined path are
-// eval-symlinked and re-checked). The caller must pass the cwd as root.
+// ResolveWithinRoot checks a relative path against cwd and returns an absolute
+// path for callers that need to validate a Git object path. Filesystem reads
+// must also use a rooted open because links can change after resolution.
 func ResolveWithinRoot(root, rel string) (string, error) {
-	if rel == "" {
-		return "", errors.New("path is required")
-	}
-	if filepath.IsAbs(rel) {
-		return "", ErrPathEscapesRoot
-	}
 	rootAbs, err := filepath.Abs(root)
 	if err != nil {
 		return "", err
 	}
-	rootEval, err := filepath.EvalSymlinks(rootAbs)
+	name, err := resolveWorkspacePath(rootAbs, rel)
 	if err != nil {
-		rootEval = rootAbs
+		return "", err
 	}
-	joined := filepath.Join(rootAbs, filepath.FromSlash(rel))
-	if !SubpathOf(joined, rootAbs) {
+	return filepath.Join(rootAbs, name), nil
+}
+
+func resolveWorkspacePath(root, rel string) (string, error) {
+	if rel == "" {
+		return "", errors.New("path is required")
+	}
+	name := filepath.FromSlash(rel)
+	if !filepath.IsLocal(name) {
 		return "", ErrPathEscapesRoot
 	}
-	// Resolve symlinks in the result if it exists (a dangling symlink's target
-	// is untrusted even if the link itself parses inside root).
-	joinedEval := joined
-	if resolved, err := filepath.EvalSymlinks(joined); err == nil {
-		joinedEval = resolved
+	name = filepath.Clean(name)
+	rootEval, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return name, nil
 	}
-	if !SubpathOf(joinedEval, rootEval) {
+	resolved, err := filepath.EvalSymlinks(filepath.Join(rootEval, name))
+	if err != nil {
+		// Historical Git paths may be absent from the working tree. For disk
+		// reads, the rooted open checks the unresolved name again.
+		return name, nil
+	}
+	name, err = filepath.Rel(rootEval, resolved)
+	if err != nil || !filepath.IsLocal(name) {
 		return "", ErrPathEscapesRoot
 	}
-	return joined, nil
+	return name, nil
 }
 
 // SubpathOf reports whether child == parent or child is lexically inside parent.
@@ -276,8 +282,8 @@ func ParseGitNumstat(out string) map[string]ChangedFile {
 // file is binary (contains a NUL byte). Reading is capped at MaxFileReadBytes
 // so a huge untracked file cannot exhaust memory; line count is approximate
 // beyond the cap.
-func CountFileLines(path string) (lines int, binary bool) {
-	f, err := os.Open(path)
+func CountFileLines(cwd, rel string) (lines int, binary bool) {
+	f, err := openWorkspaceFile(cwd, rel)
 	if err != nil {
 		return 0, false
 	}
@@ -494,7 +500,18 @@ func nameStatusChanges(out string, seen map[string]bool) []ChangedFile {
 // working-tree content, or "" for a deleted file (working copy gone but present
 // in HEAD). The 1 MiB cap is applied to both texts; truncation is documented in
 // docs/api.md.
-func DiffEntry(ctx context.Context, cwd, ref, rel, abs string) (acp.ToolCallContentDiff, error) {
+func DiffEntry(ctx context.Context, cwd, ref, rel string) (acp.ToolCallContentDiff, error) {
+	newData, readErr := readWorkspaceFile(cwd, rel)
+	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		if errors.Is(readErr, ErrPathEscapesRoot) {
+			return acp.ToolCallContentDiff{}, errStatus(http.StatusBadRequest, readErr.Error())
+		}
+		var workspaceError Error
+		if errors.As(readErr, &workspaceError) {
+			return acp.ToolCallContentDiff{}, readErr
+		}
+		return acp.ToolCallContentDiff{}, errStatus(http.StatusUnprocessableEntity, readErr.Error())
+	}
 	// <ref>:<path> is repo-root relative; <ref>:./<path> resolves against cwd,
 	// which is what rel is relative to.
 	oldText, err := readGitBlob(ctx, cwd, ref, rel)
@@ -502,20 +519,9 @@ func DiffEntry(ctx context.Context, cwd, ref, rel, abs string) (acp.ToolCallCont
 	if err == nil {
 		oldPtr = TruncateStringPtr(oldText, MaxFileReadBytes)
 	}
-	newData, err := ReadFileLimited(abs, MaxFileReadBytes)
-	if err != nil {
-		// Working copy gone. If the file exists in HEAD, treat it as a
-		// deletion (oldText present, newText empty). Otherwise there is no
-		// meaningful entry.
-		if oldPtr != nil {
-			return acp.ToolCallContentDiff{
-				Path:    rel,
-				OldText: oldPtr,
-				NewText: "",
-				Type:    "diff",
-			}, nil
-		}
-		return acp.ToolCallContentDiff{}, err
+	// A missing working copy is a deletion only if we have an old blob.
+	if readErr != nil && oldPtr == nil {
+		return acp.ToolCallContentDiff{}, errStatus(http.StatusUnprocessableEntity, readErr.Error())
 	}
 	if len(newData) > MaxFileReadBytes {
 		newData = newData[:MaxFileReadBytes]
@@ -550,18 +556,49 @@ func IsBinary(data []byte) bool {
 	return bytes.IndexByte(data, 0) >= 0
 }
 
-// ReadFileLimited opens path and reads at most max+1 bytes. Callers detect
-// truncation with len(data) > max. Unlike os.ReadFile, a file far larger than
-// max is never buffered in full, bounding memory for arbitrarily large files.
-func ReadFileLimited(path string, max int) ([]byte, error) {
-	f, err := os.Open(path)
+// Read an extra byte so callers can detect truncation while bounding memory.
+func readWorkspaceFile(cwd, rel string) ([]byte, error) {
+	f, err := openWorkspaceFile(cwd, rel)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-	data, err := io.ReadAll(io.LimitReader(f, int64(max)+1))
+	return io.ReadAll(io.LimitReader(f, MaxFileReadBytes+1))
+}
+
+func openWorkspaceFile(cwd, rel string) (*os.File, error) {
+	root, err := os.OpenRoot(cwd)
 	if err != nil {
 		return nil, err
 	}
-	return data, nil
+	defer root.Close()
+	name, err := resolveWorkspacePath(cwd, rel)
+	if err != nil {
+		return nil, err
+	}
+	before, err := root.Stat(name)
+	if err != nil {
+		return nil, err
+	}
+	if before.IsDir() {
+		return nil, errStatus(http.StatusBadRequest, "path is a directory or submodule, not a file: "+rel)
+	}
+	if !before.Mode().IsRegular() {
+		return nil, errStatus(http.StatusBadRequest, "path is not a regular file: "+rel)
+	}
+	f, err := root.OpenFile(name, workspaceReadFlags, 0)
+	if err != nil {
+		return nil, err
+	}
+	// The handle must identify the same regular file admitted by Stat.
+	info, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	if !info.Mode().IsRegular() || !os.SameFile(before, info) {
+		f.Close()
+		return nil, errStatus(http.StatusConflict, "file changed while opening")
+	}
+	return f, nil
 }

@@ -43,6 +43,10 @@ against the code.
 
 ## Unreleased
 
+- [semantic] Git status keeps untracked paths that cannot be read as regular
+  files inside the checkout with zero counts. Working-tree diffs skip those
+  paths in whole-tree mode and reject them in single-file mode. (2026-11-26)
+
 - [semantic] Project Git routes require both `read` and `control`, which
   normal pairing already grants. Git diffs use raw content, and commit file
   diffs accept file blobs only. (2026-11-26)

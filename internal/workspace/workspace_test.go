@@ -150,7 +150,7 @@ func TestCountFileLines(t *testing.T) {
 	if err := os.WriteFile(textPath, []byte("a\nb\nc\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	lines, binary := CountFileLines(textPath)
+	lines, binary := CountFileLines(dir, "text.txt")
 	if lines != 3 || binary {
 		t.Fatalf("text.txt = (%d, %v), want (3, false)", lines, binary)
 	}
@@ -160,7 +160,7 @@ func TestCountFileLines(t *testing.T) {
 	if err := os.WriteFile(noNL, []byte("solo"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	lines, binary = CountFileLines(noNL)
+	lines, binary = CountFileLines(dir, "nonl.txt")
 	if lines != 1 || binary {
 		t.Fatalf("nonl.txt = (%d, %v), want (1, false)", lines, binary)
 	}
@@ -169,12 +169,12 @@ func TestCountFileLines(t *testing.T) {
 	if err := os.WriteFile(binaryPath, []byte{0x00, 0x01, 0x02, 0x0a}, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	lines, binary = CountFileLines(binaryPath)
+	lines, binary = CountFileLines(dir, "bin.dat")
 	if !binary {
 		t.Fatalf("bin.dat should be flagged binary, got lines=%d binary=%v", lines, binary)
 	}
 
-	if lines, binary := CountFileLines(filepath.Join(dir, "missing.txt")); lines != 0 || binary {
+	if lines, binary := CountFileLines(dir, "missing.txt"); lines != 0 || binary {
 		t.Fatalf("missing file = (%d, %v), want (0, false)", lines, binary)
 	}
 }
@@ -221,7 +221,7 @@ func TestDiffEntry(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "new.txt"), []byte("fresh\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	entry, err := DiffEntry(context.Background(), dir, "HEAD", "new.txt", filepath.Join(dir, "new.txt"))
+	entry, err := DiffEntry(context.Background(), dir, "HEAD", "new.txt")
 	if err != nil {
 		t.Fatalf("DiffEntry(untracked): %v", err)
 	}
@@ -233,7 +233,7 @@ func TestDiffEntry(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("new\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	entry, err = DiffEntry(context.Background(), dir, "HEAD", "a.txt", filepath.Join(dir, "a.txt"))
+	entry, err = DiffEntry(context.Background(), dir, "HEAD", "a.txt")
 	if err != nil {
 		t.Fatalf("DiffEntry(modified): %v", err)
 	}
@@ -249,7 +249,7 @@ func TestDiffEntry(t *testing.T) {
 	if err := os.Remove(filepath.Join(dir, "a.txt")); err != nil {
 		t.Fatal(err)
 	}
-	entry, err = DiffEntry(context.Background(), dir, "HEAD", "a.txt", filepath.Join(dir, "a.txt"))
+	entry, err = DiffEntry(context.Background(), dir, "HEAD", "a.txt")
 	if err != nil {
 		t.Fatalf("DiffEntry(deleted): %v", err)
 	}
@@ -310,7 +310,7 @@ func TestStatusScopedToSubdirectory(t *testing.T) {
 		t.Fatalf("numstat from app/ = %q, want a.txt with 1 added", numstat)
 	}
 
-	entry, err := DiffEntry(context.Background(), cwd, "HEAD", "a.txt", filepath.Join(cwd, "a.txt"))
+	entry, err := DiffEntry(context.Background(), cwd, "HEAD", "a.txt")
 	if err != nil {
 		t.Fatalf("DiffEntry: %v", err)
 	}

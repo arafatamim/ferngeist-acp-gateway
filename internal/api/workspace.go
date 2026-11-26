@@ -6,8 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -219,7 +217,7 @@ func (s *Server) handleWorkspaceGitStatus(w http.ResponseWriter, r *http.Request
 	}
 	for i := range changed {
 		if changed[i].Status == "?" {
-			added, binary := workspace.CountFileLines(filepath.Join(cwd, filepath.FromSlash(changed[i].Path)))
+			added, binary := workspace.CountFileLines(cwd, changed[i].Path)
 			changed[i].Added = added
 			changed[i].Binary = binary
 		}
@@ -279,21 +277,9 @@ func (s *Server) handleWorkspaceGitDiff(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if rel := strings.TrimSpace(r.URL.Query().Get("path")); rel != "" {
-		abs, err := workspace.ResolveWithinRoot(cwd, rel)
+		entry, err := workspace.DiffEntry(r.Context(), cwd, ref, rel)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		// Submodules and directories are not diffable file content; reject them
-		// with a clear 400 instead of letting a blob or working-tree read fail into a 422.
-		// Whole-tree diffs skip them via IsDir; this is the single-file guard.
-		if fi, err := os.Stat(abs); err == nil && fi.IsDir() {
-			writeError(w, http.StatusBadRequest, "path is a directory or submodule, not a file: "+rel)
-			return
-		}
-		entry, err := workspace.DiffEntry(r.Context(), cwd, ref, rel, abs)
-		if err != nil {
-			writeError(w, http.StatusUnprocessableEntity, err.Error())
+			writeWorkspaceError(w, err)
 			return
 		}
 		writeJSON(w, http.StatusOK, entry)
@@ -322,19 +308,15 @@ func (s *Server) handleWorkspaceGitDiff(w http.ResponseWriter, r *http.Request) 
 	for i, f := range changed {
 		// Submodules and collapsed untracked dirs are directories, not files;
 		// they cannot be diffed as file content (a gitlink is a commit,
-		// and ReadFileLimited fails on a directory). /git/status reports
+		// and the rooted reader rejects directories). /git/status reports
 		// them with isDir:true; the diff lists only real files.
 		if f.IsDir {
-			continue
-		}
-		abs, err := workspace.ResolveWithinRoot(cwd, f.Path)
-		if err != nil {
 			continue
 		}
 		group.Go(func() error {
 			// Skip files we cannot build a diff for (e.g. unreadable), but
 			// keep going for the rest.
-			if entry, err := workspace.DiffEntry(r.Context(), cwd, ref, f.Path, abs); err == nil {
+			if entry, err := workspace.DiffEntry(r.Context(), cwd, ref, f.Path); err == nil {
 				slots[i] = &entry
 			}
 			return nil
