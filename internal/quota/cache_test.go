@@ -28,7 +28,7 @@ func TestCacheServesStaleSnapshotWhileRefreshingAndKeepsItOnFailure(t *testing.T
 				return nil, r.err
 			}
 			return json.RawMessage(r.data), nil
-		}, 0)
+		}, 0, time.Minute)
 		get := func() (json.RawMessage, error) {
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
@@ -58,10 +58,36 @@ func TestCacheServesStaleSnapshotWhileRefreshingAndKeepsItOnFailure(t *testing.T
 	})
 }
 
+func TestCacheWaitsForRefreshWhenSnapshotOutlivesServedAge(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		replies := []error{nil, errors.New("codexbar failed"), nil}
+		calls := 0
+		cache := NewCache(func(context.Context) (json.RawMessage, error) {
+			err := replies[calls]
+			calls++
+			if err != nil {
+				return nil, err
+			}
+			return json.RawMessage(fmt.Sprint(calls)), nil
+		}, time.Minute, 5*time.Minute)
+		if _, err := cache.Get(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(5 * time.Minute) // the client was idle; the snapshot is now too old to serve as-is
+		if data, err := cache.Get(context.Background()); err != nil || string(data) != "1" {
+			t.Fatalf("Get after failed refresh = %s, %v; want old snapshot", data, err)
+		}
+		time.Sleep(5 * time.Minute)
+		if data, err := cache.Get(context.Background()); err != nil || string(data) != "3" {
+			t.Fatalf("Get after idle = %s, %v; want the refreshed snapshot", data, err)
+		}
+	})
+}
+
 func TestCacheReturnsCollectErrorWhenNoSnapshotExists(t *testing.T) {
 	cache := NewCache(func(context.Context) (json.RawMessage, error) {
 		return nil, errors.New("codexbar missing")
-	}, time.Minute)
+	}, time.Minute, 5*time.Minute)
 	if _, err := cache.Get(context.Background()); err == nil {
 		t.Fatal("Get without a snapshot succeeded; want collect error")
 	}
@@ -79,7 +105,7 @@ func TestCacheBoundsFailedCollectionsUntilNextRefresh(t *testing.T) {
 						return json.RawMessage(`1`), nil
 					}
 					return nil, failure
-				}, time.Minute)
+				}, time.Minute, 5*time.Minute)
 				if seed {
 					if _, err := cache.Get(context.Background()); err != nil {
 						t.Fatal(err)
@@ -126,7 +152,7 @@ func TestCacheSharesCollectionAndSurvivesCancelledWaiter(t *testing.T) {
 			case <-ctx.Done():
 				return nil, ctx.Err()
 			}
-		}, time.Minute)
+		}, time.Minute, 5*time.Minute)
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		cancelled := make(chan error, 1)

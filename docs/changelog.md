@@ -43,6 +43,10 @@ against the code.
 
 ## Unreleased
 
+- [semantic] `GET /v1/quotas` refreshes a snapshot over five minutes old
+  before responding instead of serving it, so the first request after an idle
+  stretch can take up to one collection (15 seconds). (2026-11-27)
+
 - [semantic] Revoking a paired device closes its ACP WebSockets and invalidates
   its unused attach tokens. (2026-11-27)
 

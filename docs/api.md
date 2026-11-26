@@ -1794,8 +1794,10 @@ should use a neutral glyph when absent.
 `usedPercent`, `windowMinutes`, `resetsAt`, and `resetDescription` when available.
 Missing windows are null. Responses are served from the gateway's last snapshot;
 when it is over a minute old a background refresh starts, so `usage.updatedAt`
-may lag by up to that interval plus one collection. A 503 response means no
-snapshot could be collected yet. If CodexBar is not found on the daemon's PATH,
+may lag by up to that interval plus one collection. A snapshot over five minutes
+old is refreshed before the response, which then waits up to one collection
+(at most 15 seconds); if that refresh fails, the old snapshot is served. A 503
+response means no snapshot could be collected yet. If CodexBar is not found on the daemon's PATH,
 the 503 body includes `"code":"codexbar_not_found"` alongside
 `"error":"quotas unavailable"`. Other collection failures return the error
 without that code. If CodexBar returns an invalid provider list, the code is

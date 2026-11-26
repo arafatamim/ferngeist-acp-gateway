@@ -11,40 +11,47 @@ import (
 
 // Cache serves the last collected snapshot immediately and refreshes it in the
 // background once it is older than maxAge, so providers are only polled while
-// clients are asking. A failed refresh keeps the previous snapshot and retries
-// no sooner than maxAge, even if there is no snapshot yet.
+// clients are asking. A snapshot older than maxServedAge waits for its refresh.
+// A failed refresh keeps the previous snapshot and retries no sooner than
+// maxAge, even if there is no snapshot yet.
 type Cache struct {
 	collect func(context.Context) (json.RawMessage, error)
 	maxAge  time.Duration
-	group   singleflight.Group
-	mu      sync.Mutex
-	data    json.RawMessage
-	at      time.Time
-	err     error
+	// Providers are only polled while clients ask, so after an idle stretch the snapshot
+	// is as old as the idle time; serving it would show usage from that long ago.
+	maxServedAge time.Duration
+	group        singleflight.Group
+	mu           sync.Mutex
+	data         json.RawMessage
+	at           time.Time
+	err          error
 }
 
-func NewCache(collect func(context.Context) (json.RawMessage, error), maxAge time.Duration) *Cache {
-	return &Cache{collect: collect, maxAge: maxAge}
+func NewCache(collect func(context.Context) (json.RawMessage, error), maxAge, maxServedAge time.Duration) *Cache {
+	return &Cache{collect: collect, maxAge: maxAge, maxServedAge: maxServedAge}
 }
 
-// Get returns the cached snapshot, collecting synchronously only when none exists yet.
+// Get returns the cached snapshot, collecting synchronously when none exists yet
+// or the last one is older than maxServedAge.
 func (c *Cache) Get(ctx context.Context) (json.RawMessage, error) {
 	c.mu.Lock()
-	data, stale := c.data, time.Since(c.at) >= c.maxAge
-	err := c.err
+	data, age, err := c.data, time.Since(c.at), c.err
 	c.mu.Unlock()
-	if data != nil {
-		if stale {
+	if data != nil && age < c.maxServedAge {
+		if age >= c.maxAge {
 			// The buffered result is dropped; refresh stores the snapshot itself.
 			c.group.DoChan("", c.refresh)
 		}
 		return data, nil
 	}
-	if !stale {
+	if data == nil && age < c.maxAge {
 		return nil, err
 	}
 	select {
 	case result := <-c.group.DoChan("", c.refresh):
+		if result.Err != nil && data != nil {
+			return data, nil
+		}
 		if result.Err != nil {
 			return nil, result.Err
 		}

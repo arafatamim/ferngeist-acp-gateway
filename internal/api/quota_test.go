@@ -28,7 +28,7 @@ func TestQuotasIdentifyInvalidCodexBarResponse(t *testing.T) {
 	}
 	t.Setenv("PATH", dir)
 	server := newTestServerWithBaseDir(newHarnessBaseDir(t))
-	server.quotas = quota.NewCache(quota.Collect, time.Minute).Get
+	server.quotas = quota.NewCache(quota.Collect, time.Minute, 5*time.Minute).Get
 	token := pairDevice(t, server)
 	request := httptest.NewRequest(http.MethodGet, "/v1/quotas", nil)
 	request.Header.Set("Authorization", "Bearer "+token)
@@ -42,7 +42,7 @@ func TestQuotasIdentifyInvalidCodexBarResponse(t *testing.T) {
 func TestQuotasIdentifyMissingCodexBar(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 	server := newTestServerWithBaseDir(newHarnessBaseDir(t))
-	server.quotas = quota.NewCache(quota.Collect, time.Minute).Get
+	server.quotas = quota.NewCache(quota.Collect, time.Minute, 5*time.Minute).Get
 	token := pairDevice(t, server)
 	request := httptest.NewRequest(http.MethodGet, "/v1/quotas", nil)
 	request.Header.Set("Authorization", "Bearer "+token)
