@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -14,12 +15,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/catalog"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/storage"
 )
 
-func TestEnsureDownloadsRawBinaryIntoManagedDir(t *testing.T) {
+func TestRegistryInstallDownloadsRawBinaryIntoManagedDir(t *testing.T) {
 	sourceDir := t.TempDir()
 	sourcePath := filepath.Join(sourceDir, namedBinary("mock-stdio-agent"))
 	buildMockStdioAgent(t, sourcePath)
@@ -36,7 +38,7 @@ func TestEnsureDownloadsRawBinaryIntoManagedDir(t *testing.T) {
 
 	installer := New(slog.New(slog.NewTextHandler(os.Stdout, nil)), managedDir, store)
 
-	agent, changed, err := installer.Ensure(context.Background(), catalog.Agent{
+	agent, err := awaitBinary(t, installer, catalog.Agent{
 		ID: "codex-acp",
 		Launch: catalog.LaunchConfig{
 			Mode:    "external",
@@ -48,10 +50,7 @@ func TestEnsureDownloadsRawBinaryIntoManagedDir(t *testing.T) {
 		},
 	})
 	if err != nil {
-		t.Fatalf("Ensure() error = %v", err)
-	}
-	if !changed {
-		t.Fatal("Ensure() should report changed=true on first install")
+		t.Fatalf("installation error = %v", err)
 	}
 	if !agent.Detected {
 		t.Fatal("agent should be marked detected after install")
@@ -66,6 +65,27 @@ func TestEnsureDownloadsRawBinaryIntoManagedDir(t *testing.T) {
 	}
 	if record.Path != agent.Launch.Command {
 		t.Fatalf("record.Path = %q, want %q", record.Path, agent.Launch.Command)
+	}
+}
+
+func awaitBinary(t *testing.T, installer *Installer, agent catalog.Agent) (catalog.Agent, error) {
+	t.Helper()
+	t.Cleanup(installer.Close)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		resolved, err := installer.ResolveBinary(ctx, agent, true)
+		var installing *AgentInstalling
+		if !errors.As(err, &installing) {
+			return resolved, err
+		}
+		select {
+		case <-ctx.Done():
+			return catalog.Agent{}, ctx.Err()
+		case <-tick.C:
+		}
 	}
 }
 
@@ -88,7 +108,7 @@ func namedBinary(name string) string {
 	return name
 }
 
-func TestEnsureExtractsArchives(t *testing.T) {
+func TestRegistryInstallExtractsArchives(t *testing.T) {
 	payload := []byte("#!/bin/sh\necho agent\n")
 	var tarGz bytes.Buffer
 	gz := gzip.NewWriter(&tarGz)
@@ -131,7 +151,7 @@ func TestEnsureExtractsArchives(t *testing.T) {
 	for _, name := range []string{"agent.tar.gz", "agent.zip?sig=abc"} {
 		t.Run(name, func(t *testing.T) {
 			installer := New(slog.New(slog.NewTextHandler(io.Discard, nil)), t.TempDir(), nil)
-			agent, _, err := installer.Ensure(context.Background(), catalog.Agent{
+			agent, err := awaitBinary(t, installer, catalog.Agent{
 				ID:     "archived",
 				Launch: catalog.LaunchConfig{Mode: "external"},
 				Registry: catalog.RegistryInfo{
@@ -140,7 +160,7 @@ func TestEnsureExtractsArchives(t *testing.T) {
 				},
 			})
 			if err != nil {
-				t.Fatalf("Ensure() error = %v", err)
+				t.Fatalf("installation error = %v", err)
 			}
 			got, err := os.ReadFile(agent.Launch.Command)
 			if err != nil {
@@ -162,7 +182,7 @@ func TestEnsureExtractsArchives(t *testing.T) {
 	}
 }
 
-func TestEnsureUpdatesOnRegistryVersionChange(t *testing.T) {
+func TestRegistryInstallUpdatesOnVersionChange(t *testing.T) {
 	body, status := "v1", http.StatusOK
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(status)
@@ -176,9 +196,9 @@ func TestEnsureUpdatesOnRegistryVersionChange(t *testing.T) {
 	}
 	defer store.Close()
 	installer := New(slog.New(slog.NewTextHandler(io.Discard, nil)), t.TempDir(), store)
-	ensure := func(version string) (string, bool) {
+	ensure := func(version string) string {
 		t.Helper()
-		agent, changed, err := installer.Ensure(context.Background(), catalog.Agent{
+		agent, err := awaitBinary(t, installer, catalog.Agent{
 			ID:     "versioned",
 			Launch: catalog.LaunchConfig{Mode: "external"},
 			Registry: catalog.RegistryInfo{
@@ -188,32 +208,32 @@ func TestEnsureUpdatesOnRegistryVersionChange(t *testing.T) {
 			},
 		})
 		if err != nil {
-			t.Fatalf("Ensure(%s) error = %v", version, err)
+			t.Fatalf("installation of %s failed = %v", version, err)
 		}
 		got, err := os.ReadFile(agent.Launch.Command)
 		if err != nil {
 			t.Fatalf("read installed binary: %v", err)
 		}
-		return string(got), changed
+		return string(got)
 	}
 
-	if got, changed := ensure("1.0.0"); got != "v1" || !changed {
-		t.Fatalf("first install = %q changed=%v, want v1 installed", got, changed)
+	if got := ensure("1.0.0"); got != "v1" {
+		t.Fatalf("first install = %q, want v1", got)
 	}
 	body = "v2"
-	if got, changed := ensure("1.0.0"); got != "v1" || changed {
-		t.Fatalf("same version = %q changed=%v, want cached v1", got, changed)
+	if got := ensure("1.0.0"); got != "v1" {
+		t.Fatalf("same version = %q, want cached v1", got)
 	}
-	if got, changed := ensure("2.0.0"); got != "v2" || !changed {
-		t.Fatalf("new version = %q changed=%v, want v2 downloaded", got, changed)
+	if got := ensure("2.0.0"); got != "v2" {
+		t.Fatalf("new version = %q, want v2", got)
 	}
 	status = http.StatusInternalServerError
-	if got, changed := ensure("3.0.0"); got != "v2" || changed {
-		t.Fatalf("failed update = %q changed=%v, want installed v2 kept", got, changed)
+	if got := ensure("3.0.0"); got != "v2" {
+		t.Fatalf("failed update = %q, want installed v2 kept", got)
 	}
 }
 
-func TestEnsureRejectsUnsafeOrIncompleteArchives(t *testing.T) {
+func TestRegistryInstallRejectsUnsafeOrIncompleteArchives(t *testing.T) {
 	for _, tc := range []struct {
 		name, entry, link string
 		truncated         bool
@@ -261,8 +281,8 @@ func TestEnsureRejectsUnsafeOrIncompleteArchives(t *testing.T) {
 			managed := t.TempDir()
 			installer := New(slog.New(slog.NewTextHandler(io.Discard, nil)), managed, nil)
 			agent := catalog.Agent{ID: "agent", Launch: catalog.LaunchConfig{Mode: "external"}, Registry: catalog.RegistryInfo{CurrentBinaryPath: "agent", CurrentBinaryArchiveURL: server.URL + "/agent.tar.gz"}}
-			if _, _, err := installer.Ensure(context.Background(), agent); err == nil {
-				t.Fatal("Ensure succeeded for unsafe or incomplete archive")
+			if _, err := awaitBinary(t, installer, agent); err == nil {
+				t.Fatal("installation succeeded for unsafe or incomplete archive")
 			}
 			entries, err := os.ReadDir(filepath.Join(managed, "agent"))
 			if err != nil {

@@ -49,8 +49,8 @@ Every connection creates a persistent gateway session with:
 > A **device may run multiple sessions for the same agent concurrently** — one
 > session per runtime/process — so a background chat (agent mid-turn, client
 > disconnected) can coexist with a foreground chat against a separate process of
-> the same agent. Every `POST /v1/agents/{agentId}/connect` launches a fresh
-> process and session. Per-session close stops that session's own process;
+> the same agent. Every successful `POST /v1/agents/{agentId}/connect` launches a
+> fresh process and session. Per-session close stops that session's own process;
 > per-agent stop closes every session for the agent. The supervisor never
 > auto-restarts a process: a crash is reported and the session is reclaimed.
 >
@@ -338,6 +338,10 @@ endpoint. No package reaches into another's snapshot state.
 ## Notes
 
 - Agent support comes from the ACP registry plus local helper adapters.
-- The gateway can auto-acquire managed binaries when supported, and installs npm-distributed agents once to launch them on bun or node directly instead of through `npm exec` (`internal/acquire/npm.go`, see [docs/configuration.md](configuration.md#npm-agents)).
+- The installer owns registry binary downloads for the daemon's lifetime.
+  Launch requests start or poll acquisition, and project listings use files
+  from completed installs. The installer stages downloads and extraction on
+  the managed filesystem and publishes each completed binary with a rename.
+- The gateway installs npm-distributed agents once to launch them on bun or node directly instead of through `npm exec` (`internal/acquire/npm.go`, see [docs/configuration.md](configuration.md#npm-agents)).
 - The Ferngeist Android app uses this service as its backend.
 - See [docs/api.md](api.md) for the full API surface, including session endpoints and push token registration.

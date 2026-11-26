@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/acquire"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/catalog"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/config"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/customagents"
@@ -2610,6 +2611,94 @@ func TestAgentConnectReturnsSessionIDAndAttachToken(t *testing.T) {
 	if len(connectResp.AttachToken) != 64 {
 		t.Fatalf("AttachToken = %q, want 64-char hex string", connectResp.AttachToken)
 	}
+}
+
+func TestColdRegistryConnectReportsRetryAndProgress(t *testing.T) {
+	downloadStopped := make(chan struct{}, 1)
+	artifact := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "10")
+		_, _ = io.WriteString(w, "12345") // Leave half the artifact pending.
+		if err := http.NewResponseController(w).Flush(); err != nil {
+			return
+		}
+		<-r.Context().Done()
+		select {
+		case downloadStopped <- struct{}{}:
+		default:
+		}
+	}))
+	t.Cleanup(artifact.Close)
+	server := newColdRegistryTestServer(t, artifact.URL+"/mock")
+	token := pairDevice(t, server)
+
+	check := func(ctx context.Context) int64 {
+		t.Helper()
+		req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/v1/agents/cold-registry-probe/connect", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		rec := httptest.NewRecorder()
+		server.Handler().ServeHTTP(rec, req)
+		var body struct {
+			Code          string `json:"code"`
+			BytesReceived int64  `json:"bytesReceived"`
+			BytesTotal    int64  `json:"bytesTotal"`
+		}
+		err := json.Unmarshal(rec.Body.Bytes(), &body)
+		if err != nil || rec.Code != http.StatusServiceUnavailable || body.Code != "agent_installing" ||
+			rec.Header().Get("Retry-After") != "2" {
+			t.Fatalf("connect status=%d headers=%v body=%s", rec.Code, rec.Header(), rec.Body)
+		}
+		if body.BytesReceived > 0 && (body.BytesReceived != 5 || body.BytesTotal != 10) {
+			t.Fatalf("progress = %d/%d, want 5/10", body.BytesReceived, body.BytesTotal)
+		}
+		return body.BytesReceived
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	check(ctx)
+	cancel()
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	deadline := time.After(2 * time.Second)
+	for check(t.Context()) == 0 {
+		select {
+		case <-tick.C:
+		case <-deadline:
+			t.Fatal("install made no progress after the first request was cancelled")
+		}
+	}
+
+	server.runtime.Close()
+	select {
+	case <-downloadStopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("closing the runtime left the download running")
+	}
+}
+
+func newColdRegistryTestServer(t *testing.T, artifactURL string) *Server {
+	t.Helper()
+	baseDir := t.TempDir()
+	registry := fakeCatalogRegistrySource{snapshot: acpregistry.Snapshot{
+		Version: "1.0.0",
+		Agents: map[string]acpregistry.AgentEntry{
+			"cold-registry-probe": {
+				ID:                "cold-registry-probe",
+				Version:           "1.0.0",
+				DistributionKinds: []string{"binary"},
+				CurrentBinary: &acpregistry.BinaryTarget{
+					CommandName: "ferngeist-cold-test-agent",
+					Command:     "mock",
+					ArchiveURL:  artifactURL,
+				},
+			},
+		},
+	}}
+	server := newTestServerWithBaseDirAndRegistry(baseDir, registry)
+	installer := acquire.New(server.logger, t.TempDir(), nil)
+	server.runtime = runtime.NewSupervisor(server.logger, baseDir, nil, installer)
+	t.Cleanup(server.runtime.Close)
+	attachTestSessionService(t, server)
+	return server
 }
 
 func TestAgentConnectLogsLaunchFailure(t *testing.T) {

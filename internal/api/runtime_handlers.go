@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/acquire"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/catalog"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/pairing"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/runtime"
@@ -49,6 +50,12 @@ type runtimeConnectResponse struct {
 	WebSocketPath string `json:"websocketPath"`
 	SessionID     string `json:"sessionId,omitempty"`
 	AttachToken   string `json:"attachToken,omitempty"`
+}
+
+type agentInstallingResponse struct {
+	errorResponse
+	BytesReceived int64 `json:"bytesReceived"`
+	BytesTotal    int64 `json:"bytesTotal,omitempty"`
 }
 
 // runtimeRestartRequest optionally carries environment variable overrides
@@ -176,7 +183,15 @@ func (s *Server) handleAgentConnect(w http.ResponseWriter, r *http.Request) {
 // writeAgentLaunchError maps the session service's launch failures onto the
 // agent-control HTTP contract.
 func (s *Server) writeAgentLaunchError(w http.ResponseWriter, agentID string, err error) {
+	var installing *acquire.AgentInstalling
 	switch {
+	case errors.As(err, &installing):
+		w.Header().Set("Retry-After", "2")
+		writeJSON(w, http.StatusServiceUnavailable, agentInstallingResponse{
+			errorResponse: errorResponse{Error: installing.Error(), Code: "agent_installing"},
+			BytesReceived: installing.BytesReceived,
+			BytesTotal:    installing.BytesTotal,
+		})
 	case errors.Is(err, runtime.ErrAgentNotDetected),
 		errors.Is(err, runtime.ErrUnsupportedLaunch),
 		errors.Is(err, runtime.ErrRemoteStartNotAllowed),

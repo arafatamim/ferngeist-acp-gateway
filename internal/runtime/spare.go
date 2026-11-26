@@ -132,7 +132,7 @@ func (s *Supervisor) Discard(proc *Process) {
 	s.mu.Unlock()
 }
 
-// Close stops every spare and keeps new ones from starting. Processes already
+// Close stops spare processes and registry binary installs. Processes already
 // handed out belong to their sessions and are left alone.
 func (s *Supervisor) Close() {
 	s.mu.Lock()
@@ -147,4 +147,7 @@ func (s *Supervisor) Close() {
 		}
 	}
 	s.sparesWG.Wait()
+	if s.installer != nil {
+		s.installer.Close()
+	}
 }

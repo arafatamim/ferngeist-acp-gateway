@@ -331,8 +331,8 @@ Base path: `/v1`
   - Starts the agent and creates the resilient gateway session that owns its
     process, then returns the WebSocket connection details. **Connecting starts
     the agent** — there is no separate start step, and every call launches a
-    fresh agent process (a new runtime), so opening an independent chat for the
-    same agent is just another connect.
+    fresh agent process (a new runtime) on success, so opening an independent
+    chat for the same agent is just another connect.
   - Requires `control` scope.
   - Response:
     ```json
@@ -358,7 +358,18 @@ Base path: `/v1`
     - `424` — agent executable not found (auto-install failed/unavailable)
     - `502` — the agent exited during startup; the message carries its exit
       error when there was one
-    - `503` — session service not available
+    - `503` with `code: "agent_installing"` — the gateway is installing the
+      agent's current registry binary or npm package in the background.
+      Retry the same request after the interval in `Retry-After` (seconds).
+      No session or runtime is created while installation is pending. The
+      error body includes `bytesReceived` and, when known, `bytesTotal`; npm
+      installs report `0` with no total. Download progress can reach the
+      total before extraction and installation finish. Cancelling a request
+      leaves the shared install running. After a failed binary install, the
+      gateway serves the previously installed version if available, or
+      returns a launch error. A failed npm install launches the agent
+      through `npm exec`. Later requests can retry the install.
+    - Other `503` responses indicate that the session service is unavailable.
 
 - `POST /v1/agents/{agentId}/stop`
   - Stops the agent for the calling device: every gateway session the device
@@ -467,7 +478,8 @@ through the CLI: `ferngeist-gateway agents add|list|update|rm`
     - `409` — runtime is not running, or it has no session to restart
     - `424` — agent executable not found (auto-install failed/unavailable)
     - `502` — the new agent exited during startup
-    - `503` — session service not available
+    - `503 agent_installing` — retry as for connect. Other `503` responses
+      indicate that the session service is unavailable.
 
 ### Workspace browsing
 
@@ -1152,7 +1164,9 @@ clean. Worktrees outlive the chats that use them: they are removed only on an ex
   - Authenticated with the device credential (bearer token), like `GET /v1/sessions`.
   - Each agent is started on the daemon's own environment, outside the
     device-owned session lifecycle: the process is not a runtime and never
-    counts against `MaxSessionsPerDevice`. The gateway never calls
+    counts against `MaxSessionsPerDevice`. Listing uses an already-installed
+    registry binary. A cold binary yields a `failed` line that directs the
+    client to connect to install it. The gateway never calls
     `authenticate`. At most 4 agents are listed at once across all requests,
     each within 10 s and 5 `session/list` pages. A listed agent's process stays
     warm for 3 min, each agent's line is cached for 10 s for every device, and

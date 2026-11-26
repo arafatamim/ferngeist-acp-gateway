@@ -46,52 +46,61 @@ func (i *Installer) SetJSRuntime(mode string) {
 // npm exec wrapper is a second node process that idles for the agent's whole
 // life (~108MB) and adds 0.3-1.2s to every launch.
 //
-// Until the install exists, EnsureNpm starts it in the background and returns
-// agent unchanged, so the first launch still goes through npm exec. Only
-// version-pinned packages (as the registry publishes them) are installed: an
-// unpinned spec would freeze on whatever version was current at install time.
-func (i *Installer) EnsureNpm(agent catalog.Agent) catalog.Agent {
+// Until the install exists, EnsureNpm starts it in the background. With
+// install it returns AgentInstalling so the client retries; without install,
+// or after the install failed, it returns agent unchanged to launch through
+// npm exec. Only version-pinned packages (as the registry publishes them) are
+// installed: an unpinned spec would freeze on whatever version was current at
+// install time.
+func (i *Installer) EnsureNpm(agent catalog.Agent, install bool) (catalog.Agent, error) {
 	spec := agent.Registry.NpxPackage
 	args := agent.Launch.Args
 	sep := slices.Index(args, "--")
 	if agent.Launch.Mode != "external" || agent.Launch.Command != "npm" || spec == "" ||
 		len(args) < 3 || args[0] != "exec" || sep < 0 || !slices.Contains(args[:sep], spec) {
-		return agent
+		return agent, nil
 	}
 	name, version, ok := splitPinnedNpmSpec(spec)
 	if !ok {
-		return agent
+		return agent, nil
 	}
 	i.mu.Lock()
 	mode := i.jsRuntime
 	i.mu.Unlock()
 	if mode == JSRuntimeNpm {
-		return agent
+		return agent, nil
 	}
 	runtimePath := lookupJSRuntime(mode)
 	dir := filepath.Join(i.managedDir, "npm", npmDirName(name, version))
 	script, err := npmBinScript(dir, name)
 	if err != nil {
-		if runtimePath != "" {
-			i.installNpmInBackground(agent.ID, spec, name, dir)
+		if runtimePath == "" {
+			return agent, nil
 		}
-		return agent
+		i.installNpmInBackground(agent.ID, spec, name, dir)
+		i.mu.Lock()
+		failed := i.npmFailed[dir]
+		i.mu.Unlock()
+		if install && !failed {
+			return agent, &AgentInstalling{}
+		}
+		return agent, nil
 	}
 	javascript, err := npmBinIsJavaScript(script)
 	if err != nil {
-		return agent
+		return agent, nil
 	}
 	if !javascript {
 		agent.Launch.Command = script
 		agent.Launch.Args = args[sep+1:]
-		return agent
+		return agent, nil
 	}
 	if runtimePath == "" {
-		return agent
+		return agent, nil
 	}
 	agent.Launch.Command = runtimePath
 	agent.Launch.Args = append([]string{script}, args[sep+1:]...)
-	return agent
+	return agent, nil
 }
 
 // npmBinIsJavaScript follows npm bin symlinks and recognizes executable binaries
@@ -177,12 +186,16 @@ func (i *Installer) installNpmInBackground(agentID, spec, name, dir string) {
 	i.mu.Unlock()
 
 	go func() {
-		defer func() {
-			i.mu.Lock()
-			delete(i.npmInstalling, dir)
-			i.mu.Unlock()
-		}()
-		if err := installNpmPackage(spec, name, dir); err != nil {
+		err := installNpmPackage(spec, name, dir)
+		i.mu.Lock()
+		delete(i.npmInstalling, dir)
+		if i.npmFailed == nil {
+			i.npmFailed = make(map[string]bool)
+		}
+		// A failed install falls back to npm exec so the agent stays launchable.
+		i.npmFailed[dir] = err != nil
+		i.mu.Unlock()
+		if err != nil {
 			i.logger.Warn("npm agent install failed; launching through npm exec",
 				"agent_id", agentID, "package", spec, "error", err)
 			return
@@ -222,8 +235,8 @@ func npmBinScript(dir, name string) (string, error) {
 	return binScriptIn(dir, name)
 }
 
-// binScriptIn picks the script npm exec would run for name: its only bin, or
-// the bin named after the package.
+// binScriptIn picks the script npm exec would run for name: the bin named
+// after the package, or the executable shared by all bin entries.
 func binScriptIn(dir, name string) (string, error) {
 	pkgDir := filepath.Join(dir, "node_modules", filepath.FromSlash(name))
 	raw, err := os.ReadFile(filepath.Join(pkgDir, "package.json"))
@@ -242,13 +255,7 @@ func binScriptIn(dir, name string) (string, error) {
 		if err := json.Unmarshal(manifest.Bin, &bins); err != nil {
 			return "", fmt.Errorf("%s has no bin", name)
 		}
-		if len(bins) == 1 {
-			for _, v := range bins {
-				rel = v
-			}
-		} else {
-			rel = bins[path.Base(name)]
-		}
+		rel = npmBinTarget(name, bins)
 	}
 	if rel == "" {
 		return "", errors.New("no bin matches " + name)
@@ -258,6 +265,20 @@ func binScriptIn(dir, name string) (string, error) {
 		return "", err
 	}
 	return script, nil
+}
+
+func npmBinTarget(name string, bins map[string]string) string {
+	if target := bins[path.Base(name)]; target != "" {
+		return target
+	}
+	var target string
+	for _, candidate := range bins {
+		if candidate == "" || (target != "" && target != candidate) {
+			return ""
+		}
+		target = candidate
+	}
+	return target
 }
 
 // splitPinnedNpmSpec splits "@scope/pkg@1.2.3" into name and exact version. A

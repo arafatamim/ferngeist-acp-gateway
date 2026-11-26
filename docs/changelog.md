@@ -43,6 +43,16 @@ against the code.
 
 ## Unreleased
 
+- [additive] Cold registry binary launches return `503 agent_installing` with
+  `Retry-After` and download progress while the gateway installs the binary.
+  Clients can retry the launch after the indicated interval. (2026-11-26)
+- [semantic] A cold npm agent install also returns `503 agent_installing`
+  on connect instead of launching through `npm exec`. A failed install still
+  falls back to `npm exec`. (2026-11-26)
+- [semantic] Project listings use installed registry binaries and report a
+  cold registry binary as unavailable for listing until a connect installs
+  it. (2026-11-26)
+
 - [additive] The agent catalog includes Jcode, detected on PATH. (2026-11-22)
 
 - [semantic] The default per-device session limit is seven across all agents.

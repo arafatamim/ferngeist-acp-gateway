@@ -2,6 +2,7 @@ package acquire
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -87,18 +88,49 @@ func TestEnsureNpmInstallsThenLaunchesDirectly(t *testing.T) {
 			i := newNpmInstaller(t, tc.mode)
 			agent := fakeNpmAgent(fakeSpec)
 
-			// First launch: still npm exec while the install runs.
-			if got := i.EnsureNpm(agent); got.Launch.Command != "npm" {
-				t.Fatalf("first launch = %q, want npm exec until installed", got.Launch.Command)
+			// A connect waits for the install; a listing keeps npm exec meanwhile.
+			var installing *AgentInstalling
+			if _, err := i.EnsureNpm(agent, true); !errors.As(err, &installing) {
+				t.Fatalf("first connect error = %v, want installing", err)
+			}
+			if got, err := i.EnsureNpm(agent, false); err != nil || got.Launch.Command != "npm" {
+				t.Fatalf("listing launch = %q, %v, want npm exec until installed", got.Launch.Command, err)
 			}
 			waitNpmInstalls(t, i)
 
-			got := i.EnsureNpm(agent)
+			got, _ := i.EnsureNpm(agent, true)
 			script := filepath.Join(i.managedDir, "npm", "@acme+agent@1.2.3", "node_modules", "@acme", "agent", "dist", "cli.js")
 			if got.Launch.Command != filepath.Join(bin, tc.want) || !slices.Equal(got.Launch.Args, []string{script, "--acp"}) {
 				t.Fatalf("launch = %q %q, want %s %q", got.Launch.Command, got.Launch.Args, tc.want, []string{script, "--acp"})
 			}
 		})
+	}
+}
+
+func TestEnsureNpmLaunchesThroughSharedBinAliases(t *testing.T) {
+	bin := fakePath(t, "node")
+	npm := `#!/bin/sh
+pkg="$3/node_modules/@kilocode/cli"
+command -p mkdir -p "$pkg/bin" && printf '{"bin":{"kilo":"bin/kilo","kilocode":"bin/kilo"}}' > "$pkg/package.json" && printf '#!/usr/bin/env node\n' > "$pkg/bin/kilo"
+`
+	if err := os.WriteFile(filepath.Join(bin, "npm"), []byte(npm), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	i := newNpmInstaller(t, JSRuntimeNode)
+	agent := fakeNpmAgent("@kilocode/cli@7.8.32")
+	agent.ID = "kilo"
+
+	_, err := i.EnsureNpm(agent, true)
+	var installing *AgentInstalling
+	if err != nil && !errors.As(err, &installing) {
+		t.Fatalf("first connect error = %v", err)
+	}
+	waitNpmInstalls(t, i)
+	got, err := i.EnsureNpm(agent, true)
+	waitNpmInstalls(t, i)
+	script := filepath.Join(i.managedDir, "npm", "@kilocode+cli@7.8.32", "node_modules", "@kilocode", "cli", "bin", "kilo")
+	if err != nil || got.Launch.Command != filepath.Join(bin, "node") || !slices.Equal(got.Launch.Args, []string{script, "--acp"}) {
+		t.Fatalf("launch = %q %q, %v; want direct execution of %q", got.Launch.Command, got.Launch.Args, err, script)
 	}
 }
 
@@ -117,8 +149,8 @@ func TestEnsureNpmKeepsNpmExec(t *testing.T) {
 			fakePath(t, tc.path...)
 			i := newNpmInstaller(t, tc.mode)
 			agent := fakeNpmAgent(tc.spec)
-			if got := i.EnsureNpm(agent); got.Launch.Command != "npm" {
-				t.Fatalf("launch = %q, want npm exec", got.Launch.Command)
+			if got, err := i.EnsureNpm(agent, true); err != nil || got.Launch.Command != "npm" {
+				t.Fatalf("launch = %q, %v, want npm exec", got.Launch.Command, err)
 			}
 			waitNpmInstalls(t, i)
 			if _, err := os.Stat(filepath.Join(i.managedDir, "npm")); err == nil {
@@ -126,6 +158,24 @@ func TestEnsureNpmKeepsNpmExec(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestEnsureNpmFallsBackToNpmExecAfterFailedInstall(t *testing.T) {
+	bin := fakePath(t, "bun")
+	if err := os.WriteFile(filepath.Join(bin, "npm"), []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	i := newNpmInstaller(t, JSRuntimeAuto)
+	agent := fakeNpmAgent(fakeSpec)
+	var installing *AgentInstalling
+	if _, err := i.EnsureNpm(agent, true); !errors.As(err, &installing) {
+		t.Fatalf("first connect error = %v, want installing", err)
+	}
+	waitNpmInstalls(t, i)
+	if got, err := i.EnsureNpm(agent, true); err != nil || got.Launch.Command != "npm" {
+		t.Fatalf("after failed install = %q, %v, want npm exec", got.Launch.Command, err)
+	}
+	waitNpmInstalls(t, i) // the fallback launch retries the install
 }
 
 func TestPruneNpmKeepsNewestCompleteInstall(t *testing.T) {
@@ -207,8 +257,8 @@ func TestEnsureNpmLaunchesNativeBinsDirectly(t *testing.T) {
 			}
 			agent := fakeNpmAgent(fakeSpec)
 			agent.Launch.Args[len(agent.Launch.Args)-1] = "-test.run=^$"
-			got := i.EnsureNpm(agent)
-			if got.Launch.Command != path || !slices.Equal(got.Launch.Args, []string{"-test.run=^$"}) {
+			got, err := i.EnsureNpm(agent, true)
+			if err != nil || got.Launch.Command != path || !slices.Equal(got.Launch.Args, []string{"-test.run=^$"}) {
 				t.Fatalf("launch = %q %q, want native %q (runtime %q)", got.Launch.Command, got.Launch.Args, path, bin)
 			}
 			out, err := exec.Command(got.Launch.Command, got.Launch.Args...).CombinedOutput()

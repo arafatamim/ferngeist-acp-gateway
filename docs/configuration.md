@@ -80,10 +80,11 @@ for the agent's whole life and re-checks the package on every launch. Measured
 on claude-acp: an idle agent drops from 227 MB to 119 MB on node and 74 MB on
 bun, and it answers `initialize` in ~110–200 ms instead of 0.4–1.4 s.
 
-- The first launch of a new agent version still goes through `npm exec` while
-  the gateway runs `npm install` in the background; later launches use the
-  install. A failed install is logged and the agent keeps launching through
-  `npm exec`.
+- For a new agent version the gateway runs `npm install` in the background.
+  Until it finishes, connect returns `503 agent_installing` (see
+  [api.md](api.md)) and project listing launches through `npm exec`. A failed
+  install is logged, and the agent launches through `npm exec` while later
+  launches retry the install.
 - Only exact-version packages are installed (the registry pins versions). On
   startup the daemon removes all but the newest install of each package and any
   install that was interrupted.

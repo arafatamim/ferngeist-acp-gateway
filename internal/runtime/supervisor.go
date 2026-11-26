@@ -306,7 +306,7 @@ func NewSupervisor(logger *slog.Logger, baseDir string, store *storage.SQLiteSto
 // owns the returned process. envOverrides are merged over the daemon
 // environment and the agent's harness profile defaults.
 func (s *Supervisor) Launch(agent catalog.Agent, envOverrides map[string]string) (*Process, error) {
-	prepared, err := s.prepareAgent(agent)
+	prepared, err := s.prepareAgent(agent, true)
 	if err != nil {
 		return nil, err
 	}
@@ -328,9 +328,10 @@ func (s *Supervisor) Launch(agent catalog.Agent, envOverrides map[string]string)
 // Spawn starts a fresh process of agent on the daemon environment plus the
 // agent's harness profile defaults. It is never tracked as a runtime and never
 // claims or refills a spare, for short-lived callers outside the session
-// lifecycle. The caller stops it with Discard.
+// lifecycle. Registry binaries must already be installed. The caller stops
+// the process with Discard.
 func (s *Supervisor) Spawn(agent catalog.Agent) (*Process, error) {
-	prepared, err := s.prepareAgent(agent)
+	prepared, err := s.prepareAgent(agent, false)
 	if err != nil {
 		return nil, err
 	}
@@ -338,23 +339,16 @@ func (s *Supervisor) Spawn(agent catalog.Agent) (*Process, error) {
 }
 
 // prepareAgent applies auto-acquisition and validates launch prerequisites,
-// returning the agent ready to launch.
-func (s *Supervisor) prepareAgent(agent catalog.Agent) (catalog.Agent, error) {
-	// Ensure agent is available - try auto-install if installer is configured
-	if !agent.Detected {
-		if s.installer != nil {
-			acquiredAgent, _, err := s.installer.Ensure(context.Background(), agent)
-			if err != nil {
-				return catalog.Agent{}, err
-			}
-			agent = acquiredAgent
+// returning the agent ready to launch or a reason to retry.
+func (s *Supervisor) prepareAgent(agent catalog.Agent, install bool) (catalog.Agent, error) {
+	// Try auto-install only for an agent allowed to launch without a local executable.
+	if s.installer != nil && !agent.Detected && agent.Security.AllowsRemoteStart {
+		var err error
+		agent, err = s.installer.ResolveBinary(context.Background(), agent, install)
+		if err != nil {
+			return catalog.Agent{}, err
 		}
 	}
-	if s.installer != nil {
-		agent = s.installer.EnsureNpm(agent)
-	}
-
-	// Validate all prerequisites before attempting launch
 	if !agent.Detected {
 		return catalog.Agent{}, ErrAgentNotDetected
 	}
@@ -363,6 +357,9 @@ func (s *Supervisor) prepareAgent(agent catalog.Agent) (catalog.Agent, error) {
 	}
 	if agent.Launch.Mode != "process" && agent.Launch.Mode != "external" {
 		return catalog.Agent{}, ErrUnsupportedLaunch
+	}
+	if s.installer != nil {
+		return s.installer.EnsureNpm(agent, install)
 	}
 	return agent, nil
 }

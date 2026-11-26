@@ -20,6 +20,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -328,40 +329,117 @@ func TestLaunchSupportsExternalStdioRuntime(t *testing.T) {
 	}
 }
 
-func TestLaunchAutoAcquiresMissingExternalBinary(t *testing.T) {
-	sourceDir := t.TempDir()
-	sourcePath := filepath.Join(sourceDir, namedBinary("mock-stdio-agent"))
-	buildMockStdioAgent(t, sourcePath)
+func TestRegistryLaunchRetriesWhileBinaryDownloads(t *testing.T) {
+	supervisor, agent, requested, releaseDownload := heldRegistryArtifact(t)
 
-	server := httptest.NewServer(http.FileServer(http.Dir(sourceDir)))
-	defer server.Close()
+	pending := make(chan error, 1)
+	go func() {
+		proc, err := supervisor.Launch(agent, nil)
+		if proc != nil {
+			_ = proc.Stop(2 * time.Second) // Reclaim any unexpected launch on failure.
+		}
+		pending <- err
+	}()
+	select {
+	case err := <-pending:
+		var installing *acquire.AgentInstalling
+		if !errors.As(err, &installing) {
+			t.Fatalf("Launch error = %v, want installing", err)
+		}
+	case <-time.After(2 * time.Second):
+		releaseDownload()
+		<-pending
+		t.Fatal("Launch blocked on the artifact download")
+	}
+	select {
+	case <-requested:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Launch did not start downloading the artifact")
+	}
+
+	assertRegistryDownloadPending(t, supervisor, agent)
+	if proc, err := supervisor.Launch(agent, nil); proc != nil {
+		_ = proc.Stop(2 * time.Second) // Reclaim any unexpected launch on failure.
+		t.Fatal("retry launched an agent before the download finished")
+	} else {
+		var installing *acquire.AgentInstalling
+		if !errors.As(err, &installing) {
+			t.Fatalf("retry error = %v, want installing", err)
+		}
+	}
+	releaseDownload()
+	waitForRegistryLaunch(t, supervisor, agent)
+	if len(requested) != 0 {
+		t.Fatal("retries started redundant artifact downloads")
+	}
+}
+
+func heldRegistryArtifact(t *testing.T) (*Supervisor, catalog.Agent, <-chan struct{}, func()) {
+	t.Helper()
+	sourceDir := t.TempDir()
+	binary := namedBinary("mock-stdio-agent")
+	buildMockStdioAgent(t, filepath.Join(sourceDir, binary))
+	release := make(chan struct{})
+	requested := make(chan struct{}, 4)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requested <- struct{}{}
+		select {
+		case <-release:
+			http.ServeFile(w, r, filepath.Join(sourceDir, binary))
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(server.Close)
+	releaseDownload := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(releaseDownload)
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	installer := acquire.New(logger, t.TempDir(), nil)
-	supervisor := NewSupervisor(logger, t.TempDir(), nil, installer)
-
-	proc, err := supervisor.Launch(catalog.Agent{
-		ID:          "codex-acp",
-		DisplayName: "Codex ACP",
-		Detected:    false,
-		Protocol:    "acp",
-		Security:    catalog.SecurityConfig{CuratedLaunch: true, AllowsRemoteStart: true},
-		Launch: catalog.LaunchConfig{
-			Mode:    "external",
-			Command: "codex-acp",
-		},
+	supervisor := NewSupervisor(logger, t.TempDir(), nil, acquire.New(logger, t.TempDir(), nil))
+	t.Cleanup(supervisor.Close)
+	agent := catalog.Agent{
+		ID:       "codex-acp",
+		Security: catalog.SecurityConfig{AllowsRemoteStart: true},
+		Launch:   catalog.LaunchConfig{Mode: "external", Command: "codex-acp"},
 		Registry: catalog.RegistryInfo{
-			CurrentBinaryPath:       namedBinary("mock-stdio-agent"),
-			CurrentBinaryArchiveURL: server.URL + "/" + namedBinary("mock-stdio-agent"),
+			Version:                 "1.0.0",
+			CurrentBinaryPath:       binary,
+			CurrentBinaryArchiveURL: server.URL + "/" + binary,
 		},
-	}, nil)
-	if err != nil {
-		t.Fatalf("Launch() error = %v", err)
 	}
-	defer func() { _ = proc.Stop(2 * time.Second) }()
 
-	if proc.Runtime.Status != StatusRunning {
-		t.Fatalf("Status = %q, want %q", proc.Runtime.Status, StatusRunning)
+	return supervisor, agent, requested, releaseDownload
+}
+
+func assertRegistryDownloadPending(t *testing.T, supervisor *Supervisor, agent catalog.Agent) {
+	t.Helper()
+	if proc, err := supervisor.Spawn(agent); err == nil {
+		supervisor.Discard(proc)
+		t.Fatal("Spawn used an incomplete download")
+	}
+	if len(supervisor.List()) != 0 {
+		t.Fatal("pending install created a tracked runtime")
+	}
+}
+
+func waitForRegistryLaunch(t *testing.T, supervisor *Supervisor, agent catalog.Agent) {
+	t.Helper()
+	deadline := time.After(5 * time.Second)
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		proc, err := supervisor.Launch(agent, nil)
+		if err == nil {
+			defer func() { _ = proc.Stop(2 * time.Second) }() // Clean up the test process.
+			if proc.Runtime.Status != StatusRunning {
+				t.Fatalf("Status = %q, want %q", proc.Runtime.Status, StatusRunning)
+			}
+			return
+		}
+		select {
+		case <-tick.C:
+		case <-deadline:
+			t.Fatalf("Launch after download: %v", err)
+		}
 	}
 }
 
