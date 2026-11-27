@@ -4,6 +4,7 @@ package service
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +12,17 @@ import (
 	"syscall"
 	"testing"
 )
+
+func TestMain(m *testing.M) {
+	if handled, err := RunOpenRCStateWorker(os.Args[1:], os.Stdin, os.Stdout); handled {
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+	os.Exit(m.Run())
+}
 
 // TestOpenRCManagerSelectedByInitSystem verifies the runtime dispatch: Linux
 // cannot split init systems by build tag, so detection at NewManager time is
@@ -59,23 +71,40 @@ func TestOpenRCInstallWithoutSUDOUserFails(t *testing.T) {
 func seedOpenRCRoot(t *testing.T, home string) openrcAccount {
 	t.Helper()
 
-	prevUID, prevLookup, prevEtc := effectiveUID, openrcUserLookup, openrcEtcDir
+	prevUID, prevLookup, prevEtc, prevState := effectiveUID, openrcUserLookup, openrcEtcDir, runOpenRCState
 	effectiveUID = func() int { return 0 }
 	uid, gid := os.Getuid(), os.Getgid()
 	if uid == 0 {
-		uid = 65534
+		uid, gid = 65534, 65534
 	}
 	openrcUserLookup = func(name string) (openrcAccount, error) {
 		return openrcAccount{name: name, home: home, uid: uid, gid: gid}, nil
 	}
 	t.Cleanup(func() {
 		effectiveUID, openrcUserLookup, openrcEtcDir = prevUID, prevLookup, prevEtc
+		runOpenRCState = prevState
 	})
 
 	openrcEtcDir = t.TempDir()
 	t.Setenv("SUDO_USER", "gateway-user")
 
 	seedServiceBinarySource(t)
+	runOpenRCState = func(account openrcAccount, req openrcStateRequest) (openrcStateResult, error) {
+		req.Home, req.UID = account.home, account.uid
+		var binary *os.File
+		if req.needsBinary() {
+			path, err := installCopySource()
+			if err != nil {
+				return openrcStateResult{}, err
+			}
+			binary, err = os.Open(path)
+			if err != nil {
+				return openrcStateResult{}, err
+			}
+			defer binary.Close()
+		}
+		return applyOpenRCState(req, binary)
+	}
 
 	return openrcAccount{name: "gateway-user", home: home, uid: uid, gid: gid}
 }
@@ -251,6 +280,75 @@ func TestOpenRCFailedFirstInstallDoesNotPublishService(t *testing.T) {
 	if err != nil || status.Installed {
 		t.Fatalf("Status after failed first install = %+v, %v, want uninstalled", status, err)
 	}
+}
+
+func TestOpenRCFailedInstallLeavesStateOwnedByServiceAccount(t *testing.T) {
+	account := seedPrivilegedOpenRCStateTest(t)
+	paths := linuxPathsForHome(account.home)
+	if err := os.MkdirAll(paths.configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for dir := paths.configDir; dir != account.home; dir = filepath.Dir(dir) {
+		if err := os.Chown(dir, account.uid, account.gid); err != nil {
+			t.Fatal(err)
+		}
+	}
+	optionsFile := filepath.Join(paths.configDir, installOptionsFile)
+	writeOpenRCFixture(t, optionsFile, "invalid install options")
+	if err := os.Chown(optionsFile, account.uid, account.gid); err != nil {
+		t.Fatal(err)
+	}
+
+	err := (&openrcManager{}).Install(InstallOptions{})
+	if err == nil || !strings.Contains(err.Error(), "decode install options") {
+		t.Fatalf("Install() = %v, want the saved options error", err)
+	}
+	for _, path := range []string{paths.binDir, paths.binaryPath, paths.logDir} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if stat := info.Sys().(*syscall.Stat_t); stat.Uid != uint32(account.uid) || stat.Gid != uint32(account.gid) {
+			t.Errorf("%s owner = %d:%d, want %d:%d", path, stat.Uid, stat.Gid, account.uid, account.gid)
+		}
+	}
+}
+
+func TestOpenRCStateWorkerRetainsSettingsAndPurgesAsServiceAccount(t *testing.T) {
+	account := seedPrivilegedOpenRCStateTest(t)
+	manager := &openrcManager{}
+	want := InstallOptions{Host: "127.0.0.1", Port: 7001}
+	if err := manager.Install(want); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := manager.SavedInstallOptions(); !ok || got.Host != want.Host || got.Port != want.Port {
+		t.Fatalf("saved options = %+v, %t, want host %s and port %d", got, ok, want.Host, want.Port)
+	}
+	rootDir := linuxPathsForHome(account.home).rootDir
+	if err := manager.Uninstall(true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(rootDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("purged state directory: %v, want not found", err)
+	}
+}
+
+func seedPrivilegedOpenRCStateTest(t *testing.T) openrcAccount {
+	t.Helper()
+	if os.Geteuid() != 0 {
+		t.Skip("requires a root test process with permission to switch users")
+	}
+	home := t.TempDir()
+	account := seedOpenRCRoot(t, home)
+	runOpenRCState = execOpenRCState
+	newFakeOpenRC(t, nil, nil)
+	if err := os.Chmod(filepath.Dir(home), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chown(home, account.uid, account.gid); err != nil {
+		t.Fatal(err)
+	}
+	return account
 }
 
 func TestOpenRCFailedCopyLeavesExistingServiceRegistered(t *testing.T) {

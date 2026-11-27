@@ -37,6 +37,13 @@ func requireBuildVersion() {
 
 func main() {
 	requireBuildVersion()
+	if handled, err := service.RunOpenRCStateWorker(os.Args[1:], os.Stdin, os.Stdout); handled {
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	// Termux (Google Play build) prepends the binary's own path to os.Args
 	// via termux-exec's LD_PRELOAD shim (the SELinux workaround); os.Args
 	// arrives as [prog, prog, args...], which breaks subcommand dispatch in

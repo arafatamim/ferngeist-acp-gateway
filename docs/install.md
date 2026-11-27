@@ -209,7 +209,8 @@ with `supervise-daemon` (crash restarts, like the systemd unit's
 `Restart=on-failure`) and runs it as the sudoing user, with state in that
 user's `~/.local/share/ferngeist-gateway` — the same layout as the systemd
 install, and no linger step is needed because the service is enabled in the
-`default` runlevel. `daemon uninstall`, `start`, `stop`, and `restart` also
+`default` runlevel. Install and purge operate on the state directory as the
+service account. `daemon uninstall`, `start`, `stop`, and `restart` also
 require sudo on these hosts, and so does `update` once the service is
 installed — it stops the service to replace its binary, and it replaces the
 *sudoing* user's copy, not root's.

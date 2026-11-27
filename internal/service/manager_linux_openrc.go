@@ -82,11 +82,6 @@ const openrcCommandArgs = `-c 'uid=$(command -p id -u) || exit; [ "$uid" = "$1" 
 
 type openrcManager struct{}
 
-type openrcInstallState struct {
-	stopped     bool
-	binaryReady bool
-}
-
 // effectiveUID and openrcUserLookup are real work with test overrides (the
 // same pattern as installCopySource): tests cannot drop privileges or conjure
 // a passwd entry, so they replace both.
@@ -96,10 +91,11 @@ var (
 )
 
 type openrcAccount struct {
-	name string
-	home string
-	uid  int
-	gid  int
+	name   string
+	home   string
+	uid    int
+	gid    int
+	groups []uint32
 }
 
 func lookupSystemUser(name string) (openrcAccount, error) {
@@ -115,7 +111,19 @@ func lookupSystemUser(name string) (openrcAccount, error) {
 	if err != nil {
 		return openrcAccount{}, fmt.Errorf("look up user %q: bad gid %q: %w", name, u.Gid, err)
 	}
-	return openrcAccount{name: u.Username, home: u.HomeDir, uid: uid, gid: gid}, nil
+	groupIDs, err := u.GroupIds()
+	if err != nil {
+		return openrcAccount{}, fmt.Errorf("look up groups for %q: %w", name, err)
+	}
+	groups := make([]uint32, 0, len(groupIDs))
+	for _, id := range groupIDs {
+		group, err := strconv.ParseUint(id, 10, 32)
+		if err != nil {
+			return openrcAccount{}, fmt.Errorf("look up groups for %q: %w", name, err)
+		}
+		groups = append(groups, uint32(group))
+	}
+	return openrcAccount{name: u.Username, home: u.HomeDir, uid: uid, gid: gid, groups: groups}, nil
 }
 
 // openrcTargetAccount resolves the account the daemon runs as: the sudoing
@@ -137,7 +145,7 @@ func openrcTargetAccount() (openrcAccount, error) {
 	if err != nil {
 		return openrcAccount{}, err
 	}
-	if account.uid == 0 {
+	if account.uid <= 0 {
 		return openrcAccount{}, fmt.Errorf("%w: the OpenRC service account must be non-root", ErrServiceUnsupportedConfig)
 	}
 	if numericUID, err := strconv.Atoi(account.name); err == nil && numericUID != account.uid {
@@ -200,89 +208,63 @@ func (m *openrcManager) Install(options InstallOptions) error {
 	}
 	paths := linuxPathsForHome(account.home)
 
-	if err := mkdirLinuxState(paths); err != nil {
-		return err
+	source, err := installCopySource()
+	if err != nil {
+		return fmt.Errorf("resolve current binary: %w", err)
 	}
+	stable, managed := stableExecutable(source)
+	if managed {
+		paths.execPath = stable
+	}
+	req := openrcStateRequest{Action: openrcStateInstall, Options: options, ManagedBinary: managed}
 	if err := os.MkdirAll(filepath.Dir(openrcScriptPath()), 0o755); err != nil {
 		return fmt.Errorf("create init script directory: %w", err)
 	}
-	state, err := m.stopForInstall(paths, account)
+	existing, err := m.stopForInstall(paths, account, &req)
 	if err != nil {
 		return err
 	}
 
-	if state.binaryReady {
-		err = writeLinuxServiceSettings(paths, options)
-	} else {
-		paths, err = writeLinuxServiceFiles(paths, options)
+	if _, err := runOpenRCState(account, req); err != nil {
+		return m.restoreStoppedService(existing, err)
 	}
-	if err != nil {
-		return m.restoreStoppedService(state.stopped, err)
-	}
-
-	// sudo created the whole state tree as root; the daemon runs as the
-	// account and writes its db, logs and managed binaries there.
-	if err := chownTree(paths.rootDir, account.uid, account.gid); err != nil {
-		return m.restoreStoppedService(state.stopped, fmt.Errorf("chown service data to %s: %w", account.name, err))
-	}
-	if !state.stopped {
+	if !existing {
 		if err := writeOpenRCScript(paths, account); err != nil {
 			return err
 		}
 	}
 
 	if err := m.rcUpdate("add", openrcServiceName, openrcRunlevel); err != nil {
-		return m.restoreStoppedService(state.stopped, err)
+		return m.restoreStoppedService(existing, err)
 	}
 	return m.rcService(openrcServiceName, "start")
 }
 
-func (m *openrcManager) stopForInstall(paths linuxPaths, account openrcAccount) (openrcInstallState, error) {
-	var state openrcInstallState
+func (m *openrcManager) stopForInstall(paths linuxPaths, account openrcAccount, install *openrcStateRequest) (bool, error) {
 	_, err := os.Lstat(openrcScriptPath())
 	if errors.Is(err, os.ErrNotExist) {
-		return state, nil
+		return false, nil
 	}
 	if err != nil {
-		return state, fmt.Errorf("read init script: %w", err)
+		return false, fmt.Errorf("read init script: %w", err)
 	}
-	source, err := installCopySource()
+	// A package-manager install may have no private binary. Prepare it as the
+	// service account before a failed copy could strand the existing service.
+	result, err := runOpenRCState(account, openrcStateRequest{
+		Action: openrcStatePrepare, ManagedBinary: install.ManagedBinary,
+	})
 	if err != nil {
-		return state, fmt.Errorf("resolve current binary: %w", err)
+		return false, err
 	}
-	if stable, ok := stableExecutable(source); ok {
-		paths.execPath = stable
-	} else {
-		state.binaryReady, err = prepareMissingOpenRCBinary(source, paths.binaryPath)
-		if err != nil {
-			return state, err
-		}
-	}
+	install.BinaryReady = result.BinaryReady
 
 	// Replace the old runscript before rc-service can load it, then stop
 	// the daemon before replacing the running binary (ETXTBSY).
 	if err := writeOpenRCScript(paths, account); err != nil {
-		return state, err
+		return false, err
 	}
 	if err := m.rcService("--ifexists", openrcServiceName, "stop"); err != nil {
-		return state, err
-	}
-	state.stopped = true
-	return state, nil
-}
-
-// A package-manager install may have no private binary. Prepare the incoming
-// copy before replacing the existing script so a failed copy cannot strand it.
-func prepareMissingOpenRCBinary(source, target string) (bool, error) {
-	_, err := os.Lstat(target)
-	if err == nil {
-		return false, nil
-	}
-	if !errors.Is(err, os.ErrNotExist) {
-		return false, fmt.Errorf("read service binary: %w", err)
-	}
-	if err := replaceFileAtomically(source, target, 0o755); err != nil {
-		return false, fmt.Errorf("write service binary: %w", err)
+		return false, err
 	}
 	return true, nil
 }
@@ -345,8 +327,7 @@ func (m *openrcManager) Uninstall(purge bool) error {
 	}
 
 	if purge {
-		paths := linuxPathsForHome(account.home)
-		if err := os.RemoveAll(paths.rootDir); err != nil {
+		if _, err := runOpenRCState(account, openrcStateRequest{Action: openrcStatePurge}); err != nil {
 			return fmt.Errorf("purge service data: %w", err)
 		}
 	}
@@ -424,6 +405,14 @@ func (m *openrcManager) Status() (Status, error) {
 }
 
 func (m *openrcManager) SavedInstallOptions() (InstallOptions, bool) {
+	if effectiveUID() == 0 {
+		account, err := openrcTargetAccount()
+		if err != nil {
+			return InstallOptions{}, false
+		}
+		result, err := runOpenRCState(account, openrcStateRequest{Action: openrcStateLoad})
+		return result.Options, err == nil
+	}
 	home, err := openrcHome()
 	if err != nil {
 		return InstallOptions{}, false
@@ -509,15 +498,4 @@ func (m *openrcManager) rcUpdateDel() error {
 func escapeShellQuoted(value string) string {
 	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`, "$", `\$`, "`", "\\`")
 	return r.Replace(value)
-}
-
-// chownTree hands the sudo-created state tree to the account the daemon runs
-// as, so its db, logs and managed binaries are writable without root.
-func chownTree(root string, uid, gid int) error {
-	return filepath.WalkDir(root, func(path string, _ os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		return os.Chown(path, uid, gid)
-	})
 }
