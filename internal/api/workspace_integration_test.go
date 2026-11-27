@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/pairing"
+	"github.com/arafatamim/ferngeist-acp-gateway/internal/projects"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/storage"
 	"github.com/arafatamim/ferngeist-acp-gateway/internal/workspace"
 	"github.com/coder/acp-go-sdk"
@@ -842,7 +843,7 @@ func TestWorkspaceFileListRequiresReadScope(t *testing.T) {
 	}
 }
 
-func TestProjectGitRejectsCredentialWithoutControlScope(t *testing.T) {
+func TestCheckoutRoutesRejectCredentialsWithoutControlScope(t *testing.T) {
 	baseDir := t.TempDir()
 	store, err := storage.Open(filepath.Join(baseDir, "pairings.db"))
 	if err != nil {
@@ -857,12 +858,21 @@ func TestProjectGitRejectsCredentialWithoutControlScope(t *testing.T) {
 		t.Fatal(err)
 	}
 	server := newTestServerWithStore(baseDir, store)
-	req := httptest.NewRequest(http.MethodGet, "/v1/projects/git/status", nil)
-	req.Header.Set("Authorization", "Bearer "+token)
-	rec := httptest.NewRecorder()
-	server.Handler().ServeHTTP(rec, req)
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want 403 before checkout lookup (body=%s)", rec.Code, rec.Body.String())
+	server.projects = projects.New(server.catalog, server.runtime, server.workspaceSvc)
+	t.Cleanup(server.projects.Close)
+	handler := server.Handler()
+	for _, path := range []string{"/v1/projects/git/status", "/v1/projects", "/v1/worktrees", "/v1/worktrees/wt_unknown"} {
+		t.Run(path, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, path, nil)
+			req.Header.Set("Authorization", "Bearer "+token)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			var response errorResponse
+			if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil ||
+				rec.Code != http.StatusForbidden || response.Code != "credential_scope" {
+				t.Fatalf("status = %d, want 403 credential_scope (body=%s)", rec.Code, rec.Body.String())
+			}
+		})
 	}
 }
 

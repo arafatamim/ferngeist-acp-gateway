@@ -26,7 +26,7 @@ const (
 // named agent, flushed as that agent's listing finishes, then the checkouts
 // line.
 func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireGatewayCredential(w, r); !ok {
+	if _, ok := s.requireHostAccess(w, r); !ok {
 		return
 	}
 	if s.projects == nil {

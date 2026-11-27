@@ -43,6 +43,10 @@ against the code.
 
 ## Unreleased
 
+- [semantic] `GET /v1/projects`, `GET /v1/worktrees` and
+  `GET /v1/worktrees/{worktreeId}` require both `read` and `control`, which
+  normal pairing already grants. (2026-11-27)
+
 - [semantic] Worktree creation returns `409` for a symlink or other
   non-directory at `.worktrees/`. Rollback checks ownership before removing
   a failed checkout or its branch. (2026-11-27)

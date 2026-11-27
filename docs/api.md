@@ -959,7 +959,8 @@ clean. Worktrees outlive the chats that use them: they are removed only on an ex
     - `422` — `repo` is not a git repository
 
 - `GET /v1/worktrees?repo=<absolute path>`
-  - Requires `read` scope.
+  - Requires `read` and `control` scopes. Git may run helpers from checkout
+    configuration while computing worktree status.
   - Lists every git worktree (`git worktree list`) of every repository the
     gateway knows: those of the worktrees it made, of running chats' working
     directories, and of earlier `repo` listings (until the gateway restarts).
@@ -969,8 +970,9 @@ clean. Worktrees outlive the chats that use them: they are removed only on an ex
     `/v1/worktrees/{worktreeId}` operation; their `id` is derived from the
     folder, so it stays the same across lists, and `ahead` counts from the
     repository's default branch.
-    The main checkout is never an entry. Errors: `400` for a relative `repo`,
-    `422` when `repo` is not a git repository.
+    The main checkout is never an entry. Errors include `400` for a relative
+    `repo`, `403` for a missing scope, and `422` when `repo` is not a git
+    repository.
   - Each entry has the create response shape plus `ahead` (commits
     on the branch since its merge-base with the base ref, falling back to
     `baseCommit`), `behind` (commits the base ref has gained since the fork,
@@ -994,9 +996,10 @@ clean. Worktrees outlive the chats that use them: they are removed only on an ex
     time a worktree is created or the server starts, not on this read.
 
 - `GET /v1/worktrees/{worktreeId}`
-  - Requires `read` scope.
+  - Requires `read` and `control` scopes.
   - Returns one worktree exactly as `GET /v1/worktrees` lists it, so a client
     can refresh a single card.
+  - `403` — missing scope.
   - `404` — unknown worktree, or its directory was deleted outside the gateway.
 
 - `DELETE /v1/worktrees/{worktreeId}?force=true`
@@ -1167,7 +1170,8 @@ clean. Worktrees outlive the chats that use them: they are removed only on an ex
     comma-separated list). Those paths are checked even after a daemon restart
     or agent failure, so the client can prune retained data. Relative paths,
     embedded NULs and malformed arrays are `400`.
-  - Authenticated with the device credential (bearer token), like `GET /v1/sessions`.
+  - Requires a device credential with `read` and `control` scopes. The
+    listing can launch agents and computes Git worktree status for checkouts.
   - Each agent is started on the daemon's own environment, outside the
     device-owned session lifecycle: the process is not a runtime and never
     counts against `MaxSessionsPerDevice`. Listing uses an already-installed
@@ -1218,6 +1222,7 @@ clean. Worktrees outlive the chats that use them: they are removed only on an ex
   - Error responses:
     - `400` — more than 64 agent IDs, or an invalid/oversized `repos` array
     - `401` — invalid or missing device credential
+    - `403` — missing scope
     - `404` — the gateway predates this endpoint
     - `503` — project listing not available
 

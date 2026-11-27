@@ -193,6 +193,8 @@ routes reject `cwd`, so selectors cannot silently override one another.
 
 - **Auth:** runtime file listing requires `read`. Project Git browsing also
   requires `control` because Git may execute helpers from checkout configuration.
+  `GET /v1/projects`, `GET /v1/worktrees` and `GET /v1/worktrees/{worktreeId}`
+  require both scopes because they compute Git worktree status.
 - **Git operations:** status and diff disable FSMonitor and optional index
   writes. Diff also disables external diff and text conversion. Historical
   file reads return raw blobs. Checkout Git metadata must come from a trusted

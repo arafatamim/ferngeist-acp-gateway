@@ -83,7 +83,7 @@ func (s *Server) handleWorktreeCreate(w http.ResponseWriter, r *http.Request) {
 // it, with its ahead/behind/dirty state; repo narrows it to one repository.
 // Worktrees whose directory was deleted are left out.
 func (s *Server) handleWorktreeList(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireGatewayScope(w, r, pairing.ScopeRead); !ok {
+	if _, ok := s.requireHostAccess(w, r); !ok {
 		return
 	}
 	statuses, err := s.workspaceSvc.List(r.Context(), r.URL.Query().Get("repo"))
@@ -118,7 +118,7 @@ func (s *Server) handleWorktreeRefs(w http.ResponseWriter, r *http.Request) {
 // Returns one worktree as the list shows it, so a client can refresh a single
 // card. 404 for an unknown worktree or one whose directory was deleted.
 func (s *Server) handleWorktreeGet(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireGatewayScope(w, r, pairing.ScopeRead); !ok {
+	if _, ok := s.requireHostAccess(w, r); !ok {
 		return
 	}
 	status, err := s.workspaceSvc.Get(r.Context(), r.PathValue("worktreeId"))
