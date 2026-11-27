@@ -5,6 +5,7 @@ package service
 import (
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"os/user"
@@ -93,8 +94,8 @@ var (
 type openrcAccount struct {
 	name   string
 	home   string
-	uid    int
-	gid    int
+	uid    uint32
+	gid    uint32
 	groups []uint32
 }
 
@@ -103,11 +104,11 @@ func lookupSystemUser(name string) (openrcAccount, error) {
 	if err != nil {
 		return openrcAccount{}, fmt.Errorf("look up user %q: %w", name, err)
 	}
-	uid, err := strconv.Atoi(u.Uid)
+	uid, err := parseOpenRCID(u.Uid)
 	if err != nil {
 		return openrcAccount{}, fmt.Errorf("look up user %q: bad uid %q: %w", name, u.Uid, err)
 	}
-	gid, err := strconv.Atoi(u.Gid)
+	gid, err := parseOpenRCID(u.Gid)
 	if err != nil {
 		return openrcAccount{}, fmt.Errorf("look up user %q: bad gid %q: %w", name, u.Gid, err)
 	}
@@ -117,13 +118,25 @@ func lookupSystemUser(name string) (openrcAccount, error) {
 	}
 	groups := make([]uint32, 0, len(groupIDs))
 	for _, id := range groupIDs {
-		group, err := strconv.ParseUint(id, 10, 32)
+		group, err := parseOpenRCID(id)
 		if err != nil {
 			return openrcAccount{}, fmt.Errorf("look up groups for %q: %w", name, err)
 		}
-		groups = append(groups, uint32(group))
+		groups = append(groups, group)
 	}
 	return openrcAccount{name: u.Username, home: u.HomeDir, uid: uid, gid: gid, groups: groups}, nil
+}
+
+func parseOpenRCID(id string) (uint32, error) {
+	value, err := strconv.ParseUint(id, 10, 32)
+	if err != nil {
+		return 0, err
+	}
+	// Linux reserves (uid_t)-1 and (gid_t)-1 for unchanged credentials.
+	if value == math.MaxUint32 {
+		return 0, errors.New("reserved Linux credential ID")
+	}
+	return uint32(value), nil
 }
 
 // openrcTargetAccount resolves the account the daemon runs as: the sudoing
@@ -145,10 +158,10 @@ func openrcTargetAccount() (openrcAccount, error) {
 	if err != nil {
 		return openrcAccount{}, err
 	}
-	if account.uid <= 0 {
+	if account.uid == 0 {
 		return openrcAccount{}, fmt.Errorf("%w: the OpenRC service account must be non-root", ErrServiceUnsupportedConfig)
 	}
-	if numericUID, err := strconv.Atoi(account.name); err == nil && numericUID != account.uid {
+	if numericUID, err := strconv.ParseInt(account.name, 10, 64); err == nil && numericUID != int64(account.uid) {
 		return openrcAccount{}, fmt.Errorf("%w: OpenRC interprets numeric account names as UIDs", ErrServiceUnsupportedConfig)
 	}
 	return account, nil

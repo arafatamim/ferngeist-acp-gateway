@@ -26,7 +26,7 @@ const (
 type openrcStateRequest struct {
 	Action        string
 	Home          string
-	UID           int
+	UID           uint32
 	Options       InstallOptions
 	ManagedBinary bool
 	BinaryReady   bool
@@ -53,7 +53,7 @@ func execOpenRCState(account openrcAccount, req openrcStateRequest) (openrcState
 	// or on PATH. Pass a descriptor to that same image for private installs.
 	cmd := exec.Command("/proc/self/exe", openrcStateWorkerArg)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{
-		Uid: uint32(account.uid), Gid: uint32(account.gid), Groups: account.groups,
+		Uid: account.uid, Gid: account.gid, Groups: account.groups,
 	}}
 	cmd.Dir = "/"
 	cmd.Env = []string{
@@ -94,7 +94,8 @@ func RunOpenRCStateWorker(args []string, in io.Reader, out io.Writer) (bool, err
 	if err := json.NewDecoder(in).Decode(&req); err != nil {
 		return true, fmt.Errorf("decode OpenRC state request: %w", err)
 	}
-	if req.UID <= 0 || req.UID != os.Getuid() || req.UID != os.Geteuid() || !filepath.IsAbs(req.Home) {
+	// Convert the kernel IDs back to unsigned values because Go exposes them as int.
+	if req.UID == 0 || req.UID != uint32(os.Getuid()) || req.UID != uint32(os.Geteuid()) || !filepath.IsAbs(req.Home) {
 		return true, errors.New("OpenRC state worker requires the non-root service account and its absolute home directory")
 	}
 	var binary *os.File

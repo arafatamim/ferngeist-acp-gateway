@@ -66,6 +66,35 @@ func TestOpenRCInstallWithoutSUDOUserFails(t *testing.T) {
 	}
 }
 
+func TestOpenRCAccountIDsFitLinuxCredentialRange(t *testing.T) {
+	tests := []struct {
+		name    string
+		id      string
+		want    uint32
+		invalid bool
+	}{
+		{name: "zero", id: "0", want: 0},
+		{name: "largest valid ID", id: "4294967294", want: 4294967294},
+		{name: "negative", id: "-1", invalid: true},
+		{name: "reserved", id: "4294967295", invalid: true},
+		{name: "out of range", id: "4294967296", invalid: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseOpenRCID(tt.id)
+			if tt.invalid {
+				if err == nil {
+					t.Fatalf("parseOpenRCID(%q) = %d, want an error", tt.id, got)
+				}
+				return
+			}
+			if err != nil || got != tt.want {
+				t.Fatalf("parseOpenRCID(%q) = %d, %v, want %d, nil", tt.id, got, err, tt.want)
+			}
+		})
+	}
+}
+
 // seedOpenRCRoot pins the account/root seams the way a real `sudo daemon
 // install` would look: root, a SUDO_USER, and an /etc redirected to a temp dir.
 func seedOpenRCRoot(t *testing.T, home string) openrcAccount {
@@ -73,7 +102,7 @@ func seedOpenRCRoot(t *testing.T, home string) openrcAccount {
 
 	prevUID, prevLookup, prevEtc, prevState := effectiveUID, openrcUserLookup, openrcEtcDir, runOpenRCState
 	effectiveUID = func() int { return 0 }
-	uid, gid := os.Getuid(), os.Getgid()
+	uid, gid := uint32(os.Getuid()), uint32(os.Getgid())
 	if uid == 0 {
 		uid, gid = 65534, 65534
 	}
@@ -289,13 +318,13 @@ func TestOpenRCFailedInstallLeavesStateOwnedByServiceAccount(t *testing.T) {
 		t.Fatal(err)
 	}
 	for dir := paths.configDir; dir != account.home; dir = filepath.Dir(dir) {
-		if err := os.Chown(dir, account.uid, account.gid); err != nil {
+		if err := os.Chown(dir, int(account.uid), int(account.gid)); err != nil {
 			t.Fatal(err)
 		}
 	}
 	optionsFile := filepath.Join(paths.configDir, installOptionsFile)
 	writeOpenRCFixture(t, optionsFile, "invalid install options")
-	if err := os.Chown(optionsFile, account.uid, account.gid); err != nil {
+	if err := os.Chown(optionsFile, int(account.uid), int(account.gid)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -308,7 +337,7 @@ func TestOpenRCFailedInstallLeavesStateOwnedByServiceAccount(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if stat := info.Sys().(*syscall.Stat_t); stat.Uid != uint32(account.uid) || stat.Gid != uint32(account.gid) {
+		if stat := info.Sys().(*syscall.Stat_t); stat.Uid != account.uid || stat.Gid != account.gid {
 			t.Errorf("%s owner = %d:%d, want %d:%d", path, stat.Uid, stat.Gid, account.uid, account.gid)
 		}
 	}
@@ -345,7 +374,7 @@ func seedPrivilegedOpenRCStateTest(t *testing.T) openrcAccount {
 	if err := os.Chmod(filepath.Dir(home), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chown(home, account.uid, account.gid); err != nil {
+	if err := os.Chown(home, int(account.uid), int(account.gid)); err != nil {
 		t.Fatal(err)
 	}
 	return account
